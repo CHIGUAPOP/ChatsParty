@@ -40,6 +40,9 @@ const api = {
     onState: (cb) => on('tts:state', cb),
     onError: (cb) => on('tts:error', cb),
     onSkip: (cb) => on('tts:skip', cb),
+    cacheInfo: () => ipcRenderer.invoke('tts:cache:info'),
+    cacheClear: () => ipcRenderer.invoke('tts:cache:clear'),
+    cachePrune: () => ipcRenderer.invoke('tts:cache:prune'),
   },
   voices: {
     search: (source, keyword, opts) => ipcRenderer.invoke('voices:search', source, keyword, opts),

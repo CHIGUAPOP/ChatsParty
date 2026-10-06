@@ -48,6 +48,12 @@ const DEFAULTS = {
     readSuperchat: true,
     readEnter: false,
     blockWords: '',
+    /**
+     * 合成缓存：同一套音色 + 同一句话只向服务请求一次。
+     * ttlMs 是「自从最后一次用到它」起算的保留时长 —— 每命中一次就刷新时间戳（滑动过期），
+     * 所以常说的话会被一直续期，冷下来的自然过期。默认 7 天，最多占 200 MB。
+     */
+    cache: { enabled: true, ttlMs: 7 * 24 * 60 * 60 * 1000, maxMB: 200 },
   },
   theme: {
     seed: '#6750A4',

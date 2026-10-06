@@ -13,6 +13,7 @@ const V = require('./voices.cjs')
 const L = require('./llm.cjs')
 const { shouldSpeakNow } = require('./speech-rules.cjs')
 const { createSpeechControl } = require('./speech-control.cjs')
+const { createTtsCache } = require('./tts-cache.cjs')
 const NCM = require('./netease.cjs')
 const net = require('./lib/net.cjs')
 const { normalizeKey, describeKey, keySummary, keyWarnings, keyShapeWarnings } = require('./lib/keytext.cjs')
@@ -43,6 +44,9 @@ const NCM_LOGIN_PARTITION = 'persist:ncm-login'
 // 播报队列和「跳过」状态机都在里面（electron/speech-control.cjs）
 const speech = createSpeechControl()
 let lastSpeakAt = 0
+/** TTS 结果缓存。bootstrap 里创建（要用到 userData 路径） */
+let ttsCache = null
+let cachePruneTimer = null
 
 /* ------------------------------ 点歌 ------------------------------ */
 // 队列放主进程：观众点歌是从弹幕来的，渲染进程可能根本没打开音乐页
@@ -1159,6 +1163,56 @@ function pumpSpeech() {
   })
 }
 
+/**
+ * 缓存策略来自配置，每次都现读 —— 用户在语音页改了时长/开关，下一次合成就生效，
+ * 不用重启。
+ * 注意：关掉开关**不会**顺带删磁盘上的旧缓存（只是不再读写），
+ * 想立刻腾空间要用「清空缓存」。
+ */
+function cachePolicy() {
+  const c = store.get().tts?.cache || {}
+  const ttlMs = Number(c.ttlMs) || 0
+  const maxMB = Number(c.maxMB) || 0
+  return {
+    enabled: c.enabled !== false,
+    // <=0 视为「不过期」，只有容量上限兜底
+    ttlMs: ttlMs > 0 ? ttlMs : 0,
+    maxBytes: maxMB > 0 ? maxMB * 1024 * 1024 : 0,
+    ttlMsRaw: ttlMs,
+    maxMBRaw: maxMB,
+  }
+}
+
+/** 按当前策略清一遍过期/超限条目。启动时和每 10 分钟各跑一次 */
+function pruneTtsCache() {
+  if (!ttsCache) return { removed: 0, bytes: 0 }
+  const p = cachePolicy()
+  return ttsCache.prune({ ttlMs: p.enabled ? p.ttlMs : 0, maxBytes: p.enabled ? p.maxBytes : 0 })
+}
+
+/**
+ * 带缓存的合成。三条会发声的路径（弹幕播报 / 语音测试 / 音色试听）都走这里。
+ * 返回 { base64, mime, cached } —— cached 只用于日志和排错，不影响播放逻辑。
+ */
+async function synthesizeWithCache(cfg, text, style) {
+  const p = cachePolicy()
+  const input = { cfg, text, style }
+  if (ttsCache && p.enabled) {
+    const hit = ttsCache.get(input)
+    if (hit) return { base64: hit.base64, mime: hit.mime, cached: true }
+  }
+  const audio = await synthesize(cfg, text, style)
+  // Fish 用兜底模型（一般是付费额度没了，自动降级到免费模型）出声时不缓存：
+  // 等平台恢复后同一个配置会出「正品」音频，缓存住旧的会让人以为一直没恢复。
+  const cachable = Boolean(ttsCache && p.enabled && audio?.base64 && !audio.fallback)
+  if (cachable) {
+    ttsCache.put(input, audio)
+    // 每新增一条就核一次配额，免得短时间内大量新句子把磁盘撑到上限之外
+    pruneTtsCache()
+  }
+  return { ...audio, cached: false }
+}
+
 async function runSpeech(item) {
   const t = store.get().tts || {}
   // 上一轮留下的跳过标记不该影响这一条
@@ -1178,7 +1232,7 @@ async function runSpeech(item) {
   try {
     // 有人绑了自己的音色就用他那份配置，否则回落全局默认
     const usedCfg = item.profile ? profileCfg(item.profile) : ttsCfg(t)
-    const audio = await synthesize(usedCfg, item.text, item.style)
+    const audio = await synthesizeWithCache(usedCfg, item.text, item.style)
     // 合成期间用户点了跳过 —— 这条就别播了（标记在这里消费掉，不会误伤下一条）
     if (speech.consumeSkip()) {
       send('tts:state', { state: 'idle' })
@@ -1320,7 +1374,7 @@ function registerIpc() {
   ipcMain.handle('tts:test', async () => {
     const t = store.get().tts || {}
     const started = Date.now()
-    const audio = await synthesize(
+    const audio = await synthesizeWithCache(
       ttsCfg(t),
       '语音播报测试成功，你现在可以听到我的声音了。',
       t.stylePrompt,
@@ -1689,7 +1743,7 @@ function registerIpc() {
     } else {
       throw new Error('要试听哪个音色？')
     }
-    const audio = await synthesize(synthCfg, '音色试听，大家好，我是你的新声音。', '').catch((e) => {
+    const audio = await synthesizeWithCache(synthCfg, '音色试听，大家好，我是你的新声音。', '').catch((e) => {
       // 试听失败是用户最需要线索的地方，落一份日志，省得只能看到界面上一句话
       log?.warn(
         '[voices:test] 失败',
@@ -1781,6 +1835,20 @@ function registerIpc() {
    * 「关于」页用。version 走 app.getVersion()：开发时读 package.json，
    * 打包后读 exe 的版本信息 —— 所以升级后不用改代码，数字自己跟着变。
    */
+  ipcMain.handle('tts:cache:info', () => ({
+    // 统计 + 当前策略一起返回，界面一次拿全，不用再读配置
+    ...(ttsCache ? ttsCache.stats() : { entries: 0, bytes: 0, hits: 0, putCount: 0 }),
+    ...cachePolicy(),
+  }))
+
+  ipcMain.handle('tts:cache:clear', () => {
+    const r = ttsCache ? ttsCache.clear() : { cleared: 0, bytes: 0 }
+    log?.info('[tts-cache] 手动清空', r.cleared, '条')
+    return { ok: true, ...r }
+  })
+
+  ipcMain.handle('tts:cache:prune', () => ({ ok: true, ...pruneTtsCache() }))
+
   ipcMain.handle('app:info', () => ({
     // app.getName() / getVersion() 在未打包时给的是 Electron 自己的名字和版本
     // （实测返回 "Electron" 与 "33.4.11"），显示出来会误导，所以统一读 package.json。
@@ -1955,6 +2023,15 @@ function bootstrap() {
   registerIpc()
   createWindow()
 
+  // TTS 缓存：同一套音色 + 同一句话只合成一次，TTL 内复用。
+  // 目录放在 userData 下（不在项目里），也不会被仓库/Git 带上。
+  ttsCache = createTtsCache({ dir: path.join(app.getPath('userData'), 'tts-cache'), logger: log })
+  if (ttsCache.stats().entries) log.info('[tts-cache] 已载入', ttsCache.stats().entries, '条')
+  // 启动时先清一遍：上次退出到现在的时长也算在内
+  pruneTtsCache()
+  cachePruneTimer = setInterval(pruneTtsCache, 10 * 60 * 1000)
+  if (typeof cachePruneTimer.unref === 'function') cachePruneTimer.unref()
+
   // 有存过的凭据就立刻验一次，顺带把登录状态推给界面，不用等用户点开连接页
   verifyStoredLogin()
 
@@ -2051,4 +2128,9 @@ app.on('window-all-closed', () => {
 app.on('before-quit', () => {
   stopLive()
   if (overlay) overlay.stop()
+  // 索引是节流写的，退出前补一次落盘，别把「这一轮命中过几次」丢了
+  if (cachePruneTimer) clearInterval(cachePruneTimer)
+  try {
+    ttsCache?.flush()
+  } catch {}
 })

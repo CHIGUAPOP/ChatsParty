@@ -1,6 +1,30 @@
 import React from 'react'
-import { api, AppConfig } from '../lib/api'
-import { Button, Card, Row, SectionTitle, Select, Slider, Switch, TextArea, TextField } from '../components/ui'
+import { api, AppConfig, TtsCacheInfo } from '../lib/api'
+import { Button, Card, Row, SectionTitle, Select, Slider, Switch, TextArea, TextField, useLiveSave } from '../components/ui'
+
+const MINUTE = 60_000
+const HOUR = 60 * MINUTE
+const DAY = 24 * HOUR
+
+/** ms → 「数字 + 单位」，优先还原成能整除的大单位，读起来最自然 */
+function splitDuration(ms: number) {
+  const v = Math.max(1, Number(ms) || 0)
+  if (v % DAY === 0) return { n: v / DAY, unit: 'day' }
+  if (v % HOUR === 0) return { n: v / HOUR, unit: 'hour' }
+  return { n: Math.max(1, Math.round(v / MINUTE)), unit: 'minute' }
+}
+
+function joinDuration(n: number, unit: string) {
+  const factor = unit === 'day' ? DAY : unit === 'hour' ? HOUR : MINUTE
+  const v = Number(n)
+  if (!Number.isFinite(v) || v <= 0) return DAY
+  return Math.round(v * factor)
+}
+
+function fmtBytes(b: number) {
+  const mb = Number(b || 0) / 1024 / 1024
+  return mb >= 1 ? `${mb.toFixed(2)} MB` : `${Math.round(Number(b || 0) / 1024)} KB`
+}
 
 interface Props {
   config: AppConfig
@@ -21,12 +45,22 @@ export default function VoicePage({ config, patch, notify }: Props) {
   const [state, setState] = React.useState('')
   const [liveVoices, setLiveVoices] = React.useState<any[]>([])
   const [loadingVoices, setLoadingVoices] = React.useState(false)
+  const [cacheInfo, setCacheInfo] = React.useState<TtsCacheInfo | null>(null)
+
+  const refreshCache = React.useCallback(async () => {
+    try {
+      setCacheInfo(await api.tts.cacheInfo())
+    } catch {
+      setCacheInfo(null)
+    }
+  }, [])
 
   React.useEffect(() => {
     api.tts.providers().then(setProviders)
+    refreshCache()
     const off = api.tts.onState((s) => setState(s.state === 'idle' ? '' : s.state))
     return off
-  }, [])
+  }, [refreshCache])
 
   const preset = providers[t.provider] || null
 
@@ -94,6 +128,42 @@ export default function VoicePage({ config, patch, notify }: Props) {
   }
 
   const set = (k: string, v: unknown) => patch({ tts: { [k]: v } })
+
+  /* ------------------------------ 合成缓存 ------------------------------ */
+  const cache = t.cache || { enabled: true, ttlMs: 7 * DAY, maxMB: 200 }
+  const [ttlUnit, setTtlUnit] = React.useState(() => splitDuration(Number(t.cache?.ttlMs) || 0).unit)
+
+  // 换算单位时保持总时长不变：7 天 → 单位切到小时，显示成 168
+  const ttlFactor = ttlUnit === 'day' ? DAY : ttlUnit === 'hour' ? HOUR : MINUTE
+  const ttlShown = Math.max(1, Math.round((Number(cache.ttlMs) || MINUTE) / ttlFactor))
+  const ttlDraft = useLiveSave(String(ttlShown), async (v) => {
+    await patchCache({ ttlMs: joinDuration(Number(v) || 1, ttlUnit) })
+  })
+
+  async function patchCache(p: Record<string, unknown>) {
+    await patch({ tts: { cache: p } })
+    refreshCache()
+  }
+
+  async function pruneCache() {
+    try {
+      const r = await api.tts.cachePrune()
+      notify(r.removed ? `已清理 ${r.removed} 条过期缓存` : '没有过期的缓存')
+    } catch (e: any) {
+      notify(String(e?.message || e), true)
+    }
+    refreshCache()
+  }
+
+  async function clearCache() {
+    try {
+      const r = await api.tts.cacheClear()
+      notify(`已清空 ${r.cleared} 条缓存，回收 ${fmtBytes(r.bytes)}`)
+    } catch (e: any) {
+      notify(String(e?.message || e), true)
+    }
+    refreshCache()
+  }
 
   const source = liveVoices.length ? liveVoices : preset?.voices || []
   const voiceOptions = source.map((v: any) => ({
@@ -318,6 +388,79 @@ export default function VoicePage({ config, patch, notify }: Props) {
             onChange={(v) => set('blockWords', v)}
             rows={2}
           />
+        </div>
+      </Card>
+
+      <SectionTitle>合成缓存</SectionTitle>
+      <Card
+        title="重复的话不再重复合成"
+        desc="同一套音色 + 同一句话，第一次生成后存到本机；保留时长内再遇到就直接播本地那份，不再向服务请求。每命中一次就刷新保存时间 —— 常说的话会一直续期，没人再说的话自然过期。"
+        actions={
+          <div className="row" style={{ gap: 8 }}>
+            <Button variant="text" small onClick={pruneCache} icon="refresh">
+              清理过期
+            </Button>
+            <Button variant="tonal" small onClick={clearCache} icon="delete">
+              清空
+            </Button>
+          </div>
+        }
+      >
+        <Row label="启用缓存" hint="关掉之后只不再读写，已存的文件要清空才会删">
+          <Switch value={cache.enabled !== false} onChange={(v) => patchCache({ enabled: v })} />
+        </Row>
+
+        <div className="grid" style={{ marginTop: 12 }}>
+          <TextField
+            label="保留时长"
+            value={ttlDraft.value}
+            onChange={ttlDraft.onChange}
+            onBlur={ttlDraft.onBlur}
+            mono
+          />
+          <Select
+            label="单位"
+            value={ttlUnit}
+            onChange={(v) => {
+              setTtlUnit(v)
+              patchCache({ ttlMs: joinDuration(Number(ttlDraft.value) || 1, v) })
+            }}
+            options={[
+              { value: 'minute', label: '分钟' },
+              { value: 'hour', label: '小时' },
+              { value: 'day', label: '天' },
+            ]}
+          />
+        </div>
+
+        <Row label={`容量上限 ${cache.maxMB || 0} MB`} hint="装满了从「最久没人说过」的那句开始删">
+          <div style={{ width: 200 }}>
+            <Slider
+              value={cache.maxMB || 0}
+              min={20}
+              max={1024}
+              step={20}
+              suffix=" MB"
+              onChange={(v) => patchCache({ maxMB: v })}
+            />
+          </div>
+        </Row>
+
+        <div className="tip" style={{ marginTop: 12 }}>
+          {cacheInfo ? (
+            <>
+              已存 <span className="mono">{cacheInfo.entries}</span> 条 · 占用{' '}
+              <span className="mono">{fmtBytes(cacheInfo.bytes)}</span> · 累计省下{' '}
+              <span className="mono">{cacheInfo.hits}</span> 次合成
+              {cacheInfo.putCount ? ` · 生成过 ${cacheInfo.putCount} 条` : ''}
+              {cacheInfo.enabled === false ? ' · 当前已停用' : ''}
+            </>
+          ) : (
+            '正在读取缓存状态…'
+          )}
+        </div>
+        <div className="row__hint" style={{ marginTop: 8 }}>
+          文件放在本机用户数据目录（{cacheInfo?.dir || 'userData/tts-cache'}），不会上传到任何地方。
         </div>
       </Card>
 

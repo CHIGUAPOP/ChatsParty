@@ -51,6 +51,8 @@ export interface AppConfig {
     readSuperchat: boolean
     readEnter: boolean
     blockWords: string
+    /** 合成缓存：同一套音色 + 同一句话只请求一次，TTL 内复用并刷新时间戳 */
+    cache: { enabled: boolean; ttlMs: number; maxMB: number }
   }
   theme: { seed: string; mode: 'light' | 'dark'; contrast: number; motion?: 'standard' | 'expressive' }
   overlay: {
@@ -268,6 +270,9 @@ interface Bridge {
     onState: (cb: (s: { state: string; text: string }) => void) => () => void
     onError: (cb: (e: { message: string; text: string }) => void) => () => void
     onSkip: (cb: () => void) => () => void
+    cacheInfo: () => Promise<TtsCacheInfo>
+    cacheClear: () => Promise<{ ok: boolean; cleared: number; bytes: number }>
+    cachePrune: () => Promise<{ ok: boolean; removed: number; bytes: number }>
   }
   voices: {
     search: (
@@ -398,6 +403,22 @@ export interface AppInfo {
   chrome: string
   node: string
   platform: string
+}
+
+/** TTS 合成缓存的统计与当前策略 */
+export interface TtsCacheInfo {
+  enabled: boolean
+  ttlMs: number
+  maxBytes: number
+  /** 累计省下的合成次数 */
+  hits: number
+  /** 累计写入条目次数 */
+  putCount: number
+  entries: number
+  bytes: number
+  oldestSavedAt: number
+  newestSavedAt: number
+  dir: string
 }
 
 export interface Diagnostics {

@@ -392,7 +392,7 @@ function checkNeteaseLogin() {
  * 用编译器 API 在进程内跑：这个环境下 spawn 一个同名 node 进程会 EBUSY。
  */
 function checkRendererTypes() {
-  console.log('\n[22] 渲染层类型检查')
+  console.log('\n[23] 渲染层类型检查')
   const root = path.join(__dirname, '..')
   let ts = null
   try {
@@ -573,6 +573,133 @@ async function testVoices() {
 
   console.log('\n[21] 密钥形态诊断')
   testKeyShape()
+
+  console.log('\n[22] TTS 合成缓存')
+  await testTtsCache()
+}
+
+/**
+ * TTS 结果缓存。这是「同一个主播一场直播」里最省钱的一环：
+ * 「你好」「666」这类句子会被反复触发，缓存把第二次开始的成本降到 0。
+ * 这里守的核心是**滑动过期**：命中会刷新保存时间戳，
+ * 所以常被触达的句子不会被清理掉，冷掉的才会。
+ */
+async function testTtsCache() {
+  const os = require('node:os')
+  const { createTtsCache } = require('../electron/tts-cache.cjs')
+
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cp-ttscache-'))
+  const idxPath = path.join(root, 'index.json')
+  const cfg = {
+    provider: 'mimo',
+    protocol: 'chat-completions',
+    baseUrl: 'https://api.x/v1',
+    model: 'm1',
+    voice: 'v1',
+    format: 'wav',
+    speed: 1,
+    apiKey: 'sk-super-secret-key',
+  }
+  const mkAudio = (n, tag = 'A') => Buffer.from(tag.repeat(n)).toString('base64')
+  const input = (text, override) => ({ cfg: { ...cfg, ...(override || {}) }, text, style: '' })
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+
+  const c = createTtsCache({ dir: root })
+  try {
+    ok('冷启动不命中', c.get(input('你好')) === null)
+
+    c.put(input('你好'), { base64: mkAudio(300), mime: 'audio/wav' })
+    const hit = c.get(input('你好'))
+    ok('同一句话命中且音频一致', Boolean(hit) && hit.base64 === mkAudio(300))
+    ok('命中会累加次数', hit?.hits === 1)
+
+    ok('换一句话不命中', c.get(input('666')) === null)
+    ok('换音色不命中', c.get(input('你好', { voice: 'v2' })) === null)
+    ok('换 Key 不命中（按账号隔离）', c.get(input('你好', { apiKey: 'another-key' })) === null)
+    ok('换风格指令不命中', (() => {
+      const d = { cfg, text: '你好', style: '温柔一点' }
+      return c.get(d) === null
+    })())
+    ok('太短的音频不入库', c.put(input('短'), { base64: mkAudio(4) }) === false)
+
+    // 索引是**节流**写的，断言前先强制落盘
+    c.flush()
+    const raw = fs.readFileSync(idxPath, 'utf8')
+    ok('已经写到磁盘', raw.length > 0)
+    // 密钥只留哈希指纹：缓存文件被人拷走也不该泄露 Key
+    ok('索引里不含明文 Key', !raw.includes('sk-super-secret-key'))
+
+    /* ---- 滑动过期：冷句子会过期，常触达的会续期 ---- */
+    c.put(input('没人再说的冷句子'), { base64: mkAudio(200, 'B') })
+    await sleep(3)
+    c.put(input('主播好帅'), { base64: mkAudio(200, 'C') })
+    c.flush()
+
+    const idx = JSON.parse(fs.readFileSync(idxPath, 'utf8'))
+    const keyOf = (t) => c.cacheKeyOf(input(t))
+    const coldAt = idx.entries[keyOf('没人再说的冷句子')]
+    const warmAt = idx.entries[keyOf('主播好帅')]
+    ok('两条都进索引了', Boolean(coldAt) && Boolean(warmAt))
+
+    // 把两条的保存时间都往回调 5 秒，TTL 设 2 秒 → 都过期
+    const old = Date.now() - 5000
+    for (const h of [keyOf('没人再说的冷句子'), keyOf('主播好帅')]) idx.entries[h].savedAt = old
+    fs.writeFileSync(idxPath, JSON.stringify(idx))
+
+    const c2 = createTtsCache({ dir: root })
+    // 先看天 tenant：热句子在回滚的时间内被触发一次 → 时间戳刷新到「现在」
+    const warm = c2.get(input('主播好帅'))
+    ok('热句子仍能命中', Boolean(warm))
+    const r = c2.prune({ ttlMs: 2000, maxBytes: 0 })
+    ok('冷句子过期被清掉', r.removed === 1, JSON.stringify(r))
+    ok('冷句子清理后不再命中', c2.get(input('没人再说的冷句子')) === null)
+    ok('热句子因命中被续期，留着没删', Boolean(c2.get(input('主播好帅'))))
+
+    /* ---- 容量上限：从最久没用的那份开始删 ---- */
+    const dir2 = path.join(root, 'size')
+    const c3 = createTtsCache({ dir: dir2 })
+    for (const [i, t] of ['一句', '两句', '三句'].entries()) {
+      c3.put(input(t), { base64: mkAudio(1000, String(i)) })
+      await sleep(3)
+    }
+    const before = c3.stats()
+    ok('塞进去 3 条', before.entries === 3)
+    const r2 = c3.prune({ ttlMs: 0, maxBytes: 2000 })
+    const after = c3.stats()
+    ok('超容量会删掉旧的', r2.removed === 2 && after.entries === 1, `${r2.removed} 条，剩 ${after.entries}`)
+    ok('留下的是最新的那句', Boolean(c3.get(input('三句'))))
+    ok('最旧的那句被牺牲了', c3.get(input('一句')) === null)
+
+    /* ---- 持久化：关掉重开还在（模拟软件重启） ---- */
+    // 索引是节流写的，这里先强制落盘，等于「软件正常退出时那次 flush」
+    c3.flush()
+    const c4 = createTtsCache({ dir: dir2 })
+    ok('重启后仍能命中（持久化）', Boolean(c4.get(input('三句'))))
+    ok('统计里带着命中次数', c4.stats().entries === 1 && c4.stats().putCount === 3)
+
+    /* ---- 孤儿文件：索引里没有的 .bin 要被扫掉 ---- */
+    fs.writeFileSync(path.join(dir2, 'deadbeefdeadbeefdeadbeefdeadbeef.bin'), 'orphan')
+    const c5 = createTtsCache({ dir: dir2 })
+    c5.load()
+    await sleep(10)
+    ok('孤儿文件被清理', !fs.existsSync(path.join(dir2, 'deadbeefdeadbeefdeadbeefdeadbeef.bin')))
+
+    /* ---- 索引损坏：不能把整个缓存目录炸掉，也不能崩 ---- */
+    fs.writeFileSync(idxPath, '{ 这不是 json')
+    const c6 = createTtsCache({ dir: root })
+    ok('索引损坏时安全降级为 0 条', c6.stats().entries === 0)
+    ok('损坏的索引留了备份', fs.readdirSync(root).some((f) => f.startsWith('index.json.corrupt-')))
+
+    /* ---- 清空 ---- */
+    const cleared = c5.clear()
+    ok('清空返回条数', cleared.cleared >= 1, JSON.stringify(cleared))
+    ok('清空后索引归零', c5.stats().entries === 0)
+    ok('清空后磁盘上没有残留音频', fs.readdirSync(dir2).filter((f) => f.endsWith('.bin')).length === 0)
+  } finally {
+    try {
+      fs.rmSync(root, { recursive: true, force: true })
+    } catch {}
+  }
 }
 
 /* --------------------------- 密钥形态诊断 --------------------------- */
