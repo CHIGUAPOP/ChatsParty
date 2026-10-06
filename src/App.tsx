@@ -10,6 +10,7 @@ import VoicePage from './pages/VoicePage'
 import VoicesPage from './pages/VoicesPage'
 import AppearancePage from './pages/AppearancePage'
 import OverlayPage from './pages/OverlayPage'
+import appIcon from './assets/icon.png'
 
 const PAGES = [
   { id: 'connect', label: '连接', icon: 'plug' },
@@ -222,7 +223,7 @@ export default function App() {
     <div className="app-shell">
       <nav className="nav-rail">
         <div className="nav-rail__logo" title="ChatsParty">
-          CP
+          <img src={appIcon} alt="ChatsParty" />
         </div>
         {PAGES.map((p) => (
           <button
