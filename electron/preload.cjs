@@ -61,6 +61,8 @@ const api = {
     search: (keyword, limit) => ipcRenderer.invoke('music:search', keyword, limit),
     url: (id) => ipcRenderer.invoke('music:url', id),
     lyric: (id) => ipcRenderer.invoke('music:lyric', id),
+    // 渲染层持有播放器，所以由它告诉主进程「现在唱到哪一行」，主进程再广播给 OBS
+    lyricSync: (p) => ipcRenderer.invoke('music:lyricSync', p),
     check: () => ipcRenderer.invoke('music:check'),
     account: () => ipcRenderer.invoke('music:account'),
     login: () => ipcRenderer.invoke('music:login'),

@@ -8,6 +8,14 @@
       :root {
         --cp-accent: #d0bcff;
         --cp-font: system-ui, 'Microsoft YaHei', 'PingFang SC', sans-serif;
+        /*
+          两个缩放单位，设置页里那两个滑块改的就是它们：
+          --cp-u   界面大小百分比 —— 头像、间距、圆角、阴影都乘它
+          --cp-fs  界面大小 × 字体大小 —— 只有字号乘它
+          分开是为了能「框放大但字不变」或只把字改大。默认 1px 即原始尺寸。
+        */
+        --cp-u: 1px;
+        --cp-fs: 1px;
       }
 
       html,
@@ -20,40 +28,72 @@
         overflow: hidden;
       }
 
+      /* top / bottom 由脚本里的 layout() 动态内缩：把点歌面板和歌词占掉的那几段让出去，
+         这样弹幕再怎么堆也不会压到它们身上。overflow: hidden 是最后一道保险 ——
+         万一还是塞不下，宁可切掉离角落最远的那几条，也不许糊到别的块上。 */
       #app {
         position: fixed;
-        right: 0;
-        bottom: 0;
-        width: 100%;
-        height: 100%;
+        inset: 0;
         display: flex;
+        padding: calc(24 * var(--cp-u));
+        box-sizing: border-box;
+        overflow: hidden;
+        gap: calc(8 * var(--cp-u));
+        /* 缺省 = 右下：竖排、贴底、靠右 */
         flex-direction: column;
         justify-content: flex-end;
         align-items: flex-end;
-        padding: 24px;
-        box-sizing: border-box;
-        gap: 8px;
+      }
+
+      /*
+        四个角落。垂直方向要连带翻转堆叠顺序：
+        新消息是 appendChild 进去的（DOM 末尾），我们希望它永远紧贴所选的那个角，
+        所以下半区用 column（末尾在底），上半区用 column-reverse（末尾在顶）。
+        注意 column-reverse 会把主轴倒过来，贴顶反而要写 flex-end。
+        这样 trim() 删 firstChild 时，消失的永远是离角落最远、最老的那条。
+      */
+      #app[data-pos='tl'],
+      #app[data-pos='tr'] {
+        flex-direction: column-reverse;
+      }
+
+      /* 水平：l 靠左、r 靠右（交叉轴不受 column-reverse 影响） */
+      #app[data-pos='tl'],
+      #app[data-pos='bl'] {
+        align-items: flex-start;
       }
 
       .cp-item {
         display: flex;
         align-items: flex-start;
-        gap: 10px;
-        max-width: 460px;
-        padding: 10px 14px;
-        border-radius: 14px;
+        gap: calc(10 * var(--cp-u));
+        max-width: calc(460 * var(--cp-u));
+        padding: calc(10 * var(--cp-u)) calc(14 * var(--cp-u));
+        border-radius: calc(14 * var(--cp-u));
         background: rgba(18, 18, 22, 0.62);
-        backdrop-filter: blur(6px);
-        -webkit-backdrop-filter: blur(6px);
+        backdrop-filter: blur(calc(6 * var(--cp-u)));
+        -webkit-backdrop-filter: blur(calc(6 * var(--cp-u)));
         color: #f4f2f6;
-        box-shadow: 0 2px 10px rgba(0, 0, 0, 0.28);
+        box-shadow: 0 calc(2 * var(--cp-u)) calc(10 * var(--cp-u)) rgba(0, 0, 0, 0.28);
         animation: cp-in 260ms cubic-bezier(0.2, 0, 0, 1);
       }
 
       @keyframes cp-in {
         from {
           opacity: 0;
-          transform: translateX(24px);
+          transform: translateX(calc(24 * var(--cp-u)));
+        }
+        to {
+          opacity: 1;
+          transform: translateX(0);
+        }
+      }
+
+      /* 贴在左边时改从这个方向滑进来 */
+      @keyframes cp-in-left {
+        from {
+          opacity: 0;
+          transform: translateX(-24px);
         }
         to {
           opacity: 1;
@@ -66,16 +106,16 @@
       }
       .cp-item.is-superchat {
         background: rgba(58, 40, 96, 0.72);
-        border-left: 3px solid var(--cp-accent);
+        border-left: calc(3 * var(--cp-u)) solid var(--cp-accent);
       }
       .cp-item.is-guard {
         background: rgba(114, 30, 30, 0.66);
       }
 
       .cp-face {
-        width: 34px;
-        height: 34px;
-        flex: 0 0 34px;
+        width: calc(34 * var(--cp-u));
+        height: calc(34 * var(--cp-u));
+        flex: 0 0 calc(34 * var(--cp-u));
         border-radius: 50%;
         object-fit: cover;
         background: rgba(255, 255, 255, 0.12);
@@ -84,7 +124,7 @@
       .cp-face--none {
         display: grid;
         place-items: center;
-        font-size: 13px;
+        font-size: calc(13 * var(--cp-fs));
         color: rgba(255, 255, 255, 0.7);
       }
 
@@ -96,44 +136,77 @@
       .cp-head {
         display: flex;
         align-items: center;
-        gap: 6px;
-        margin-bottom: 2px;
+        gap: calc(6 * var(--cp-u));
+        margin-bottom: calc(2 * var(--cp-u));
         flex-wrap: wrap;
       }
 
       .cp-name {
-        font-size: 13px;
+        font-size: calc(13 * var(--cp-fs));
         font-weight: 600;
         color: var(--cp-accent);
-        text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
+        text-shadow: 0 calc(1 * var(--cp-u)) calc(2 * var(--cp-u)) rgba(0, 0, 0, 0.5);
       }
 
       .cp-medal {
-        font-size: 11px;
-        padding: 1px 6px;
-        border-radius: 6px;
+        font-size: calc(11 * var(--cp-fs));
+        padding: calc(1 * var(--cp-u)) calc(6 * var(--cp-u));
+        border-radius: calc(6 * var(--cp-u));
         background: rgba(255, 255, 255, 0.14);
         color: #fff;
       }
 
       .cp-price {
-        font-size: 11px;
-        padding: 1px 6px;
-        border-radius: 6px;
+        font-size: calc(11 * var(--cp-fs));
+        padding: calc(1 * var(--cp-u)) calc(6 * var(--cp-u));
+        border-radius: calc(6 * var(--cp-u));
         background: rgba(255, 255, 255, 0.2);
         color: #fff;
       }
 
       .cp-text {
-        font-size: 16px;
+        font-size: calc(16 * var(--cp-fs));
         line-height: 1.5;
         word-break: break-word;
-        text-shadow: 0 1px 3px rgba(0, 0, 0, 0.6);
+        text-shadow: 0 calc(1 * var(--cp-u)) calc(3 * var(--cp-u)) rgba(0, 0, 0, 0.6);
       }
 
       .cp-text img {
-        height: 24px;
+        height: calc(24 * var(--cp-u));
         vertical-align: middle;
+      }
+
+      /*
+        贴右侧时整条镜像：头像挪到右、文字右对齐、头衔组反向排、
+        醒目留言的强调边从左改到右、进场方向改从右往左。
+        凡是原先默认靠左的约定都得跟着掉个儿，否则看着像排版坏了。
+        两侧都显式写死 left / right 而不吃初始值 start —— 一旦有别的地方改了
+        direction，start 会跟着反向，这里要的是钉死的物理方向。
+      */
+      #app[data-pos='tl'] .cp-item,
+      #app[data-pos='bl'] .cp-item {
+        text-align: left;
+      }
+      #app[data-pos='tr'] .cp-item,
+      #app[data-pos='br'] .cp-item {
+        flex-direction: row-reverse;
+        text-align: right;
+      }
+
+      #app[data-pos='tr'] .cp-head,
+      #app[data-pos='br'] .cp-head {
+        flex-direction: row-reverse;
+      }
+
+      #app[data-pos='tr'] .cp-item.is-superchat,
+      #app[data-pos='br'] .cp-item.is-superchat {
+        border-left: none;
+        border-right: calc(3 * var(--cp-u)) solid var(--cp-accent);
+      }
+
+      #app[data-pos='tl'] .cp-item,
+      #app[data-pos='bl'] .cp-item {
+        animation-name: cp-in-left;
       }
 
       /* ---------- 点歌面板 ----------
@@ -143,8 +216,8 @@
         position: fixed;
         display: none;
         flex-direction: column;
-        gap: 8px;
-        width: 300px;
+        gap: calc(8 * var(--cp-u));
+        width: calc(300 * var(--cp-u));
         max-width: 42vw;
         font-family: var(--cp-font);
         pointer-events: none;
@@ -155,45 +228,45 @@
       }
 
       .cp-music[data-pos='tl'] {
-        left: 24px;
-        top: 24px;
+        left: calc(24 * var(--cp-u));
+        top: calc(24 * var(--cp-u));
       }
       .cp-music[data-pos='tr'] {
-        right: 24px;
-        top: 24px;
+        right: calc(24 * var(--cp-u));
+        top: calc(24 * var(--cp-u));
       }
       .cp-music[data-pos='bl'] {
-        left: 24px;
-        bottom: 24px;
+        left: calc(24 * var(--cp-u));
+        bottom: calc(24 * var(--cp-u));
       }
       .cp-music[data-pos='br'] {
-        right: 24px;
-        bottom: 24px;
+        right: calc(24 * var(--cp-u));
+        bottom: calc(24 * var(--cp-u));
       }
 
       .cp-mcard,
       .cp-mqueue {
-        padding: 10px 14px;
-        border-radius: 14px;
+        padding: calc(10 * var(--cp-u)) calc(14 * var(--cp-u));
+        border-radius: calc(14 * var(--cp-u));
         background: rgba(18, 18, 22, 0.62);
-        backdrop-filter: blur(6px);
-        -webkit-backdrop-filter: blur(6px);
+        backdrop-filter: blur(calc(6 * var(--cp-u)));
+        -webkit-backdrop-filter: blur(calc(6 * var(--cp-u)));
         color: #f4f2f6;
-        box-shadow: 0 2px 10px rgba(0, 0, 0, 0.28);
+        box-shadow: 0 calc(2 * var(--cp-u)) calc(10 * var(--cp-u)) rgba(0, 0, 0, 0.28);
         animation: cp-in 260ms cubic-bezier(0.2, 0, 0, 1);
       }
 
       .cp-mcard {
         display: flex;
         align-items: center;
-        gap: 10px;
+        gap: calc(10 * var(--cp-u));
       }
 
       .cp-mcover {
-        width: 48px;
-        height: 48px;
-        flex: 0 0 48px;
-        border-radius: 10px;
+        width: calc(48 * var(--cp-u));
+        height: calc(48 * var(--cp-u));
+        flex: 0 0 calc(48 * var(--cp-u));
+        border-radius: calc(10 * var(--cp-u));
         overflow: hidden;
         background: rgba(255, 255, 255, 0.12);
         display: grid;
@@ -208,7 +281,7 @@
       }
 
       .cp-mcover__none {
-        font-size: 20px;
+        font-size: calc(20 * var(--cp-fs));
         color: rgba(255, 255, 255, 0.55);
       }
 
@@ -218,47 +291,47 @@
       }
 
       .cp-mlabel {
-        font-size: 11px;
+        font-size: calc(11 * var(--cp-fs));
         opacity: 0.62;
-        letter-spacing: 0.5px;
-        margin-bottom: 1px;
+        letter-spacing: calc(0.5 * var(--cp-u));
+        margin-bottom: calc(1 * var(--cp-u));
       }
 
       .cp-mtitle {
-        font-size: 15px;
+        font-size: calc(15 * var(--cp-fs));
         font-weight: 600;
         line-height: 1.35;
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
-        text-shadow: 0 1px 3px rgba(0, 0, 0, 0.6);
+        text-shadow: 0 calc(1 * var(--cp-u)) calc(3 * var(--cp-u)) rgba(0, 0, 0, 0.6);
       }
 
       .cp-msub {
-        font-size: 12px;
+        font-size: calc(12 * var(--cp-fs));
         opacity: 0.78;
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
-        text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
+        text-shadow: 0 calc(1 * var(--cp-u)) calc(2 * var(--cp-u)) rgba(0, 0, 0, 0.5);
       }
 
       .cp-mqueue__head {
-        margin-bottom: 4px;
+        margin-bottom: calc(4 * var(--cp-u));
       }
 
       .cp-mrow {
         display: flex;
         align-items: baseline;
-        gap: 6px;
-        font-size: 13px;
+        gap: calc(6 * var(--cp-u));
+        font-size: calc(13 * var(--cp-fs));
         line-height: 1.6;
         min-width: 0;
       }
 
       .cp-mrow__no {
-        flex: 0 0 14px;
-        font-size: 11px;
+        flex: 0 0 calc(14 * var(--cp-u));
+        font-size: calc(11 * var(--cp-fs));
         opacity: 0.55;
         text-align: right;
       }
@@ -269,17 +342,116 @@
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
-        text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
+        text-shadow: 0 calc(1 * var(--cp-u)) calc(2 * var(--cp-u)) rgba(0, 0, 0, 0.5);
       }
 
       .cp-mrow__who {
         flex: 0 0 auto;
         max-width: 34%;
-        font-size: 11px;
+        font-size: calc(11 * var(--cp-fs));
         opacity: 0.62;
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
+      }
+
+      /* ---------- 歌词 ----------
+         行往中间不一定好看，所以位置单独可配：默认底部居中，像演唱会字幕。
+         当前一句高亮放大，后面几句压暗 —— 一眼能看出唱到哪了。 */
+      .cp-lyric {
+        position: fixed;
+        display: none;
+        flex-direction: column;
+        gap: calc(4 * var(--cp-u));
+        width: 76%;
+        max-width: calc(1100 * var(--cp-u));
+        font-family: var(--cp-font);
+        text-align: center;
+        pointer-events: none;
+      }
+
+      .cp-lyric.is-show {
+        display: flex;
+      }
+
+      .cp-lyric[data-pos='tc'] {
+        left: 50%;
+        top: calc(24 * var(--cp-u));
+        transform: translateX(-50%);
+      }
+      .cp-lyric[data-pos='bc'] {
+        left: 50%;
+        bottom: calc(24 * var(--cp-u));
+        transform: translateX(-50%);
+      }
+      .cp-lyric[data-pos='tl'] {
+        left: calc(24 * var(--cp-u));
+        top: calc(24 * var(--cp-u));
+        text-align: left;
+      }
+      .cp-lyric[data-pos='tr'] {
+        right: calc(24 * var(--cp-u));
+        top: calc(24 * var(--cp-u));
+        text-align: right;
+      }
+      .cp-lyric[data-pos='bl'] {
+        left: calc(24 * var(--cp-u));
+        bottom: calc(24 * var(--cp-u));
+        text-align: left;
+      }
+      .cp-lyric[data-pos='br'] {
+        right: calc(24 * var(--cp-u));
+        bottom: calc(24 * var(--cp-u));
+        text-align: right;
+      }
+
+      .cp-lyric__line {
+        font-size: calc(22 * var(--cp-fs));
+        font-weight: 600;
+        line-height: 1.35;
+        color: #fff;
+        opacity: 0.42;
+        text-shadow: 0 calc(2 * var(--cp-u)) calc(6 * var(--cp-u)) rgba(0, 0, 0, 0.8);
+        transition: opacity 240ms ease, transform 240ms ease;
+        transform-origin: center;
+      }
+
+      /* 唱到的一句：提亮、放大一点点。左右贴边时缩小不能改变宽度的参照，所以只动 opacity */
+      .cp-lyric__line.is-cur {
+        opacity: 1;
+        transform: scale(1.06);
+      }
+
+      .cp-lyric[data-pos='tc'] .cp-lyric__line,
+      .cp-lyric[data-pos='bc'] .cp-lyric__line {
+        transform-origin: center;
+      }
+
+      /* ---------- 窄画面 ----------
+         比如把 OBS 浏览器源拖成一条竖带。三块谁站哪一段由脚本里的 layout() 算，
+         这里只负责把宽度放开：上面那套尺寸是按 1080p 画布定的，窄条上会顶出画面。 */
+      html.is-narrow .cp-item {
+        max-width: 100%;
+        /* 画面窄、字号又调得大时，一句话能折成十几行，比留给弹幕的那一段还高。
+           上限按容器高度取，宁可它自己截断，也不许顶到歌词上去 */
+        max-height: 100%;
+        overflow: hidden;
+      }
+
+      html.is-narrow .cp-music {
+        max-width: calc(100% - 48 * var(--cp-u));
+        /* 队列长起来时把面板本身截住，别让它一口气把弹幕那段挤没 */
+        max-height: 46%;
+        overflow: hidden;
+      }
+
+      html.is-narrow .cp-lyric {
+        width: calc(100% - 48 * var(--cp-u));
+        max-width: none;
+        /* 窄条上字号一放大，两三行就能顶掉半屏。截掉的是后面几句预告，
+           当前正在唱的那句在第一个，永远看得到 */
+        max-height: 28%;
+        overflow: hidden;
       }
 
       #cp-custom-style {
@@ -289,11 +461,11 @@
       /* 连接状态提示：断线时常驻，连上后 3 秒自动淡出，不干扰画面 */
       #cp-status {
         position: fixed;
-        left: 24px;
-        bottom: 24px;
-        padding: 6px 12px;
-        border-radius: 999px;
-        font-size: 13px;
+        left: calc(24 * var(--cp-u));
+        bottom: calc(24 * var(--cp-u));
+        padding: calc(6 * var(--cp-u)) calc(12 * var(--cp-u));
+        border-radius: calc(999 * var(--cp-u));
+        font-size: calc(13 * var(--cp-fs));
         font-family: var(--cp-font);
         background: rgba(18, 18, 22, 0.78);
         color: #f4f2f6;
@@ -312,8 +484,9 @@
     </style>
   </head>
   <body>
-    <div id="app"></div>
+    <div id="app" data-pos="br"></div>
     <div id="cp-music" class="cp-music" data-pos="tl"></div>
+    <div id="cp-lyric" class="cp-lyric" data-pos="bc"></div>
     <div id="cp-status"></div>
     <style id="cp-custom-style"></style>
 
@@ -329,9 +502,47 @@
         showMusic: true,
         musicPos: 'tl',
         musicQueueCount: 3,
+        danmakuPos: 'br',
+        // 界面整体大小 / 字体大小百分比。100 就是原始尺寸
+        scale: 100,
+        fontSize: 100,
+        showLyric: true,
+        lyricPos: 'bc',
+        lyricLines: 2,
+        // 画面一窄就把三块分到互不相交的几段里，别压在彼此身上
+        autoLayout: true,
         customCss: '',
         fontFamily: 'system-ui, "Microsoft YaHei", sans-serif',
         accent: '#D0BCFF',
+      }
+
+      /* 四个角。配置里若写了认不得的值就退回右下，别让 #app 落到一个没有样式的 data-pos 上 */
+      const DANMAKU_POS = ['tl', 'tr', 'bl', 'br']
+      // 歌词默认底部居中，像字幕；贴边时也能左右摆放
+      const LYRIC_POS = ['tc', 'bc', 'tl', 'tr', 'bl', 'br']
+
+      function danmakuPos() {
+        return DANMAKU_POS.indexOf(cfg.danmakuPos) >= 0 ? cfg.danmakuPos : 'br'
+      }
+
+      function lyricPos() {
+        return LYRIC_POS.indexOf(cfg.lyricPos) >= 0 ? cfg.lyricPos : 'bc'
+      }
+
+      /** 百分比 -> 倍率。留 0.5~2 的余量：再小看不见，再大出画 */
+      function ratio(v) {
+        const n = Number(v)
+        if (!isFinite(n) || n <= 0) return 1
+        return Math.min(2, Math.max(0.5, n / 100))
+      }
+
+      /** 与 --cp-u 同一个倍率。脚本里算「24u 到底是几像素」时要跟 CSS 对上 */
+      let uiScale = 1
+
+      function lyricLineCount() {
+        const v = Number(cfg.lyricLines)
+        if (!isFinite(v) || v < 1) return 2
+        return Math.min(Math.floor(v), 5)
       }
 
       function applyConfig(c) {
@@ -339,8 +550,18 @@
         const root = document.documentElement
         root.style.setProperty('--cp-accent', cfg.accent)
         root.style.setProperty('--cp-font', cfg.fontFamily)
+        // 界面整体缩放与字号缩放：前者乘所有尺寸，后者只再乘一次字号
+        const ui = ratio(cfg.scale)
+        uiScale = ui
+        root.style.setProperty('--cp-u', ui + 'px')
+        root.style.setProperty('--cp-fs', ui * ratio(cfg.fontSize) + 'px')
         customStyle.textContent = cfg.customCss || ''
+        app.setAttribute('data-pos', danmakuPos())
         renderMusic()
+        renderLyric()
+        // 配置一改位置就可能变，直接同步重排一次，别等下一帧（改完马上要看到效果）
+        layout()
+        fit()
       }
 
       /* ---------------------------- 点歌面板 ---------------------------- */
@@ -370,6 +591,7 @@
         musicEl.classList.toggle('is-show', Boolean(show))
         if (!show) {
           musicEl.textContent = ''
+          scheduleLayout()
           return
         }
 
@@ -406,6 +628,176 @@
           })
           musicEl.appendChild(box)
         }
+        scheduleLayout()
+      }
+
+      /* ---------------------------- 歌词 ---------------------------- */
+
+      const lyricEl = document.getElementById('cp-lyric')
+      let lyricState = { songId: 0, lines: [], times: [], index: -1, playing: false }
+
+      function renderLyric() {
+        lyricEl.setAttribute('data-pos', lyricPos())
+        const hasLines = lyricState.lines && lyricState.lines.length > 0
+        const show = cfg.showLyric !== false && hasLines
+        lyricEl.classList.toggle('is-show', Boolean(show))
+        if (!show) {
+          lyricEl.textContent = ''
+          scheduleLayout()
+          return
+        }
+
+        const want = lyricLineCount()
+        const total = lyricState.lines.length
+        // index 为 -1 说明前奏还没唱到第一句，先摆第一行顶着
+        const from = Math.max(0, Math.min(lyricState.index < 0 ? 0 : lyricState.index, total - 1))
+
+        lyricEl.textContent = ''
+        let drawn = 0
+        for (let i = from; i < total && drawn < want; i++) {
+          const text = lyricState.lines[i]
+          // 歌词里常见的空行是分段标记，画出来会在画面上留一块空白
+          if (!String(text || '').trim()) continue
+          const line = el('div', 'cp-lyric__line', text)
+          if (i === lyricState.index) line.classList.add('is-cur')
+          lyricEl.appendChild(line)
+          drawn++
+        }
+        scheduleLayout()
+      }
+
+      /* ---------------------------- 自动避让 ----------------------------
+         三块（弹幕 / 点歌 / 歌词）各自 fixed 在自己的角上。窗口一窄 ——
+         比如把 OBS 浏览器源拖成一条竖带 —— 它们就会压成一坨：弹幕糊在
+         歌词和点歌面板上，谁也看不清。
+         这趟先撤掉上一轮的偏移、按配置摆好，量出各自真实占位，再把同一侧
+         且水平上确实打架的两块上下叠开，最后把弹幕的活动区缩进剩下的那一段。
+         宽画面下三块各占一角、互不相干，这一趟就什么都不改 ——
+         所以它是「自动」的：不用为了窄条单独配一套位置。 */
+
+      const NARROW_W = 640 // 比这窄（或比 NARROW_H 还矮）就按「窄画面」处理
+      const NARROW_H = 540
+      let layoutRaf = 0
+
+      /**
+       * 量一块的真实占位。用 offset* 而不是 getBoundingClientRect ——
+       * 入场动画是 transform 位移，rect 会被带着飘，量出来的水平位置忽左忽右。
+       * 居中的两块靠 translateX(-50%) 归位，offsetLeft 还是没归位之前的值，手动折回去。
+       */
+      function boxOf(node, centered) {
+        if (!node.classList.contains('is-show')) return null
+        const width = node.offsetWidth
+        const height = node.offsetHeight
+        if (!width && !height) return null
+        const left = node.offsetLeft - (centered ? width / 2 : 0)
+        return { left: left, right: left + width, width: width, height: height }
+      }
+
+      /** 水平上是否真的挨着。只差半像素的重叠不算，免得浮动误差一直触发叠放 */
+      function overlapsX(a, b) {
+        return a.left < b.right - 0.5 && b.left < a.right - 0.5
+      }
+
+      function isTopSide(pos, tops) {
+        return tops.indexOf(pos) >= 0
+      }
+
+      function clearOffsets() {
+        app.style.top = ''
+        app.style.bottom = ''
+        musicEl.style.top = ''
+        musicEl.style.bottom = ''
+        lyricEl.style.top = ''
+        lyricEl.style.bottom = ''
+      }
+
+      function layout() {
+        clearOffsets()
+        // 挂在 <html> 上：CSS 里那几条 .is-narrow 规则要连点歌面板、歌词一起管。
+        // 除了「窄」，矮也算 —— 1920×400 这种横条一样会挤。
+        const tight = window.innerWidth < NARROW_W || window.innerHeight < NARROW_H
+        document.documentElement.classList.toggle('is-narrow', tight)
+        if (cfg.autoLayout === false) return
+
+        const pad = 24 * uiScale
+        const gap = 12 * uiScale
+        const musicTop = isTopSide(cfg.musicPos || 'tl', ['tl', 'tr'])
+        const lyricTop = isTopSide(lyricPos(), ['tc', 'tl', 'tr'])
+        const m = boxOf(musicEl, false)
+        const l = boxOf(lyricEl, true)
+        const stacked = Boolean(m && l && musicTop === lyricTop && overlapsX(m, l))
+
+        // 同一侧又水平打架才叠开。贴边的永远是歌词（像字幕），点歌面板让到内侧
+        if (stacked) {
+          if (lyricTop) {
+            musicEl.style.top = pad + 'px'
+            lyricEl.style.top = pad + m.height + gap + 'px'
+          } else {
+            lyricEl.style.bottom = pad + 'px'
+            musicEl.style.bottom = pad + l.height + gap + 'px'
+          }
+        }
+
+        // 每侧要预留多少高度：叠起来的两块算高度之和，并排的取最大值
+        let topBand = 0
+        let botBand = 0
+        if (stacked && lyricTop) topBand = m.height + gap + l.height
+        else if (stacked) botBand = l.height + gap + m.height
+        else {
+          if (m && musicTop) topBand = Math.max(topBand, m.height)
+          if (l && lyricTop) topBand = Math.max(topBand, l.height)
+          if (m && !musicTop) botBand = Math.max(botBand, m.height)
+          if (l && !lyricTop) botBand = Math.max(botBand, l.height)
+        }
+
+        // #app 自己带 24u 内边距，所以从这里再让出「块高 + 一个间距」就够了
+        if (topBand > 0) app.style.top = topBand + gap + 'px'
+        if (botBand > 0) app.style.bottom = botBand + gap + 'px'
+      }
+
+      /**
+       * 现有气泡摞起来有多高（含行间距）。
+       * 不能用 scrollHeight —— #app 是 justify-content: flex-end，超出去的那几条堆在
+       * flex-start 这一头，浏览器认为那是「滚动不可达」的部分，scrollHeight 根本不计。
+       */
+      function stackHeight() {
+        const n = app.children.length
+        if (!n) return 0
+        let h = 0
+        for (let i = 0; i < n; i++) h += app.children[i].offsetHeight
+        return h + 8 * uiScale * (n - 1)
+      }
+
+      /** 弹幕还是塞不下就别硬挤：从离角落最远的那条（DOM 里排最前）开始删 */
+      function fit() {
+        let guard = 0
+        const inner = app.clientHeight
+        while (app.children.length > 1 && stackHeight() > inner + 1 && guard++ < 200) {
+          app.removeChild(app.firstChild)
+        }
+      }
+
+      /** 合并到下一帧再量：一条弹幕进来就同步量一次布局，弹幕快了会拖帧 */
+      function scheduleLayout() {
+        if (layoutRaf) return
+        layoutRaf = requestAnimationFrame(() => {
+          layoutRaf = 0
+          layout()
+          fit()
+        })
+      }
+
+      window.addEventListener('resize', () => {
+        // 这里不走 rAF：OBS 里把源先藏起来时 rAF 是不跑的，
+        // 拖完窗口再显示出来会停在旧尺寸上。resize 本来就不密集，同步做掉最省心
+        layout()
+        fit()
+      })
+      if (window.ResizeObserver) {
+        // 换歌、换行数都会改这两块的高矮，光靠 resize 逮不到
+        const ro = new ResizeObserver(scheduleLayout)
+        ro.observe(musicEl)
+        ro.observe(lyricEl)
       }
 
       /**
@@ -534,6 +926,7 @@
         el.appendChild(body)
         app.appendChild(el)
         trim()
+        scheduleLayout()
       }
 
       let ws
@@ -573,6 +966,25 @@
               musicState = msg.payload || { current: null, items: [], queued: 0 }
               renderMusic()
             } else if (msg.type === 'face') applyFacePatch(msg.payload.src, msg.payload.data)
+            else if (msg.type === 'lyric') {
+              // 逐字段取值而不是 Object.assign：换歌那一帧刻意不带 lines（让它先清空），
+              // 合并的话旧歌词会赖着不走，出现「新歌配旧词」
+              const p = msg.payload || {}
+              const songId = Number(p.songId) || 0
+              // 最后一道闸：这帧挂着的歌和正在放的那首对不上，整帧丢掉。
+              // 投递顺序上它不该出现 —— 真出现了说明上游哪里又漏了，
+              // 那也宁可在台上空几秒，别把上一首的词挂到这首名下（观众一眼就看出来了）。
+              const now = musicState.current ? Number(musicState.current.id) || 0 : 0
+              if (songId && now && songId !== now) return
+              lyricState = {
+                songId,
+                lines: Array.isArray(p.lines) ? p.lines : [],
+                times: Array.isArray(p.times) ? p.times : [],
+                index: Number.isFinite(p.index) ? p.index : -1,
+                playing: Boolean(p.playing),
+              }
+              renderLyric()
+            }
             else if (msg.type === 'faces') {
               // 迟到的客户端补发：先把映射灌进表，再回填已经渲染出来的那些
               const list = msg.payload || []

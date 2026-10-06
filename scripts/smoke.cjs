@@ -118,6 +118,7 @@ async function main() {
   await testVoices()
   checkCsp()
   checkMusicOverlay()
+  checkOverlayLayout()
   checkStoreMerge()
   checkCommands()
   checkNeteaseLogin()
@@ -212,9 +213,175 @@ function checkMusicOverlay() {
 
   // 暂停之后切走再切回来会自己重新开始播 —— 那次是因为挂载时 state 初值被当成了「队列空」。
   // 这里守住那道闸门：状态没拉回来之前不许动播放器。
+  // 播放逻辑已经从 MusicPage 搬进常驻的 music-engine，闸门也就跟着搬过去了。
+  const engine = read(path.join(root, 'src', 'lib', 'music-engine.tsx'))
+  ok('状态没拉回来前不动播放器', /if \(!ready\) return/.test(engine))
+  ok('停止分支不会再抢在状态前面', /}, \[ready, state\.current\?\.id\]\)/.test(engine), '缺少 ready 依赖')
+
+  // 更要命的一个坑：播放器曾经住在 MusicPage 里，切走页面组件一卸载，
+  // 订阅被摘、effect 停摆，一首歌放完没人接下一首 —— 必须切回点歌页才继续。
+  // 所以现在强制要求：播放引擎挂在页面之外，且 MusicPage 里不许再出现播放器本体。
   const musicPage = read(path.join(root, 'src', 'pages', 'MusicPage.tsx'))
-  ok('状态没拉回来前不动播放器', /if \(!ready\) return/.test(musicPage))
-  ok('停止分支不会再抢在状态前面', /}, \[ready, state\.current\?\.id\]\)/.test(musicPage), '缺少 ready 依赖')
+  const app = read(path.join(root, 'src', 'App.tsx'))
+  ok('播放引擎不再住在 MusicPage 里', !/let audioEl|let playingId/.test(musicPage), 'MusicPage 里还有播放器状态')
+  ok('MusicPage 改用引擎', /useMusicPlayer\(\)/.test(musicPage))
+  ok('引擎挂在 App 层常驻', /MusicPlayerProvider/.test(app) && /music-engine/.test(app))
+  // 播放器的回调必须活着 —— 一旦 Audio 的 onended 被摘，队列就永远停在上一首
+  ok('播完自动推进下一首', /el\.onended[\s\S]{0,80}api\.music\.next\(\)/.test(engine))
+
+  /* ---- 叠加层：整体缩放 / 字号 / 歌词 ---- */
+
+  ok(
+    '叠加层尺寸走可缩放单位',
+    /--cp-u:\s*1px/.test(overlayHtml) && /calc\(24 \* var\(--cp-u\)\)/.test(overlayHtml),
+    'px 没换成 var(--cp-u)，界面大小滑块不会有反应',
+  )
+  ok('叠加层字号走独立变量', /calc\(16 \* var\(--cp-fs\)\)/.test(overlayHtml), '正文 font-size 没换变量')
+  ok('两个缩放变量都被写入', /--cp-u'?,?\s*ui \+ 'px'/.test(overlayHtml) || /setProperty\('--cp-u'/.test(overlayHtml))
+  ok(
+    '字号是两层缩放相乘',
+    /--cp-fs'?,?\s*ui \* ratio\(cfg\.fontSize\) \+ 'px'/.test(overlayHtml),
+    '字体大小应当 = 界面大小 × 字体大小',
+  )
+  ok('缩放留了上下限', /function ratio/.test(overlayHtml) && /Math\.min\(2, Math\.max\(0\.5/.test(overlayHtml))
+
+  ok('默认原尺寸显示', DEFAULTS.overlay?.scale === 100 && DEFAULTS.overlay?.fontSize === 100)
+  ok('默认显示歌词且底部居中', DEFAULTS.overlay?.showLyric === true && DEFAULTS.overlay?.lyricPos === 'bc')
+
+  const LYRIC_CLASSES = ['cp-lyric__line', 'is-cur']
+  ok('叠加层有歌词区', LYRIC_CLASSES.every((c) => overlayHtml.includes(c)), LYRIC_CLASSES.join(','))
+  ok('叠加层接得住歌词消息', /msg\.type === 'lyric'/.test(overlayHtml))
+  // 歌词行数上限：不加的话主播调到 9 行，字幕会从画布顶排到底，把画面盖掉半个
+  ok('歌词行数有上限', /lyricLineCount/.test(overlayHtml) && /Math\.min\(Math\.floor\(v\), 5\)/.test(overlayHtml))
+  // 歌词和点歌面板同屏，行数直接表示能否叠逾它在 razor 上的高度限制
+  ok(
+    '换歌不会配到上一首的歌词',
+    /lines: Array\.isArray\(p\.lines\) \? p\.lines : \[\]/.test(overlayHtml),
+    '不带 lines 的那一帧必须清空，否则 Object.assign 会保留旧词',
+  )
+  ok('主进程给新客户端补发歌词', read(path.join(root, 'electron', 'main.cjs')).includes('overlay.lyricProvider'))
+  ok('叠加层支持补发歌词', read(path.join(root, 'electron', 'overlay.cjs')).includes('lyricProvider'))
+  ok(
+    '补发时「没有词」也要说一声',
+    /if \(lyric\) ws\.send\(JSON\.stringify\(\{ type: 'lyric', payload: lyric \}\)\)/.test(
+      read(path.join(root, 'electron', 'overlay.cjs')),
+    ),
+    '只在有词时才发的话，重连上来的页面会挂着断开前那一首的最后一句',
+  )
+  ok('歌词由主进程转发', read(path.join(root, 'electron', 'main.cjs')).includes("ipcMain.handle('music:lyricSync'"))
+
+  /* ---- 歌词串歌：三段接力里各自的那道闸 ----
+     换歌那一拍，state.current 已经是新歌、而手上那份 lrc 还是上一首的。
+     直接上报就成了「挂着新歌的名、带着旧歌的词」，OBS 上放着这首唱着那首。 */
+  const engineSrc = read(path.join(root, 'src', 'lib', 'music-engine.tsx'))
+  ok('歌词记着自己是谁的', /const \[lrcFor, setLrcFor\]/.test(engineSrc))
+  ok(
+    '换歌先把手上的词作废',
+    /setLrcFor\(0\)/.test(engineSrc),
+    '取新词比换歌慢，中间那段空窗正是串歌发生的时候',
+  )
+  ok('对不上就一个词都不发', /const liveLrc = lrcFor === curSongId \? lrc : EMPTY_LRC/.test(engineSrc))
+  ok(
+    '空歌词用固定引用',
+    /const EMPTY_LRC: LyricLine\[\] = \[\]/.test(engineSrc),
+    '每渲染一次新建数组的话，依赖它的 effect 会跟着每帧重跑',
+  )
+  ok('不上报别人的词', /liveLrc\.length > 0 && sentLinesRef\.current !== songId/.test(engineSrc))
+  ok(
+    '对不上时只报「还没到」',
+    /const liveLrcIndex = lrcFor === curSongId \? lrcIndex : -1/.test(engineSrc),
+  )
+  ok('点歌页画的也是这一份', /lrc: liveLrc,\n\s*lrcIndex: liveLrcIndex,/.test(engineSrc))
+
+  const mainSrc = read(path.join(root, 'electron', 'main.cjs'))
+  ok('主进程换歌也会广播一帧', /if \(songId !== lyricState\.songId\) \{[\s\S]{0,140}dirty = true/.test(mainSrc))
+  ok(
+    '整份歌词到手也会广播一帧',
+    /if \(Array\.isArray\(p\?\.lines\)\) \{[\s\S]{0,80}lyricState\.lines = p\.lines[\s\S]{0,40}dirty = true/.test(mainSrc),
+    '新词常常还落在同一个行号上，只看行号变了没，词换了却没人广播',
+  )
+  ok(
+    '没变化就不广播',
+    /if \(dirty\) pushLyric\(\)/.test(mainSrc) &&
+      !/lyricState\.text = \(lyricState\.lines\[index\] \|\| \{\}\)\.text \|\| ''\n\s*pushLyric\(\)/.test(mainSrc),
+    '以前只认「行号变了」，词换了却没人广播，画面上就一直是上一首的',
+  )
+  ok(
+    '叠加层丢掉不属于当前这首歌的词',
+    /const now = musicState\.current \? Number\(musicState\.current\.id\) \|\| 0 : 0/.test(overlayHtml) &&
+      /if \(songId && now && songId !== now\) return/.test(overlayHtml),
+  )
+
+  const lyricPreview = read(path.join(root, 'src', 'components', 'LyricPreview.tsx'))
+  ok('歌词预览用同一套类名', /cp-lyric__line/.test(lyricPreview) && /is-cur/.test(lyricPreview))
+}
+
+/**
+ * OBS 叠加层：窄画面下的自动避让。
+ *
+ * 背景：三块（弹幕 / 点歌 / 歌词）是各自 fixed 在自己的角上的，
+ * 一旦把 OBS 浏览器源拖成一条竖带，它们就压成一坨 —— 弹幕糊在歌词和点歌面板上。
+ * 修法是加一趟 layout()：按实测占位把同一侧真的打架的两块上下叠开，
+ * 再把弹幕的活动区缩进剩下的那一段。
+ *
+ * 这里守的是几件容易悄悄退化的事：量尺寸不能用会被入场动画带偏的 rect、
+ * 叠放必须「真重叠才叠」（否则宽画面下也会被无谓地挪开）、
+ * 塞不下必须裁掉最老的而不是糊到别人身上。
+ */
+function checkOverlayLayout() {
+  console.log('\n[24b] 叠加层自动避让')
+  const root = path.join(__dirname, '..')
+  const read = (p) => (fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : '')
+  const overlayHtml = read(path.join(root, 'overlay', 'index.html'))
+  const page = read(path.join(root, 'src', 'pages', 'OverlayPage.tsx'))
+  const DEFAULTS = require('../electron/store.cjs').DEFAULTS
+
+  ok('默认开启自动避让', DEFAULTS.overlay?.autoLayout === true)
+  ok('叠加层也认这个开关', /autoLayout:\s*true/.test(overlayHtml) && /cfg\.autoLayout === false/.test(overlayHtml))
+
+  ok('有重排这一趟', /function layout\(\)/.test(overlayHtml) && /function scheduleLayout\(\)/.test(overlayHtml))
+  // 入场动画是 transform 位移，getBoundingClientRect 量出来会跟着飘
+  ok(
+    '用 offset 尺寸而不是 rect',
+    /const width = node\.offsetWidth/.test(overlayHtml) && !/\.getBoundingClientRect\(/.test(overlayHtml),
+    '量占位必须用 offsetWidth/offsetHeight，rect 会被入场动画带偏',
+  )
+  // 居中的歌词靠 translateX(-50%) 归位，offsetLeft 还没算这一下
+  ok('居中歌词的占位折了位移', /centered \? width \/ 2 : 0/.test(overlayHtml))
+
+  // 只有同侧且水平上真的挨着才叠 —— 宽画面下 tl 的点歌 + bc 的歌词互不相干，不该被挪
+  ok(
+    '同侧又真的打架才叠开',
+    /musicTop === lyricTop && overlapsX\(m, l\)/.test(overlayHtml) && /function overlapsX/.test(overlayHtml),
+  )
+  ok('叠放时歌词贴边、点歌让到内侧', /lyricEl\.style\.bottom = pad/.test(overlayHtml) && /musicEl\.style\.bottom = pad \+ l\.height \+ gap/.test(overlayHtml))
+  ok('上半区镜像处理', /lyricEl\.style\.top = pad \+ m\.height \+ gap/.test(overlayHtml))
+
+  ok('弹幕活动区按预留内缩', /app\.style\.top = topBand \+ gap/.test(overlayHtml) && /app\.style\.bottom = botBand \+ gap/.test(overlayHtml))
+  // 内缩之外还有一道保险：塞不下就从离角落最远的那条开始删。
+  // 注意不能拿 scrollHeight 判断 —— #app 是 justify-content: flex-end，
+  // 超出去的那几条堆在上边，浏览器认为那块「滚动不可达」，根本不计数
+  ok('塞不下就裁掉最老的', /function fit\(\)/.test(overlayHtml) && /app\.removeChild\(app\.firstChild\)/.test(overlayHtml))
+  ok('裁剪按自己摞的高度判断', /function stackHeight/.test(overlayHtml), 'scrollHeight 量不到 flex-end 的上溢部分')
+  ok('弹幕容器裁掉溢出', /#app \{[\s\S]*?overflow: hidden/.test(overlayHtml))
+  ok('一条弹幕进来就重排', /trim\(\)\s*\n\s*scheduleLayout\(\)/.test(overlayHtml))
+  // 隐藏窗口里 Chromium 不派 resize 事件（视口会变、事件不来），所以这里不能等下一帧
+  ok(
+    '窗口变化立即重排',
+    /addEventListener\('resize', \(\) => \{[\s\S]{0,200}?layout\(\)/.test(overlayHtml),
+    'resize 必须同步 layout，rAF 在隐藏窗口里不跑',
+  )
+  ok('矮画面也算窄画面', /window\.innerWidth < NARROW_W \|\| window\.innerHeight < NARROW_H/.test(overlayHtml))
+  // 换歌 / 改行数会改这两块的高矮，光靠 resize 逮不到
+  ok('面板尺寸变化也会重排', /new ResizeObserver\(scheduleLayout\)/.test(overlayHtml))
+
+  // 窄条上原来那套按 1080p 定的宽度会顶出画面
+  ok('窄画面放开各块宽度', /html\.is-narrow \.cp-item/.test(overlayHtml) && /html\.is-narrow \.cp-lyric/.test(overlayHtml))
+  ok('窄画面给点歌面板留了高度上限', /html\.is-narrow \.cp-music[\s\S]*?max-height: 46%/.test(overlayHtml))
+  ok('窄画面给歌词也留了高度上限', /html\.is-narrow \.cp-lyric[\s\S]*?max-height: 28%/.test(overlayHtml))
+  ok('单个气泡不会高过弹幕区', /html\.is-narrow \.cp-item[\s\S]*?max-height: 100%/.test(overlayHtml))
+
+  ok('设置页有这个开关', /autoLayout/.test(page) && /自动避让/.test(page))
 }
 
 /**

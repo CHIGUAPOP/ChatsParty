@@ -2,6 +2,8 @@ import React from 'react'
 import { api, AppConfig, MusicState } from '../lib/api'
 import { Button, Card, Row, SectionTitle, Slider, Switch, TextField, TextArea, Select } from '../components/ui'
 import MusicWidget, { MUSIC_POS } from '../components/MusicWidget'
+import DanmakuPreview, { DANMAKU_POS } from '../components/DanmakuPreview'
+import LyricPreview, { LYRIC_POS, LYRIC_LINE_OPTIONS } from '../components/LyricPreview'
 
 interface Props {
   config: AppConfig
@@ -201,7 +203,58 @@ export default function OverlayPage({ config, patch, notify }: Props) {
       </Card>
 
       <SectionTitle>叠加层外观</SectionTitle>
+      <Card
+        title="大小"
+        desc="整体缩放会把头像、间距、圆角连同文字一起放大或缩小；只想动字就单独调字体大小。OBS 画布不是 1920×1080 时先调这个。"
+      >
+        <Row label="界面大小" hint="左边对齐不变，整体等比例缩放">
+          <div style={{ width: 220 }}>
+            <Slider
+              value={o.scale ?? 100}
+              min={50}
+              max={200}
+              step={5}
+              onChange={(v) => patch({ overlay: { scale: v } })}
+              suffix="%"
+            />
+          </div>
+        </Row>
+        <Row label="字体大小" hint="在整体缩放之上再单独调整字号，布局不动">
+          <div style={{ width: 220 }}>
+            <Slider
+              value={o.fontSize ?? 100}
+              min={50}
+              max={200}
+              step={5}
+              onChange={(v) => patch({ overlay: { fontSize: v } })}
+              suffix="%"
+            />
+          </div>
+        </Row>
+        <div className="row" style={{ gap: 8 }}>
+          <Button variant="text" small onClick={() => patch({ overlay: { scale: 100, fontSize: 100 } })} icon="refresh">
+            恢复默认
+          </Button>
+        </div>
+      </Card>
+
       <Card title="显示项">
+        <Row label="弹幕位置" hint="头像和文字对齐会自动跟着所选这一侧镜像，新的弹幕始终紧贴你选的角">
+          <div style={{ width: 190 }}>
+            <Select
+              label="弹幕位置"
+              value={o.danmakuPos || 'br'}
+              onChange={(v) => patch({ overlay: { danmakuPos: v } })}
+              options={DANMAKU_POS}
+            />
+          </div>
+        </Row>
+
+        <div className="obs-preview" style={{ marginTop: 4 }}>
+          <span className="obs-preview__tag">效果预览</span>
+          <DanmakuPreview pos={o.danmakuPos} />
+        </div>
+
         <Row label="显示头像">
           <Switch value={o.showFace} onChange={(v) => patch({ overlay: { showFace: v } })} />
         </Row>
@@ -228,7 +281,7 @@ export default function OverlayPage({ config, patch, notify }: Props) {
         <Row label="显示点歌面板">
           <Switch value={o.showMusic !== false} onChange={(v) => patch({ overlay: { showMusic: v } })} />
         </Row>
-        <Row label="位置" hint="弹幕默认堆在右下角，点歌面板放左上一般不会打架">
+        <Row label="位置" hint="挑一个不和弹幕打架的角">
           <div style={{ width: 150 }}>
             <Select
               label="位置"
@@ -261,6 +314,56 @@ export default function OverlayPage({ config, patch, notify }: Props) {
           {!music.current && music.items.length === 0 && (
             <div className="obs-preview__off">还没有歌 —— 去「点歌」页加一首，或让观众在弹幕里发「点歌 歌名」</div>
           )}
+        </div>
+      </Card>
+
+      <Card
+        title="歌词"
+        desc="当前这首歌的歌词会跟着播放进度滚动。纯音乐间奏没有歌词时这一块自动隐藏，不会在画面上留空白。"
+      >
+        <Row label="显示歌词">
+          <Switch value={o.showLyric !== false} onChange={(v) => patch({ overlay: { showLyric: v } })} />
+        </Row>
+        <Row label="位置" hint="默认底部居中，像字幕；也可以贴某一角">
+          <div style={{ width: 150 }}>
+            <Select
+              label="位置"
+              value={o.lyricPos || 'bc'}
+              onChange={(v) => patch({ overlay: { lyricPos: v } })}
+              options={LYRIC_POS}
+            />
+          </div>
+        </Row>
+        <Row label="同屏行数" hint="第一行是当前正在唱的，其余是提前预告">
+          <div style={{ width: 150 }}>
+            <Select
+              label="同屏行数"
+              value={String(o.lyricLines ?? 2)}
+              onChange={(v) => patch({ overlay: { lyricLines: Number(v) } })}
+              options={LYRIC_LINE_OPTIONS}
+            />
+          </div>
+        </Row>
+
+        <div className="obs-preview" style={{ marginTop: 12 }}>
+          <span className="obs-preview__tag">效果预览</span>
+          <LyricPreview pos={o.lyricPos} lines={o.lyricLines} />
+        </div>
+        <div className="tip" style={{ marginTop: 8 }}>
+          预览只示意位置与对齐，不含「界面大小 / 字体大小」的缩放 —— 那两个要在 OBS 里看真实画面。
+        </div>
+      </Card>
+
+      <Card
+        title="画面适配"
+        desc="OBS 浏览器源的宽高不一定是 16:9。拖成一条窄竖带时，弹幕、点歌面板、歌词会各占一段、互不遮挡。"
+      >
+        <Row label="自动避让" hint="按你选的位置摆好之后实测各块占位，同一侧真的挨在一起才上下叠开；宽画面下不动任何东西">
+          <Switch value={o.autoLayout !== false} onChange={(v) => patch({ overlay: { autoLayout: v } })} />
+        </Row>
+        <div className="tip" style={{ marginTop: 8 }}>
+          宽度不到 640px（或高度不到 540px）时还会顺带把三块的宽度放开 —— 弹幕气泡不再按 1080p
+          的宽度撑出画面，点歌面板和歌词也会各自限定高度，给弹幕留地方。关掉它就严格照你选的位置摆，重叠也照放。
         </div>
       </Card>
 

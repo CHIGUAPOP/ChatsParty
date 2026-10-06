@@ -31,6 +31,8 @@ class OverlayServer {
     // 新客户端连上时补发当前点歌状态（{current,items}）。
     // 不补的话，中途才开 OBS 看到的就是空的「正在播放」，要等下一首才出现。
     this.musicProvider = null
+    // 歌词：OBS 中途连上时补发当前这一句，否则要等下一行才出现字
+    this.lyricProvider = null
     // 有客户端连上/断开时回调，主进程据此把「几个连接」推给界面
     this.onClientsChange = null
     this.requestedPort = port
@@ -108,6 +110,10 @@ class OverlayServer {
           }
           const music = this.musicProvider ? this.musicProvider() : null
           if (music) ws.send(JSON.stringify({ type: 'music', payload: music }))
+          const lyric = this.lyricProvider ? this.lyricProvider() : null
+          // 没有词也要发这一帧 —— 「现在没有词」本身就是个事实，
+          // 而且是这样一种事实：不发的话，重连上来的页面会一直挂着断开前那一首的最后一句话。
+          if (lyric) ws.send(JSON.stringify({ type: 'lyric', payload: lyric }))
         } catch {
           /* noop */
         }

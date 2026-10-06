@@ -1903,3 +1903,174 @@ body {
   font-size: 12px;
   color: var(--md-sys-color-on-surface-variant);
 }
+
+/* ==========================================================================
+   弹幕位置预览（叠加层页设置用）
+   规则刻意照搬 overlay/index.html 的 #app / .cp-item —— DOM 顺序、column /
+   column-reverse、row-reverse 都对得上，所以预览所见即 OBS 所得。
+   差别只在尺寸：预览台比 1920×1080 小得多，图和字都相应缩小。
+   ========================================================================== */
+
+.dm-preview {
+  display: flex;
+  /* 缺省 = 右下：竖排、贴底、靠右 */
+  flex-direction: column;
+  justify-content: flex-end;
+  align-items: flex-end;
+  height: 190px;
+  gap: 6px;
+}
+
+/* 上半区翻转堆叠顺序，让 DOM 末尾（最新那条）显示在最上面 */
+.dm-preview[data-pos='tl'],
+.dm-preview[data-pos='tr'] {
+  flex-direction: column-reverse;
+}
+
+.dm-preview[data-pos='tl'],
+.dm-preview[data-pos='bl'] {
+  align-items: flex-start;
+}
+
+.dm-preview__item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  max-width: 320px;
+  padding: 8px 11px;
+  border-radius: 12px;
+  background: rgba(18, 18, 22, 0.72);
+  color: #f4f2f6;
+  border: 1px solid transparent;
+}
+
+.dm-preview__item.is-latest {
+  border-color: var(--md-sys-color-primary);
+}
+
+/* 贴右侧：头像挪到右、文字右对齐，头衔组也跟着反向排。
+   两侧都写死物理方向，不吃 text-align 的初始值 start（会随 direction 变） */
+.dm-preview[data-pos='tl'] .dm-preview__item,
+.dm-preview[data-pos='bl'] .dm-preview__item {
+  text-align: left;
+}
+.dm-preview[data-pos='tr'] .dm-preview__item,
+.dm-preview[data-pos='br'] .dm-preview__item {
+  flex-direction: row-reverse;
+  text-align: right;
+}
+
+.dm-preview__face {
+  width: 26px;
+  height: 26px;
+  flex: 0 0 26px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--md-sys-color-primary), var(--md-sys-color-tertiary));
+}
+
+.dm-preview__body {
+  min-width: 0;
+  flex: 1;
+}
+
+.dm-preview__head {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-bottom: 2px;
+}
+
+.dm-preview[data-pos='tr'] .dm-preview__head,
+.dm-preview[data-pos='br'] .dm-preview__head {
+  flex-direction: row-reverse;
+}
+
+.dm-preview__name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--md-sys-color-primary);
+}
+
+.dm-preview__medal {
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.dm-preview__text {
+  font-size: 13px;
+  line-height: 1.45;
+  word-break: break-word;
+}
+
+/* ==========================================================================
+   歌词位置预览（叠加层页设置用）
+   class 名与 overlay/index.html 的歌词区一致，只把尺寸缩到预览台放得下的量级。
+   预览不表现「界面大小 / 字体大小」的缩放 —— 那两个去 OBS 里看真实画面更准。
+   ========================================================================== */
+
+.lyric-stage {
+  position: relative;
+  height: 130px;
+}
+
+.lyric-stage .cp-lyric {
+  position: absolute;
+}
+
+.lyric-stage .cp-lyric[data-pos='tl'],
+.lyric-stage .cp-lyric[data-pos='bl'] {
+  left: 12px;
+}
+.lyric-stage .cp-lyric[data-pos='tr'],
+.lyric-stage .cp-lyric[data-pos='br'] {
+  right: 12px;
+}
+.lyric-stage .cp-lyric[data-pos='tl'],
+.lyric-stage .cp-lyric[data-pos='tr'] {
+  top: 12px;
+}
+.lyric-stage .cp-lyric[data-pos='bl'],
+.lyric-stage .cp-lyric[data-pos='br'] {
+  bottom: 12px;
+}
+
+.cp-lyric {
+  display: none;
+  flex-direction: column;
+  gap: 4px;
+  width: 76%;
+  text-align: center;
+  pointer-events: none;
+}
+
+.cp-lyric.is-show {
+  display: flex;
+}
+
+.lyric-stage .cp-lyric[data-pos='tc'] {
+  left: 50%;
+  top: 12px;
+  transform: translateX(-50%);
+}
+
+.lyric-stage .cp-lyric[data-pos='bc'] {
+  left: 50%;
+  bottom: 12px;
+  transform: translateX(-50%);
+}
+
+.cp-lyric__line {
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.35;
+  color: #fff;
+  opacity: 0.42;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.8);
+}
+
+.cp-lyric__line.is-cur {
+  opacity: 1;
+  transform: scale(1.06);
+}

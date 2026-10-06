@@ -76,6 +76,19 @@ const DEFAULTS = {
     showMusic: true,
     musicPos: 'tl',
     musicQueueCount: 3,
+    // 弹幕堆在哪个角：tl/tr/bl/br。头像与文字对齐会跟着这一侧自动镜像
+    danmakuPos: 'br',
+    // 界面整体大小百分比：乘在头像、间距、圆角、字号上，OBS 画布不等于 1080p 时用来整体调大小
+    scale: 100,
+    // 字体大小百分比：只再乘一次字号。想在不动布局的前提下把字调大就用它
+    fontSize: 100,
+    // 歌词：默认底部居中，像字幕。行数是指「当前句 + 后面预告几句」
+    showLyric: true,
+    lyricPos: 'bc',
+    lyricLines: 2,
+    // 自动避让：画面窄（比如把 OBS 浏览器源拖成一条竖带）时，
+    // 把弹幕/点歌/歌词分到互不相交的几段里，不再压成一坨
+    autoLayout: true,
     customCss: '',
     fontFamily: 'system-ui, "Microsoft YaHei", sans-serif',
     accent: '#D0BCFF',

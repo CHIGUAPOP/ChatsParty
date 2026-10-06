@@ -67,7 +67,19 @@ export interface AppConfig {
     showMusic?: boolean
     musicPos?: string
     musicQueueCount?: number
+    danmakuPos?: string
     customCss: string
+    /** 界面整体大小百分比（50–200），乘在所有尺寸上 */
+    scale?: number
+    /** 字体大小百分比（50–200），在整体缩放之上再乘一次字号 */
+    fontSize?: number
+    showLyric?: boolean
+    /** 歌词位置：tc / bc 上下居中，或 tl / tr / bl / br 四个角 */
+    lyricPos?: string
+    /** 同屏显示的歌词行数（含当前正在唱的那句） */
+    lyricLines?: number
+    /** 自动避让：画面一窄就把弹幕/点歌/歌词分到互不相交的几段里（默认开） */
+    autoLayout?: boolean
     fontFamily: string
     accent: string
   }
@@ -319,6 +331,13 @@ interface Bridge {
     search: (keyword: string, limit?: number) => Promise<MusicSong[]>
     url: (id: number) => Promise<MusicAudio>
     lyric: (id: number) => Promise<{ lrc: { time: number; text: string }[]; raw: string }>
+    /** 上报歌词进度（不按帧，只在换歌 / 换行 / 播放状态变化时调） */
+    lyricSync: (p: {
+      songId: number
+      lines?: { time: number; text: string }[]
+      index: number
+      playing: boolean
+    }) => Promise<void>
     check: () => Promise<{
       ok: boolean
       song: MusicSong

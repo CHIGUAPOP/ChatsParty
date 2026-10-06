@@ -1,5 +1,6 @@
 import React from 'react'
 import { api, AppConfig, LiveEvent, LoginInfo } from './lib/api'
+import { MusicPlayerProvider } from './lib/music-engine'
 import { applyMotion, applyScheme, buildScheme } from './lib/theme'
 import { setResolvedFace } from './lib/faces'
 import { Icon, Snackbar } from './components/ui'
@@ -214,19 +215,17 @@ export default function App() {
     }
   }, [])
 
-  if (!config) {
-    return (
-      <div className="app-shell">
-        <div className="empty-state" style={{ margin: 'auto' }}>
-          正在载入配置…
-        </div>
+  // 断言成非 null 是安全的：pageProps 只会在下面「配置已到手」的那个分支里被用到。
+  // TS 没法跨闭包收窄外层变量，所以这里显式说一句。
+  const pageProps = { config: config as AppConfig, patch, notify }
+
+  const content = !config ? (
+    <div className="app-shell">
+      <div className="empty-state" style={{ margin: 'auto' }}>
+        正在载入配置…
       </div>
-    )
-  }
-
-  const pageProps = { config, patch, notify }
-
-  return (
+    </div>
+  ) : (
     <div className="app-shell">
       <nav className="nav-rail">
         <button
@@ -309,6 +308,17 @@ export default function App() {
         </div>
       </div>
     </div>
+  )
+
+  /**
+   * 播放器挂在最外面一层：它必须比任何页面活得久。
+   * 以前这段逻辑住在 MusicPage 里，切走页面组件一卸载、订阅就被摘掉，
+   * 一首歌放完没人接下一首 —— 表现就是「放着放着就停」。
+   */
+  return (
+    <MusicPlayerProvider config={config} notify={notify}>
+      {content}
+    </MusicPlayerProvider>
   )
 }
 

@@ -1,6 +1,7 @@
 import React from 'react'
-import { api, AppConfig, MusicAccount, MusicQueueItem, MusicSong, MusicState } from '../lib/api'
+import { api, AppConfig, MusicAccount, MusicSong } from '../lib/api'
 import { Button, Card, Chip, Icon, Row, SectionTitle, Select, Slider, Switch, TextField, useLiveSave } from '../components/ui'
+import { useMusicPlayer } from '../lib/music-engine'
 
 interface Props {
   config: AppConfig
@@ -28,48 +29,22 @@ function splitList(s: string): string[] {
  * 放外面则真正做到「切页面不影响听歌」，播完的回调也还在。
  */
 /**
- * 浏览器抛的音频错误是英文加错误码，主播看不懂也做不了什么。
- * 按 HTMLMediaElement.error.code 翻成「哪儿错了 + 现在怎么办」。
+ * 这一页现在只是**遥控器**：界面上显示的一切都由常驻的播放引擎给了
+ * （见 src/lib/music-engine.tsx）。
+ *
+ * 播放器本体曾经住在这里，后果是切到别的页面组件就被卸载，
+ * 订阅一摘、effect 一停，歌放完也没人接着放下一首 —— 必须切回点歌页才继续。
+ * 那套逻辑整体搬走之后，这一页怎么切都不影响听歌了。
  */
-function describeAudioFailure(el: HTMLAudioElement | null, e?: any): string {
-  const code = el?.error?.code
-  if (code === 1) return '播放被中断了'
-  if (code === 2) return '网络断了，这首歌没下载完 —— 重新点一次'
-  if (code === 3) return '这个音频文件解不开 —— 换一版试试'
-  if (code === 4) return '拿到的播放地址播不了（会员/版权限制，或地址已过期）—— 换一版或重新点一次'
-  const msg = String(e?.message || e || '')
-  if (/no supported source|not supported/i.test(msg)) {
-    return '拿到的播放地址播不了（会员/版权限制，或地址已过期）—— 换一版或重新点一次'
-  }
-  if (/not allowed|user gesture|interact/i.test(msg)) return '自动播放被拦了 —— 点一下播放按钮'
-  return msg || '这首歌播放失败了'
-}
-
-let audioEl: HTMLAudioElement | null = null
-let playingId = 0
-
 export default function MusicPage({ config, patch, notify }: Props) {
   const m = config.music
+  const player = useMusicPlayer()
+  const { state, playing, position, duration, loading: loadingUrl, lrc, lrcIndex, toggle } = player
   const [keyword, setKeyword] = React.useState('')
   const [results, setResults] = React.useState<MusicSong[]>([])
   const [searching, setSearching] = React.useState(false)
   const [acct, setAcct] = React.useState<MusicAccount | null>(null)
   const [acctChecking, setAcctChecking] = React.useState(false)
-  const [state, setState] = React.useState<MusicState>({ items: [], current: null, queued: 0 })
-  const [lrc, setLrc] = React.useState<{ time: number; text: string }[]>([])
-  const [lrcIndex, setLrcIndex] = React.useState(-1)
-  const [playing, setPlaying] = React.useState(false)
-  const [position, setPosition] = React.useState(0)
-  const [duration, setDuration] = React.useState(0)
-  const [loadingUrl, setLoadingUrl] = React.useState(false)
-  /**
-   * 队列状态拉回来之前，**一个字都别信**。
-   * 初值是 {current:null}，如果拿它去跑「没歌了就停」，就会先把播放器暂停、
-   * 再把「当前这首」的标记清掉；等真实状态一到，又当成新歌从头播一遍。
-   * 表现就是：暂停之后切走再切回来，歌自己又开始放了。
-   */
-  const [ready, setReady] = React.useState(false)
-
 
   // 触发词和 Cookie 都是边打边存：停手 600ms 自动落盘，失焦再补一次。
   // 以前要打回车才生效，粘完 Cookie 顺手点别处就白填了。
@@ -77,133 +52,6 @@ export default function MusicPage({ config, patch, notify }: Props) {
     patch({ music: { commands: splitList(v) } }),
   )
   const cookie = useLiveSave(m.cookie || '', (v) => patch({ music: { cookie: v } }))
-
-  /** 把播放器回调绑到**当前这次挂载**的 setState 上：切回来之后进度条才不会僵住 */
-  const bindAudio = React.useCallback(
-    (el: HTMLAudioElement) => {
-      el.onloadedmetadata = () => setDuration(el.duration || 0)
-      el.ontimeupdate = () => setPosition(el.currentTime || 0)
-      el.onerror = () => {
-        setPlaying(false)
-        // 播放中途断流也走这里；统一由它负责提示 + 跳下一首
-        notify(describeAudioFailure(el), true)
-        api.music.next()
-      }
-      el.onended = () => {
-        setPlaying(false)
-        playingId = 0
-        api.music.next()
-      }
-    },
-    [notify],
-  )
-
-  React.useEffect(() => {
-    const take = (s: MusicState) => {
-      setState(s)
-      setReady(true)
-    }
-    api.music.state().then(take)
-    // 切回来时歌可能正在播，界面要跟上（回调也得重新绑到这次挂载的 setState）
-    if (audioEl) {
-      bindAudio(audioEl)
-      if (!audioEl.paused) {
-        setPlaying(true)
-        setPosition(audioEl.currentTime || 0)
-        setDuration(audioEl.duration || 0)
-      }
-    }
-    return api.music.onState(take)
-  }, [bindAudio])
-
-  /* 音量随时可调，不用等重启 */
-  React.useEffect(() => {
-    if (audioEl) audioEl.volume = m.volume
-  }, [m.volume])
-
-  /** 取链接并播放当前这首 */
-  const playCurrent = React.useCallback(
-    async (item: MusicQueueItem) => {
-      if (!item) return
-      if (playingId === item.id && audioEl) {
-        // 已经在播这首了（比如只是切回来），别重复取链
-        return
-      }
-      playingId = item.id
-      setLoadingUrl(true)
-      setLrc([])
-      setLrcIndex(-1)
-      setPosition(0)
-      // 只有真的走到「创建播放器」这一步，才可能由 el.onerror 接管；取链接失败时它还该是 null
-      let el: HTMLAudioElement | null = null
-      try {
-        const audio = await api.music.url(item.id)
-        el = audioEl || new Audio()
-        audioEl = el
-        el.src = audio.url
-        el.volume = m.volume
-        bindAudio(el)
-        await el.play()
-        setPlaying(true)
-      } catch (e: any) {
-        playingId = 0
-        setPlaying(false)
-        // 媒体加载失败会同时触发 el.onerror，那边已经提示并跳下一首了 —— 这里别再跳一次，否则一次失败跳两首
-        if (el?.error) return
-        const msg = describeAudioFailure(el, e)
-        notify(msg, true)
-        // 自动播放被拦时歌是好的，跳走反而莫名其妙
-        if (!/自动播放/.test(msg)) api.music.next()
-      } finally {
-        setLoadingUrl(false)
-      }
-    },
-    [m.volume, notify, bindAudio],
-  )
-
-  // 当前曲目变了就播它；队列空了就停
-  React.useEffect(() => {
-    // 状态还没到手就别动手 —— 否则会把「正在播」误判成「没歌了」
-    if (!ready) return
-    const cur = state.current
-    if (!cur) {
-      if (audioEl) {
-        audioEl.pause()
-        audioEl.onended = null
-      }
-      playingId = 0
-      setPlaying(false)
-      return
-    }
-    playCurrent(cur)
-    // playCurrent 里已经用 playingId 挡住了「同一首重复取链」，
-    // 所以手动暂停之后切回这一页不会自己又开始放。
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ready, state.current?.id])
-
-  /* 歌词：换歌时取一次 */
-  React.useEffect(() => {
-    const id = state.current?.id
-    if (!id) {
-      setLrc([])
-      return
-    }
-    api.music
-      .lyric(id)
-      .then((r) => setLrc(r.lrc || []))
-      .catch(() => setLrc([]))
-  }, [state.current?.id])
-
-  /* 跟着播放进度高亮歌词 */
-  React.useEffect(() => {
-    if (!lrc.length) return
-    let idx = -1
-    for (let i = 0; i < lrc.length; i++) {
-      if (lrc[i].time <= position) idx = i
-      else break
-    }
-    setLrcIndex(idx)
-  }, [position, lrc])
 
   const search = async () => {
     const kw = keyword.trim()
@@ -224,23 +72,6 @@ export default function MusicPage({ config, patch, notify }: Props) {
     const r = await api.music.enqueue(song, '主播')
     if (r.ok) notify(`已加入点歌队列（第 ${r.position} 位）`)
     else notify(r.reason === 'full' ? '歌单满了，先放完几首' : '加入失败', true)
-  }
-
-  const toggle = () => {
-    const el = audioEl
-    if (!el) {
-      if (state.current) playCurrent(state.current)
-      else api.music.play()
-      return
-    }
-    if (el.paused) {
-      el.play()
-        .then(() => setPlaying(true))
-        .catch((e: any) => notify(describeAudioFailure(el, e), true))
-    } else {
-      el.pause()
-      setPlaying(false)
-    }
   }
 
   const runCheck = async () => {

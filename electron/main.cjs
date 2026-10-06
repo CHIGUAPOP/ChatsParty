@@ -57,6 +57,27 @@ function musicSnapshot() {
   return { items: musicQueue.slice(), current: musicCurrent, queued: musicQueue.length }
 }
 
+/** 当前歌词的一份快照。渲染层推过来，广播给 OBS 用 */
+let lyricState = { songId: 0, lines: [], index: -1, text: '', playing: false }
+
+function pushLyric() {
+  if (overlay) overlay.broadcast('lyric', snapshotLyric())
+}
+
+/** 给叠加层用的歌词帧。整个 lines 数组不发 —— OBS 只需要当前行附近的几句 */
+function snapshotLyric() {
+  const { index, lines, playing } = lyricState
+  if (!lines.length) return { songId: lyricState.songId, index: -1, text: '', playing }
+  return {
+    songId: lyricState.songId,
+    index,
+    text: lyricState.text,
+    playing,
+    lines: lines.map((l) => l.text),
+    times: lines.map((l) => l.time),
+  }
+}
+
 function pushMusicState() {
   const snap = musicSnapshot()
   send('music:state', snap)
@@ -1441,6 +1462,47 @@ function registerIpc() {
   ipcMain.handle('music:lyric', async (_e, id) => NCM.lyric(id, musicOpts()))
 
   // 登录态只有这里能查（要带上 Cookie 去问网易云），界面上单独放一个按钮触发
+  /**
+   * 歌词中转。播放器在渲染层（那边才有 Audio 实例），OBS 只认主进程的 WebSocket，
+   * 所以行号和整份文本由渲染层推过来，这里存一份再广播出去。
+   * 存下来还为了一件事：OBS 中途才连上时，能把当前歌词补发一遍，
+   * 否则主播得等到下一句才会看到字。
+   */
+  ipcMain.handle('music:lyricSync', (_e, p) => {
+    const songId = Number(p?.songId) || 0
+    if (!songId) {
+      lyricState = { songId: 0, lines: [], index: -1, text: '', playing: false }
+      pushLyric()
+      return
+    }
+    // 换歌了：先把上一首的行清掉，等渲染层把新歌词送过来。
+    // 不然会出现「新歌配旧词」的几百毫秒。
+    // 这一帧也必须推出去 —— OBS 那边得有人告诉它「刚才那些词过期了」，
+    // 光在本地清空的话，画面上会一直挂着上一首的最后一句。
+    let dirty = false
+    if (songId !== lyricState.songId) {
+      lyricState = { songId, lines: [], index: -1, text: '', playing: false }
+      dirty = true
+    }
+    // 整份歌词到手也要推：新词往往落在同一个行号上（前奏时都是 -1），
+    // 只看行号变没变的话，词换了却没人广播，画面上就一直是上一首的。
+    if (Array.isArray(p?.lines)) {
+      lyricState.lines = p.lines
+      dirty = true
+    }
+    const index = Number.isFinite(Number(p?.index)) ? Number(p.index) : -1
+    lyricState.playing = Boolean(p?.playing)
+    if (index !== lyricState.index) {
+      lyricState.index = index
+      lyricState.text = (lyricState.lines[index] || {}).text || ''
+      dirty = true
+    } else if (index === -1 && lyricState.text) {
+      lyricState.text = ''
+      dirty = true
+    }
+    if (dirty) pushLyric()
+  })
+
   ipcMain.handle('music:account', async () => NCM.accountInfo(musicOpts()))
 
   ipcMain.handle('music:check', async () => {
@@ -1939,6 +2001,7 @@ async function ensureOverlay(port) {
     overlay.configProvider = () => store.get().overlay
     overlay.faceProvider = () => (faces ? [...faces.cache].map(([src, data]) => ({ src, data })) : [])
     overlay.musicProvider = () => musicSnapshot()
+    overlay.lyricProvider = () => snapshotLyric()
     overlay.onClientsChange = () => sendOverlayStatus()
   }
   return overlay.start(Number(port) || 12450)

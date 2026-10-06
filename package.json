@@ -14,6 +14,7 @@
     "typecheck": "tsc --noEmit",
     "test": "node scripts/smoke.cjs",
     "e2e:danmaku": "electron scripts/e2e-danmaku.cjs",
+    "e2e:lyric": "electron scripts/e2e-lyric-switch.cjs",
     "start": "electron ."
   },
   "dependencies": {
