@@ -146,13 +146,6 @@ export default function DanmakuPage({ config, patch, notify, events, status }: P
         )}
 
         <div className="composer-bar">
-          <button
-            type="button"
-            className="composer-bar__swatch"
-            title={`弹幕颜色 ${colorHex}（点开改）`}
-            style={{ background: colorHex }}
-            onClick={() => setShowPanel(true)}
-          />
           <input
             className="composer-bar__input"
             maxLength={30}
@@ -178,10 +171,11 @@ export default function DanmakuPage({ config, patch, notify, events, status }: P
           <button
             type="button"
             className={`icon-btn${showPanel ? ' is-active' : ''}`}
-            title="发送设置"
+            title={`发送设置（弹幕颜色 ${colorHex}）`}
             onClick={() => setShowPanel((v) => !v)}
           >
             <Icon name="settings" size={20} />
+            <span className="icon-btn__dot" style={{ background: colorHex }} />
           </button>
           <Button onClick={send} disabled={sending || !text.trim()} icon="send">
             发送

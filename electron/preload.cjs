@@ -88,6 +88,8 @@ const api = {
   app: {
     exportLog: () => ipcRenderer.invoke('app:exportLog'),
     diagnostics: () => ipcRenderer.invoke('app:diagnostics'),
+    info: () => ipcRenderer.invoke('app:info'),
+    openExternal: (url) => ipcRenderer.invoke('app:openExternal', url),
   },
 }
 

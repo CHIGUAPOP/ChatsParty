@@ -1,6 +1,8 @@
 import { argbFromHex, hexFromArgb, themeFromSourceColor, Hct } from '@material/material-color-utilities'
 
 export type ThemeMode = 'light' | 'dark'
+/** 动效方案：standard 克制，expressive 为 M3 Expressive 的弹簧 + 位移表达 */
+export type MotionScheme = 'standard' | 'expressive'
 
 export interface Scheme {
   [token: string]: string
@@ -87,6 +89,11 @@ export function applyScheme(scheme: Scheme, mode: ThemeMode) {
   root.style.setProperty('--md-sys-color-surface', bg)
   root.style.colorScheme = mode
   root.dataset.theme = mode
+}
+
+/** 切换动效方案：只改 <html data-motion>，CSS 里所有缓动/时长/位移令牌会整体跟着换 */
+export function applyMotion(scheme: MotionScheme) {
+  document.documentElement.dataset.motion = scheme
 }
 
 /** 从种子色生成一排 tonal 色板，供调色面板挑选 */

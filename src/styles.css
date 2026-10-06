@@ -47,7 +47,206 @@
   --md-sys-motion-duration-short: 150ms;
   --md-sys-motion-duration-medium: 250ms;
 
+  /* 语义缓动：短/中两档，分别绑定到对应弹簧。standard 下与上面的基线取值一致，
+     expressive 下换成弹簧曲线 + 弹簧的自然稳定时长（见文件末尾 scheme 覆盖块） */
+  --md-sys-motion-easing-short: cubic-bezier(0.2, 0, 0, 1);
+  --md-sys-motion-easing-medium: cubic-bezier(0.2, 0, 0, 1);
+
+  /* M3E 用「尺寸/位移」而不是只有颜色来表达状态。standard 下这三个值取中性值，
+     所有引用它们的规则等价于「没有位移」，视觉与改造前完全一致 */
+  --md-sys-motion-lift: 0px; /* 悬停抬升 */
+  --md-sys-motion-press: 1; /* 按下缩放 */
+  --md-sys-motion-enter: 0px; /* 进场位移 */
+  --md-sys-motion-stretch: 0px; /* 按下时 knob 拉伸 */
+  --md-sys-motion-grow: 1.06; /* 色板这类小方块的悬停放大 */
+
   color-scheme: dark;
+
+  /* ===== M3 Expressive 追加令牌（纯新增，不改任何现有取值，视觉零变化） ===== */
+
+  /* 字阶：官方 M3 十五档字阶，含字距与 M3E 的 emphasized 字重轴 */
+  --md-sys-typescale-display-large-size: 57px;
+  --md-sys-typescale-display-large-line-height: 64px;
+  --md-sys-typescale-display-large-weight: 400;
+  --md-sys-typescale-display-large-tracking: -0.25px;
+  --md-sys-typescale-display-large-weight-emphasized: 700;
+
+  --md-sys-typescale-display-medium-size: 45px;
+  --md-sys-typescale-display-medium-line-height: 52px;
+  --md-sys-typescale-display-medium-weight: 400;
+  --md-sys-typescale-display-medium-tracking: 0px;
+  --md-sys-typescale-display-medium-weight-emphasized: 700;
+
+  --md-sys-typescale-display-small-size: 36px;
+  --md-sys-typescale-display-small-line-height: 44px;
+  --md-sys-typescale-display-small-weight: 400;
+  --md-sys-typescale-display-small-tracking: 0px;
+  --md-sys-typescale-display-small-weight-emphasized: 700;
+
+  --md-sys-typescale-headline-large-size: 32px;
+  --md-sys-typescale-headline-large-line-height: 40px;
+  --md-sys-typescale-headline-large-weight: 400;
+  --md-sys-typescale-headline-large-tracking: 0px;
+  --md-sys-typescale-headline-large-weight-emphasized: 700;
+
+  --md-sys-typescale-headline-medium-size: 28px;
+  --md-sys-typescale-headline-medium-line-height: 36px;
+  --md-sys-typescale-headline-medium-weight: 400;
+  --md-sys-typescale-headline-medium-tracking: 0px;
+  --md-sys-typescale-headline-medium-weight-emphasized: 700;
+
+  --md-sys-typescale-headline-small-size: 24px;
+  --md-sys-typescale-headline-small-line-height: 32px;
+  --md-sys-typescale-headline-small-weight: 400;
+  --md-sys-typescale-headline-small-tracking: 0px;
+  --md-sys-typescale-headline-small-weight-emphasized: 700;
+
+  --md-sys-typescale-title-large-size: 22px;
+  --md-sys-typescale-title-large-line-height: 28px;
+  --md-sys-typescale-title-large-weight: 400;
+  --md-sys-typescale-title-large-tracking: 0px;
+  --md-sys-typescale-title-large-weight-emphasized: 700;
+
+  --md-sys-typescale-title-medium-size: 16px;
+  --md-sys-typescale-title-medium-line-height: 24px;
+  --md-sys-typescale-title-medium-weight: 500;
+  --md-sys-typescale-title-medium-tracking: 0.15px;
+  --md-sys-typescale-title-medium-weight-emphasized: 700;
+
+  --md-sys-typescale-title-small-size: 14px;
+  --md-sys-typescale-title-small-line-height: 20px;
+  --md-sys-typescale-title-small-weight: 500;
+  --md-sys-typescale-title-small-tracking: 0.1px;
+  --md-sys-typescale-title-small-weight-emphasized: 700;
+
+  --md-sys-typescale-body-large-size: 16px;
+  --md-sys-typescale-body-large-line-height: 24px;
+  --md-sys-typescale-body-large-weight: 400;
+  --md-sys-typescale-body-large-tracking: 0.5px;
+
+  --md-sys-typescale-body-medium-size: 14px;
+  --md-sys-typescale-body-medium-line-height: 20px;
+  --md-sys-typescale-body-medium-weight: 400;
+  --md-sys-typescale-body-medium-tracking: 0.25px;
+
+  --md-sys-typescale-body-small-size: 12px;
+  --md-sys-typescale-body-small-line-height: 16px;
+  --md-sys-typescale-body-small-weight: 400;
+  --md-sys-typescale-body-small-tracking: 0.4px;
+
+  --md-sys-typescale-label-large-size: 14px;
+  --md-sys-typescale-label-large-line-height: 20px;
+  --md-sys-typescale-label-large-weight: 500;
+  --md-sys-typescale-label-large-tracking: 0.1px;
+
+  --md-sys-typescale-label-medium-size: 12px;
+  --md-sys-typescale-label-medium-line-height: 16px;
+  --md-sys-typescale-label-medium-weight: 500;
+  --md-sys-typescale-label-medium-tracking: 0.5px;
+
+  --md-sys-typescale-label-small-size: 11px;
+  --md-sys-typescale-label-small-line-height: 16px;
+  --md-sys-typescale-label-small-weight: 500;
+  --md-sys-typescale-label-small-tracking: 0.5px;
+
+  /* 间距：8dp 网格 */
+  --md-sys-spacing-xs: 4px;
+  --md-sys-spacing-sm: 8px;
+  --md-sys-spacing-md: 16px;
+  --md-sys-spacing-lg: 24px;
+  --md-sys-spacing-xl: 32px;
+  --md-sys-spacing-xxl: 48px;
+
+  /* 弹簧动效：官方两个 scheme 的刚度/阻尼，及由参数数值求解出的 CSS linear() 曲线 */
+  --md-sys-motion-spring-standard-fast-spatial-stiffness: 1400;
+  --md-sys-motion-spring-standard-fast-spatial-damping: 0.9;
+  --md-sys-motion-spring-standard-fast-spatial: linear(0, 0.0139, 0.0501, 0.1016, 0.1629, 0.2297, 0.2987, 0.3676, 0.4345, 0.4982, 0.5578, 0.613, 0.6635, 0.7091, 0.7501, 0.7865, 0.8187, 0.847, 0.8716, 0.893, 0.9113, 0.9271, 0.9405, 0.9518, 0.9614, 0.9693, 0.9759, 0.9814, 0.9859, 0.9895, 0.9924, 0.9948, 0.9966, 1);
+  --md-sys-motion-spring-standard-default-spatial-stiffness: 700;
+  --md-sys-motion-spring-standard-default-spatial-damping: 0.9;
+  --md-sys-motion-spring-standard-default-spatial: linear(0, 0.0139, 0.0501, 0.1016, 0.1629, 0.2296, 0.2987, 0.3675, 0.4344, 0.498, 0.5577, 0.6129, 0.6633, 0.709, 0.7499, 0.7864, 0.8186, 0.8469, 0.8715, 0.8929, 0.9113, 0.927, 0.9404, 0.9518, 0.9613, 0.9693, 0.9759, 0.9814, 0.9858, 0.9895, 0.9924, 0.9947, 0.9966, 1);
+  --md-sys-motion-spring-standard-slow-spatial-stiffness: 300;
+  --md-sys-motion-spring-standard-slow-spatial-damping: 0.9;
+  --md-sys-motion-spring-standard-slow-spatial: linear(0, 0.0139, 0.0501, 0.1016, 0.1629, 0.2297, 0.2987, 0.3675, 0.4344, 0.4981, 0.5577, 0.6129, 0.6634, 0.709, 0.75, 0.7864, 0.8186, 0.8469, 0.8715, 0.8929, 0.9113, 0.927, 0.9404, 0.9518, 0.9613, 0.9693, 0.9759, 0.9814, 0.9859, 0.9895, 0.9924, 0.9947, 0.9966, 1);
+  --md-sys-motion-spring-standard-fast-effects-stiffness: 3800;
+  --md-sys-motion-spring-standard-fast-effects-damping: 1.0;
+  --md-sys-motion-spring-standard-fast-effects: linear(0, 0.0896, 0.2627, 0.44, 0.5917, 0.7105, 0.7989, 0.8625, 0.9072, 0.9379, 0.9588, 0.9729, 0.9823, 0.9885, 0.9925, 0.9952, 0.9969, 1);
+  --md-sys-motion-spring-standard-default-effects-stiffness: 1600;
+  --md-sys-motion-spring-standard-default-effects-damping: 1.0;
+  --md-sys-motion-spring-standard-default-effects: linear(0, 0.0896, 0.2627, 0.44, 0.5917, 0.7105, 0.7989, 0.8625, 0.9072, 0.9379, 0.9589, 0.9729, 0.9823, 0.9885, 0.9925, 0.9952, 0.9969, 1);
+  --md-sys-motion-spring-standard-slow-effects-stiffness: 800;
+  --md-sys-motion-spring-standard-slow-effects-damping: 1.0;
+  --md-sys-motion-spring-standard-slow-effects: linear(0, 0.0895, 0.2626, 0.44, 0.5916, 0.7104, 0.7989, 0.8625, 0.9071, 0.9379, 0.9588, 0.9729, 0.9823, 0.9884, 0.9925, 0.9952, 0.9969, 1);
+  --md-sys-motion-spring-expressive-fast-spatial-stiffness: 800;
+  --md-sys-motion-spring-expressive-fast-spatial-damping: 0.6;
+  --md-sys-motion-spring-expressive-fast-spatial: linear(0, 0.0393, 0.1381, 0.2711, 0.4182, 0.5642, 0.6986, 0.8149, 0.91, 0.9832, 1.0356, 1.0696, 1.0882, 1.0947, 1.0922, 1.0836, 1.0714, 1.0575, 1.0436, 1.0306, 1.0193, 1.0099, 1.0026, 0.9973, 0.9938, 0.9919, 0.9911, 0.9912, 0.9919, 0.993, 0.9943, 0.9956, 0.9969, 1);
+  --md-sys-motion-spring-expressive-default-spatial-stiffness: 380;
+  --md-sys-motion-spring-expressive-default-spatial-damping: 0.8;
+  --md-sys-motion-spring-expressive-default-spatial: linear(0, 0.0259, 0.091, 0.1794, 0.2793, 0.3821, 0.4819, 0.5748, 0.6585, 0.7318, 0.7946, 0.8471, 0.8902, 0.9248, 0.9518, 0.9725, 0.9879, 0.9989, 1.0064, 1.0112, 1.0139, 1.015, 1.0151, 1.0144, 1.0132, 1.0118, 1.0102, 1.0087, 1.0072, 1.0058, 1.0046, 1.0036, 1.0027, 1);
+  --md-sys-motion-spring-expressive-slow-spatial-stiffness: 200;
+  --md-sys-motion-spring-expressive-slow-spatial-damping: 0.8;
+  --md-sys-motion-spring-expressive-slow-spatial: linear(0, 0.0259, 0.091, 0.1794, 0.2792, 0.3821, 0.4818, 0.5747, 0.6584, 0.7318, 0.7945, 0.8471, 0.8902, 0.9247, 0.9518, 0.9725, 0.9879, 0.9989, 1.0064, 1.0112, 1.0139, 1.015, 1.0151, 1.0144, 1.0132, 1.0118, 1.0102, 1.0087, 1.0072, 1.0058, 1.0046, 1.0036, 1.0027, 1);
+  --md-sys-motion-spring-expressive-fast-effects-stiffness: 3800;
+  --md-sys-motion-spring-expressive-fast-effects-damping: 1.0;
+  --md-sys-motion-spring-expressive-fast-effects: linear(0, 0.0896, 0.2627, 0.44, 0.5917, 0.7105, 0.7989, 0.8625, 0.9072, 0.9379, 0.9588, 0.9729, 0.9823, 0.9885, 0.9925, 0.9952, 0.9969, 1);
+  --md-sys-motion-spring-expressive-default-effects-stiffness: 1600;
+  --md-sys-motion-spring-expressive-default-effects-damping: 1.0;
+  --md-sys-motion-spring-expressive-default-effects: linear(0, 0.0896, 0.2627, 0.44, 0.5917, 0.7105, 0.7989, 0.8625, 0.9072, 0.9379, 0.9589, 0.9729, 0.9823, 0.9885, 0.9925, 0.9952, 0.9969, 1);
+  --md-sys-motion-spring-expressive-slow-effects-stiffness: 800;
+  --md-sys-motion-spring-expressive-slow-effects-damping: 1.0;
+  --md-sys-motion-spring-expressive-slow-effects: linear(0, 0.0895, 0.2626, 0.44, 0.5916, 0.7104, 0.7989, 0.8625, 0.9071, 0.9379, 0.9588, 0.9729, 0.9823, 0.9884, 0.9925, 0.9952, 0.9969, 1);
+
+  /* 当前生效的 scheme：默认 standard（保留现有观感）；切 expressive 见文件末尾的覆盖块 */
+  --md-sys-motion-spring-fast-spatial: var(--md-sys-motion-spring-standard-fast-spatial);
+  --md-sys-motion-spring-default-spatial: var(--md-sys-motion-spring-standard-default-spatial);
+  --md-sys-motion-spring-slow-spatial: var(--md-sys-motion-spring-standard-slow-spatial);
+  --md-sys-motion-spring-fast-effects: var(--md-sys-motion-spring-standard-fast-effects);
+  --md-sys-motion-spring-default-effects: var(--md-sys-motion-spring-standard-default-effects);
+  --md-sys-motion-spring-slow-effects: var(--md-sys-motion-spring-standard-slow-effects);
+}
+
+:root[data-motion="expressive"] {
+  --md-sys-motion-spring-fast-spatial: var(--md-sys-motion-spring-expressive-fast-spatial);
+  --md-sys-motion-spring-default-spatial: var(--md-sys-motion-spring-expressive-default-spatial);
+  --md-sys-motion-spring-slow-spatial: var(--md-sys-motion-spring-expressive-slow-spatial);
+  --md-sys-motion-spring-fast-effects: var(--md-sys-motion-spring-expressive-fast-effects);
+  --md-sys-motion-spring-default-effects: var(--md-sys-motion-spring-expressive-default-effects);
+  --md-sys-motion-spring-slow-effects: var(--md-sys-motion-spring-expressive-slow-effects);
+
+  /* 缓动换成弹簧，时长取该弹簧的自然稳定时间（截短会丢掉回弹、拉长会拖沓）：
+     fast-spatial 348ms（过冲 9.5%，用于颜色这类小变化）
+     default-spatial 412ms（过冲 1.5%，用于位移、开关这类需要跟手的变化） */
+  --md-sys-motion-easing-short: var(--md-sys-motion-spring-expressive-fast-spatial);
+  --md-sys-motion-easing-medium: var(--md-sys-motion-spring-expressive-default-spatial);
+  --md-sys-motion-duration-short: 348ms;
+  --md-sys-motion-duration-medium: 412ms;
+
+  /* 位移幅度：M3E 的「尺寸表达状态」 */
+  --md-sys-motion-lift: 3px;
+  --md-sys-motion-press: 0.94;
+  --md-sys-motion-enter: 10px;
+  --md-sys-motion-stretch: 8px;
+  --md-sys-motion-grow: 1.12;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* 第二个选择器和 :root[data-motion="expressive"] 特异性相同，靠后者覆盖它 */
+  :root,
+  :root[data-motion="expressive"] {
+    --md-sys-motion-spring-fast-spatial: linear(0, 1);
+    --md-sys-motion-spring-default-spatial: linear(0, 1);
+    --md-sys-motion-spring-slow-spatial: linear(0, 1);
+    --md-sys-motion-spring-fast-effects: linear(0, 1);
+    --md-sys-motion-spring-default-effects: linear(0, 1);
+    --md-sys-motion-spring-slow-effects: linear(0, 1);
+    --md-sys-motion-easing-short: linear(0, 1);
+    --md-sys-motion-easing-medium: linear(0, 1);
+    --md-sys-motion-duration-short: 1ms;
+    --md-sys-motion-duration-medium: 1ms;
+    --md-sys-motion-lift: 0px;
+    --md-sys-motion-press: 1;
+    --md-sys-motion-enter: 0px;
+    --md-sys-motion-stretch: 0px;
+  }
 }
 
 * {
@@ -122,6 +321,29 @@ body {
   margin-bottom: 8px;
   user-select: none;
   -webkit-user-drag: none;
+  /* 现在是「关于」页的入口（button），把浏览器默认样式清掉 */
+  padding: 0;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  border-radius: var(--md-sys-shape-corner-large);
+  transition:
+    transform var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-medium),
+    filter var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-short);
+}
+
+.nav-rail__logo:hover img {
+  filter: brightness(1.12);
+}
+
+.nav-rail__logo:active {
+  transform: scale(var(--md-sys-motion-press));
+}
+
+/* 停在「关于」页时，图标套一圈主色描边 —— 否则没有选中态，看不出自己在哪 */
+.nav-rail__logo.is-active {
+  outline: 2px solid var(--md-sys-color-primary);
+  outline-offset: 2px;
 }
 
 .nav-rail__logo img {
@@ -132,8 +354,9 @@ body {
 }
 
 .nav-rail__item {
+  position: relative;
   width: 72px;
-  padding: 6px 0 4px;
+  padding: 8px 0 6px;
   border: none;
   background: transparent;
   color: var(--md-sys-color-on-surface-variant);
@@ -144,21 +367,26 @@ body {
   gap: 4px;
   border-radius: var(--md-sys-shape-corner-medium);
   font-family: inherit;
-  transition: color var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-standard);
+  transition: color var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-short);
 }
 
 .nav-rail__item:hover {
   color: var(--md-sys-color-on-surface);
 }
 
+/* 选中态：一层铺满整个条目（图标 + 文字都在它上面）的圆角矩形，
+   不再是只垫在图标后面的那颗小胶囊 */
 .nav-rail__indicator {
-  width: 56px;
-  height: 32px;
-  border-radius: var(--md-sys-shape-corner-full);
-  display: grid;
-  place-items: center;
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  border-radius: var(--md-sys-shape-corner-medium);
   background: transparent;
-  transition: background var(--md-sys-motion-duration-medium) var(--md-sys-motion-easing-standard);
+  transition: background var(--md-sys-motion-duration-medium) var(--md-sys-motion-easing-medium);
+}
+
+.nav-rail__item:hover .nav-rail__indicator {
+  background: var(--md-sys-color-surface-container-highest);
 }
 
 .nav-rail__item.is-active .nav-rail__indicator {
@@ -167,6 +395,13 @@ body {
 
 .nav-rail__item.is-active {
   color: var(--md-sys-color-on-secondary-container);
+}
+
+/* 图标和文字要盖在选中态背景上面 */
+.nav-rail__icon,
+.nav-rail__label {
+  position: relative;
+  z-index: 1;
 }
 
 .nav-rail__icon {
@@ -328,9 +563,9 @@ body {
   justify-content: center;
   gap: 8px;
   transition:
-    background var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-standard),
-    color var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-standard),
-    box-shadow var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-standard);
+    background var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-short),
+    color var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-short),
+    box-shadow var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-short);
   white-space: nowrap;
 }
 
@@ -426,7 +661,7 @@ body {
   border-radius: 4px 4px 0 0;
   padding: 20px 16px 8px;
   outline: none;
-  transition: border-color var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-standard);
+  transition: border-color var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-short);
 }
 
 .field__input:focus,
@@ -446,15 +681,15 @@ body {
   pointer-events: none;
   transform-origin: left top;
   transition:
-    transform var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-standard),
-    color var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-standard);
+    transform var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-short),
+    color var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-short);
 }
 
 /* 占位文字只在聚焦时出现 —— 此时标签已经上浮，两者不会重叠 */
 .field__input::placeholder,
 .field__textarea::placeholder {
   color: transparent;
-  transition: color var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-standard);
+  transition: color var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-short);
 }
 
 .field__input:focus::placeholder,
@@ -510,8 +745,8 @@ body {
   cursor: pointer;
   padding: 0;
   transition:
-    background var(--md-sys-motion-duration-medium) var(--md-sys-motion-easing-standard),
-    border-color var(--md-sys-motion-duration-medium) var(--md-sys-motion-easing-standard);
+    background var(--md-sys-motion-duration-medium) var(--md-sys-motion-easing-medium),
+    border-color var(--md-sys-motion-duration-medium) var(--md-sys-motion-easing-medium);
 }
 
 .switch.is-on {
@@ -529,10 +764,10 @@ body {
   background: var(--md-sys-color-outline);
   transform: translateY(-50%);
   transition:
-    left var(--md-sys-motion-duration-medium) var(--md-sys-motion-easing-standard),
-    width var(--md-sys-motion-duration-medium) var(--md-sys-motion-easing-standard),
-    height var(--md-sys-motion-duration-medium) var(--md-sys-motion-easing-standard),
-    background var(--md-sys-motion-duration-medium) var(--md-sys-motion-easing-standard);
+    left var(--md-sys-motion-duration-medium) var(--md-sys-motion-easing-medium),
+    width var(--md-sys-motion-duration-medium) var(--md-sys-motion-easing-medium),
+    height var(--md-sys-motion-duration-medium) var(--md-sys-motion-easing-medium),
+    background var(--md-sys-motion-duration-medium) var(--md-sys-motion-easing-medium);
 }
 
 .switch.is-on .switch__knob {
@@ -608,7 +843,7 @@ body {
   border: 2px solid transparent;
   cursor: pointer;
   padding: 0;
-  transition: transform var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-standard);
+  transition: transform var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-short);
 }
 
 .swatch:hover {
@@ -816,7 +1051,7 @@ body {
   box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
   font-size: 14px;
   z-index: 50;
-  animation: snackbar-in var(--md-sys-motion-duration-medium) var(--md-sys-motion-easing-standard);
+  animation: snackbar-in var(--md-sys-motion-duration-medium) var(--md-sys-motion-easing-medium);
 }
 
 .snackbar.is-error {
@@ -1022,25 +1257,11 @@ body {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 8px 10px 8px 8px;
+  padding: 8px 10px 8px 12px;
   background: var(--md-sys-color-surface-container-high);
   border: 1px solid var(--md-sys-color-outline-variant);
   border-radius: var(--md-sys-shape-corner-full);
   box-shadow: 0 2px 10px rgba(0, 0, 0, 0.18);
-}
-
-.composer-bar__swatch {
-  flex: 0 0 auto;
-  width: 32px;
-  height: 32px;
-  border-radius: 50%;
-  border: 2px solid var(--md-sys-color-outline);
-  cursor: pointer;
-  padding: 0;
-}
-
-.composer-bar__swatch:hover {
-  border-color: var(--md-sys-color-primary);
 }
 
 .composer-bar__input {
@@ -1054,7 +1275,7 @@ body {
   border-radius: var(--md-sys-shape-corner-full);
   padding: 11px 18px;
   outline: none;
-  transition: box-shadow var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-standard);
+  transition: box-shadow var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-short);
 }
 
 .composer-bar__input::placeholder {
@@ -1075,6 +1296,7 @@ body {
 
 .icon-btn {
   flex: 0 0 auto;
+  position: relative;
   display: grid;
   place-items: center;
   width: 40px;
@@ -1084,7 +1306,19 @@ body {
   background: transparent;
   color: var(--md-sys-color-on-surface-variant);
   cursor: pointer;
-  transition: background var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-standard);
+  transition: background var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-short);
+}
+
+/* 齿轮右下角那颗小圆点 = 当前弹幕颜色，省掉一个和它功能重复的独立按钮 */
+.icon-btn__dot {
+  position: absolute;
+  right: 4px;
+  bottom: 4px;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  box-shadow: 0 0 0 2px var(--md-sys-color-surface-container-high);
+  pointer-events: none;
 }
 
 .icon-btn:hover {
@@ -1104,7 +1338,7 @@ body {
   padding: 14px 16px;
   background: var(--md-sys-color-surface-container);
   border-radius: var(--md-sys-shape-corner-medium);
-  animation: panel-in 180ms cubic-bezier(0.2, 0, 0, 1);
+  animation: panel-in var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-medium);
 }
 
 @keyframes panel-in {
@@ -1266,7 +1500,9 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  transition: color 0.2s, transform 0.2s;
+  transition:
+    color var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-short),
+    transform var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-medium);
 }
 
 .music-lyric__line.is-active {
@@ -1528,4 +1764,142 @@ body {
   font-size: 12px;
   color: rgba(255, 255, 255, 0.5);
   text-align: center;
+}
+
+/* ==========================================================================
+   M3 Expressive 交互动效（接线层）
+   位移幅度全部走 --md-sys-motion-lift / press / enter / stretch / grow 五个令牌。
+   standard（默认）下它们取中性值（0px / 1 / 0px / 0px / 1.06），
+   因此这些规则等价于「没有位移」，视觉与改造前完全一致；
+   切到 expressive 后才真正出现抬升、回弹、拉伸。
+   ========================================================================== */
+
+/* 按钮：悬停抬升，按下回弹 */
+.btn {
+  transition:
+    background var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-short),
+    color var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-short),
+    box-shadow var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-short),
+    transform var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-medium);
+}
+
+.btn:not(:disabled):hover {
+  transform: translateY(calc(-1 * var(--md-sys-motion-lift)));
+}
+
+.btn:not(:disabled):active {
+  transform: scale(var(--md-sys-motion-press));
+}
+
+/* 导航项：按下回弹 */
+.nav-rail__item {
+  transition:
+    color var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-short),
+    transform var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-medium);
+}
+
+.nav-rail__item:active {
+  transform: scale(var(--md-sys-motion-press));
+}
+
+/* 卡片：悬停抬升 */
+.card {
+  transition: transform var(--md-sys-motion-duration-medium) var(--md-sys-motion-easing-medium);
+}
+
+.card:hover {
+  transform: translateY(calc(-1 * var(--md-sys-motion-lift)));
+}
+
+/* 色板：悬停放大 */
+.swatch:hover {
+  transform: scale(var(--md-sys-motion-grow));
+}
+
+/* 开关：按下时 knob 拉长 —— M3E 用形状变化而不是只有颜色来表达状态 */
+.switch:active .switch__knob {
+  width: calc(16px + var(--md-sys-motion-stretch));
+}
+
+/* 图标按钮：按下回弹 */
+.icon-btn:active {
+  transform: scale(var(--md-sys-motion-press));
+}
+
+.icon-btn {
+  transition:
+    background var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-short),
+    transform var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-medium);
+}
+
+/* 页面切换：进场位移 + 淡入 */
+.section {
+  animation: section-in var(--md-sys-motion-duration-medium) var(--md-sys-motion-easing-medium) both;
+}
+
+@keyframes section-in {
+  from {
+    opacity: 0;
+    transform: translateY(var(--md-sys-motion-enter));
+  }
+}
+
+/* ==========================================================================
+   关于页
+   ========================================================================== */
+
+.about-hero {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  margin-bottom: 24px;
+}
+
+.about-hero__icon {
+  flex: 0 0 auto;
+  width: 88px;
+  height: 88px;
+  border-radius: var(--md-sys-shape-corner-extra-large);
+  display: block;
+}
+
+.about-hero__name {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 28px;
+  font-weight: 500;
+  color: var(--md-sys-color-on-surface);
+}
+
+.about-hero__desc {
+  margin: 8px 0 0;
+  max-width: 640px;
+  color: var(--md-sys-color-on-surface-variant);
+  line-height: 1.6;
+}
+
+.about-link {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.about-link__url {
+  font-family: ui-monospace, Consolas, 'Cascadia Mono', monospace;
+  color: var(--md-sys-color-primary);
+  word-break: break-all;
+}
+
+.about-link__actions {
+  display: flex;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.about-note {
+  margin: 10px 0 0;
+  font-size: 12px;
+  color: var(--md-sys-color-on-surface-variant);
 }

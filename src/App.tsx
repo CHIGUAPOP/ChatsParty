@@ -1,6 +1,6 @@
 import React from 'react'
 import { api, AppConfig, LiveEvent, LoginInfo } from './lib/api'
-import { applyScheme, buildScheme } from './lib/theme'
+import { applyMotion, applyScheme, buildScheme } from './lib/theme'
 import { setResolvedFace } from './lib/faces'
 import { Icon, Snackbar } from './components/ui'
 import ConnectPage from './pages/ConnectPage'
@@ -10,6 +10,7 @@ import VoicePage from './pages/VoicePage'
 import VoicesPage from './pages/VoicesPage'
 import AppearancePage from './pages/AppearancePage'
 import OverlayPage from './pages/OverlayPage'
+import AboutPage from './pages/AboutPage'
 import appIcon from './assets/icon.png'
 
 const PAGES = [
@@ -22,7 +23,8 @@ const PAGES = [
   { id: 'obs', label: 'OBS', icon: 'settings' },
 ] as const
 
-type PageId = (typeof PAGES)[number]['id']
+/** 「关于」不占导航栏的一格 —— 只从左上角图标进入，所以单独拎出来 */
+type PageId = (typeof PAGES)[number]['id'] | 'about'
 
 export default function App() {
   const [config, setConfig] = React.useState<AppConfig | null>(null)
@@ -53,6 +55,7 @@ export default function App() {
     api.config.get().then((c) => {
       setConfig(c)
       applyScheme(buildScheme(c.theme?.seed || '#6750A4', c.theme?.mode || 'dark'), c.theme?.mode || 'dark')
+      applyMotion(c.theme?.motion === 'standard' ? 'standard' : 'expressive')
     })
   }, [])
 
@@ -60,6 +63,10 @@ export default function App() {
     if (!config) return
     applyScheme(buildScheme(config.theme?.seed || '#6750A4', config.theme?.mode || 'dark'), config.theme?.mode || 'dark')
   }, [config?.theme?.seed, config?.theme?.mode])
+
+  React.useEffect(() => {
+    applyMotion(config?.theme?.motion === 'standard' ? 'standard' : 'expressive')
+  }, [config?.theme?.motion])
 
   React.useEffect(() => {
     api.bilibili.loginInfo().then(setLoginInfo)
@@ -222,18 +229,23 @@ export default function App() {
   return (
     <div className="app-shell">
       <nav className="nav-rail">
-        <div className="nav-rail__logo" title="ChatsParty">
-          <img src={appIcon} alt="ChatsParty" />
-        </div>
+        <button
+          type="button"
+          className={`nav-rail__logo${page === 'about' ? ' is-active' : ''}`}
+          title="关于 ChatsParty"
+          aria-label="关于 ChatsParty"
+          onClick={() => setPage('about')}
+        >
+          <img src={appIcon} alt="关于 ChatsParty" />
+        </button>
         {PAGES.map((p) => (
           <button
             key={p.id}
             className={`nav-rail__item${page === p.id ? ' is-active' : ''}`}
             onClick={() => setPage(p.id)}
           >
-            <span className="nav-rail__indicator">
-              <Icon name={p.icon} />
-            </span>
+            <span className="nav-rail__indicator" aria-hidden />
+            <Icon name={p.icon} />
             <span className="nav-rail__label">{p.label}</span>
           </button>
         ))}
@@ -251,7 +263,7 @@ export default function App() {
       <div className="main">
         <header className="top-bar">
           <div>
-            <h1 className="top-bar__title">{PAGES.find((p) => p.id === page)?.label}</h1>
+            <h1 className="top-bar__title">{page === 'about' ? '关于' : PAGES.find((p) => p.id === page)?.label}</h1>
           </div>
           <div className="top-bar__spacer" />
           {speaking && (
@@ -292,6 +304,7 @@ export default function App() {
           {page === 'voices' && <VoicesPage {...pageProps} />}
           {page === 'theme' && <AppearancePage {...pageProps} />}
           {page === 'obs' && <OverlayPage {...pageProps} />}
+          {page === 'about' && <AboutPage notify={notify} />}
           <Snackbar message={toast.message} error={toast.error} />
         </div>
       </div>

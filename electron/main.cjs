@@ -20,6 +20,7 @@ const { FaceResolver } = require('./faces.cjs')
 const { Logger } = require('./log.cjs')
 const { OverlayServer } = require('./overlay.cjs')
 const { ConfigStore } = require('./store.cjs')
+const pkg = require('../package.json')
 
 // CP_PROD=1 可以在未打包时直接加载构建产物，方便验证生产路径
 const isDev = !app.isPackaged && process.env.CP_PROD !== '1'
@@ -1774,6 +1775,45 @@ function registerIpc() {
       out.message = `本地服务访问不了：${e.message}`
     }
     return out
+  })
+
+  /**
+   * 「关于」页用。version 走 app.getVersion()：开发时读 package.json，
+   * 打包后读 exe 的版本信息 —— 所以升级后不用改代码，数字自己跟着变。
+   */
+  ipcMain.handle('app:info', () => ({
+    // app.getName() / getVersion() 在未打包时给的是 Electron 自己的名字和版本
+    // （实测返回 "Electron" 与 "33.4.11"），显示出来会误导，所以统一读 package.json。
+    // 打包后 electron-builder 也是拿同一个 version 写进 exe，两边一致。
+    name: pkg.productName || pkg.name,
+    version: pkg.version,
+    electron: process.versions.electron || '',
+    chrome: process.versions.chrome || '',
+    node: process.versions.node || '',
+    platform: `${process.platform}-${process.arch}`,
+  }))
+
+  /**
+   * 外链一律交给系统默认浏览器。
+   * 渲染层不能直接开窗口，所以这里做一道协议白名单：只放行 http(s)，
+   * 挡掉 file:// / 自定义协议，避免被喂一个本地路径或协议处理器链接。
+   */
+  ipcMain.handle('app:openExternal', async (_e, url) => {
+    let u
+    try {
+      u = new URL(String(url || ''))
+    } catch {
+      return { ok: false, message: '链接无效' }
+    }
+    if (u.protocol !== 'https:' && u.protocol !== 'http:') {
+      return { ok: false, message: `不支持的协议：${u.protocol}` }
+    }
+    try {
+      await shell.openExternal(u.href)
+      return { ok: true }
+    } catch (e) {
+      return { ok: false, message: e?.message || '打不开链接' }
+    }
   })
 
   ipcMain.handle('app:diagnostics', () => {

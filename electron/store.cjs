@@ -53,6 +53,8 @@ const DEFAULTS = {
     seed: '#6750A4',
     mode: 'dark',
     contrast: 0,
+    // 动效方案：standard = 克制（基线 M3 观感），expressive = M3E 弹簧 + 位移表达
+    motion: 'expressive',
   },
   overlay: {
     enabled: true,

@@ -52,7 +52,7 @@ export interface AppConfig {
     readEnter: boolean
     blockWords: string
   }
-  theme: { seed: string; mode: 'light' | 'dark'; contrast: number }
+  theme: { seed: string; mode: 'light' | 'dark'; contrast: number; motion?: 'standard' | 'expressive' }
   overlay: {
     enabled: boolean
     userStopped?: boolean
@@ -385,7 +385,19 @@ interface Bridge {
   app: {
     exportLog: () => Promise<{ ok: boolean; path?: string }>
     diagnostics: () => Promise<Diagnostics>
+    info: () => Promise<AppInfo>
+    openExternal: (url: string) => Promise<{ ok: boolean; message?: string }>
   }
+}
+
+/** 「关于」页展示的版本与运行时信息。version 由主进程的 app.getVersion() 给 */
+export interface AppInfo {
+  name: string
+  version: string
+  electron: string
+  chrome: string
+  node: string
+  platform: string
 }
 
 export interface Diagnostics {

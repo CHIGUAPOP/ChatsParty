@@ -12,6 +12,8 @@ interface Props {
 export default function AppearancePage({ config, patch, notify }: Props) {
   const seed = config.theme?.seed || '#6750A4'
   const mode = config.theme?.mode || 'dark'
+  const motion = config.theme?.motion === 'standard' ? 'standard' : 'expressive'
+  const [demoSwitch, setDemoSwitch] = React.useState(false)
   const ramp = React.useMemo(() => tonalRamp(seed), [seed])
   // 直接拿 seed 当受控值的话，敲到 3 个字符时还不合法、不提交，React 会把刚敲的字回滚掉，
   // 看起来就是「输入框吞字符」。改成先记在本地，够 6 位或失焦时才提交
@@ -107,6 +109,29 @@ export default function AppearancePage({ config, patch, notify }: Props) {
       <Card title="深浅色">
         <Row label="深色模式">
           <Switch value={mode === 'dark'} onChange={(v) => patch({ theme: { mode: v ? 'dark' : 'light' } })} />
+        </Row>
+      </Card>
+
+      <Card title="动效" desc="Standard 是克制的 Material 3 基线；Expressive 换成弹簧曲线，并用抬升、回弹、拉伸来表达状态。">
+        <Row label="Expressive 动效">
+          <Switch
+            value={motion === 'expressive'}
+            onChange={(v) => patch({ theme: { motion: v ? 'expressive' : 'standard' } })}
+          />
+        </Row>
+        <div className="divider" />
+        <div className="row__hint">当前：{motion === 'expressive' ? 'Expressive（弹簧 + 位移）' : 'Standard（克制）'}</div>
+        <div className="divider" />
+        <div className="row" style={{ flexWrap: 'wrap' }}>
+          <Button>按住我</Button>
+          <Button variant="tonal">悬停看抬升</Button>
+          <Button variant="outlined" small onClick={() => notify('弹一下看看')}>
+            提示条
+          </Button>
+        </div>
+        <div className="divider" />
+        <Row label="开关按下时拉长">
+          <Switch value={demoSwitch} onChange={setDemoSwitch} />
         </Row>
       </Card>
 
