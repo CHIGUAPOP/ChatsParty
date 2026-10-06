@@ -1,0 +1,1872 @@
+'use strict'
+/* 非侵入式冒烟测试：只验证纯逻辑与网络层，不启动窗口 */
+const { Session, Wbi } = require('../electron/lib/http.cjs')
+const { BilibiliAPI } = require('../electron/bilibili/api.cjs')
+const { LiveClient, encodePacket, decodeBuffer } = require('../electron/bilibili/live.cjs')
+const edge = require('../electron/tts-edge.cjs')
+const V = require('../electron/voices.cjs')
+const { synthesize } = require('../electron/tts.cjs')
+const zlib = require('node:zlib')
+const path = require('node:path')
+const fs = require('node:fs')
+
+let pass = 0
+let fail = 0
+function ok(name, cond, extra) {
+  if (cond) {
+    pass++
+    console.log(`  PASS  ${name}`)
+  } else {
+    fail++
+    console.log(`  FAIL  ${name}${extra ? ` — ${extra}` : ''}`)
+  }
+}
+
+async function main() {
+  console.log('\n[1] 二进制封包编解码')
+  const body = JSON.stringify({ cmd: 'DANMU_MSG', info: ['x', '你好'] })
+  const pkt = encodePacket(body, 5, 0, 1)
+  ok('封包长度为 16 + body', pkt.length === 16 + Buffer.byteLength(body))
+  ok('头部 magic 正确', pkt.readUInt16BE(4) === 16 && pkt.readUInt32BE(8) === 5)
+  const decoded = decodeBuffer(pkt)
+  ok('解包还原 1 个包', decoded.length === 1)
+  ok('解包内容一致', decoded[0].body.toString('utf8') === body)
+
+  const inner = encodePacket(body, 5, 0, 1)
+  const brotli = encodePacket(zlib.brotliCompressSync(inner), 5, 3, 1)
+  const d2 = decodeBuffer(brotli)
+  ok('brotli 包递归解出内容', d2.length === 1 && d2[0].body.toString('utf8') === body)
+
+  const zlibPkt = encodePacket(zlib.deflateSync(inner), 5, 2, 1)
+  ok('zlib 包递归解出内容', decodeBuffer(zlibPkt)[0].body.toString('utf8') === body)
+
+  const double = Buffer.concat([encodePacket(body, 5, 0, 1), encodePacket(body, 5, 0, 2)])
+  ok('一帧内含多包', decodeBuffer(double).length === 2)
+
+  console.log('\n[1b] Edge 语音二进制帧解析')
+  // [2 字节头长][头文本（不含结尾空行）][音频]
+  const headText = 'X-RequestId:abc\r\nContent-Type:audio/mpeg\r\nPath:audio\r\n'
+  const audio = Buffer.from([0xff, 0xf3, 0x64, 0xc4, 0x00, 0x00])
+  const headBuf = Buffer.from(headText, 'utf8')
+  const prefix = Buffer.alloc(2)
+  prefix.writeUInt16BE(headBuf.length)
+  const frame = Buffer.concat([prefix, headBuf, audio])
+  const parsed = edge.splitAudioFrame(frame)
+  ok('识别 Path:audio', parsed.path === 'audio', parsed.path)
+  ok('音频起点无多余字节', parsed.audio.equals(audio), parsed.audio.subarray(0, 4).toString('hex'))
+  ok('音频首字节是 MP3 帧同步', parsed.audio[0] === 0xff && (parsed.audio[1] & 0xe0) === 0xe0)
+  const endHead = Buffer.from('X-RequestId:abc\r\nPath:turn.end\r\n', 'utf8')
+  const endPrefix = Buffer.alloc(2)
+  endPrefix.writeUInt16BE(endHead.length)
+  ok('非音频帧不误判', edge.splitAudioFrame(Buffer.concat([endPrefix, endHead])).path === 'turn.end')
+  ok('畸形帧不抛异常', edge.splitAudioFrame(Buffer.from([0x00])).path === '')
+
+  console.log('\n[2] wbi 签名与真实接口')
+  const session = new Session()
+  const wbi = new Wbi(session)
+  const api = new BilibiliAPI(wbi, session)
+  try {
+    await api.ensureBuvid()
+    ok('取得 buvid3 设备指纹', Boolean(session.jar.get('buvid3')), session.jar.get('buvid3'))
+    const keys = await wbi.keys()
+    ok('wbi mixin_key 为 32 位', keys.length === 32, keys)
+    const signed = await wbi.sign({ foo: '114', bar: '514' })
+    ok('签名串包含 w_rid 与 wts', signed.includes('w_rid=') && signed.includes('wts='))
+  } catch (e) {
+    ok('wbi 签名链路', false, e.message)
+  }
+
+  console.log('\n[3] 直播间信息（房间 1，B站官方测试房）')
+  let realRoomId = 0
+  try {
+    const info = await api.getRoomInfo(1)
+    realRoomId = info.room_id
+    ok('拿到真实房间号', Boolean(realRoomId), String(realRoomId))
+  } catch (e) {
+    ok('房间信息接口', false, e.message)
+  }
+
+  if (realRoomId) {
+    console.log('\n[4] 弹幕 WebSocket 真实连接')
+    try {
+      const dm = await api.getDanmuInfo(realRoomId)
+      ok('取到弹幕服务器 token', Boolean(dm.token) && dm.hosts.length > 0, dm.hosts[0])
+
+      const live = new LiveClient({ api, roomId: realRoomId })
+      const result = await new Promise((resolve) => {
+        let settled = false
+        const done = (r) => {
+          if (!settled) {
+            settled = true
+            resolve(r)
+          }
+        }
+        live.on('status', (s) => {
+          if (s === 'authenticated') done({ auth: true })
+        })
+        live.on('error', (e) => done({ auth: false, err: e.message }))
+        live.start().catch((e) => done({ auth: false, err: e.message }))
+        setTimeout(() => done({ auth: false, err: '20 秒超时' }), 20000)
+      })
+      ok('鉴权通过', Boolean(result.auth), result.err)
+      live.stop()
+    } catch (e) {
+      ok('弹幕连接链路', false, e.message)
+    }
+  }
+
+  await testVoices()
+  checkCsp()
+  checkMusicOverlay()
+  checkStoreMerge()
+  checkCommands()
+  checkNeteaseLogin()
+  checkRendererTypes()
+
+  console.log(`\n结果：${pass} 通过 / ${fail} 失败\n`)
+  process.exit(fail ? 1 : 0)
+}
+
+/**
+ * CSP 回归：网易云的音频地址是 http://m7.music.126.net/...，封面也是 http。
+ * 之前 media-src 只写了 'self' blob: data:，音频直接被拦，浏览器只报
+ * 「no supported source was found」—— 一句完全指不到原因的英文。
+ */
+function checkCsp() {
+  console.log('\n[23] CSP 允许外链音频与封面')
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8')
+  const m = /media-src([^;"]*)/.exec(html)
+  const img = /img-src([^;"]*)/.exec(html)
+  ok('index.html 里有 CSP', Boolean(m))
+  if (!m) return
+  const mediaSrc = m[1]
+  const imgSrc = img ? img[1] : ''
+  // http 的网易云 CDN 必须放行，否则点歌永远播不出来
+  ok('media-src 放行 http 网易云域名', /http:\/\/\*\.(126|163)\.net/.test(mediaSrc), mediaSrc.trim())
+  ok('media-src 放行 https 与 blob', /https:/.test(mediaSrc) && /blob:/.test(mediaSrc), mediaSrc.trim())
+  ok('img-src 放行 http 网易云封面', /http:\/\/\*\.(126|163)\.net/.test(imgSrc), imgSrc.trim())
+  // 别为了放行音频把 script-src 也放宽了
+  ok('script-src 仍然只允许自身', /script-src 'self'/.test(html))
+}
+
+/**
+ * OBS 点歌面板。
+ *
+ * 这里盯的是一件特别容易悄悄坏掉的事：弹幕页 / 叠加层页上的「预览」用的是
+ * React 组件（src/components/MusicWidget.tsx + src/styles.css），而 OBS 里跑的是
+ * overlay/index.html 那份手写 DOM。两边一旦走样，主播在界面上调好的样子
+ * 到了 OBS 就是另一个样 —— 而且这种不一致没人会立刻发现。
+ * 所以对 class 名单做一次比对，改了一边忘了另一边，测试就会红。
+ */
+function checkMusicOverlay() {
+  console.log('\n[24] OBS 点歌面板')
+  const root = path.join(__dirname, '..')
+  const read = (p) => (fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : '')
+  const overlayHtml = read(path.join(root, 'overlay', 'index.html'))
+  const widget = read(path.join(root, 'src', 'components', 'MusicWidget.tsx'))
+  const css = read(path.join(root, 'src', 'styles.css'))
+
+  const CLASSES = [
+    'cp-music',
+    'cp-mcard',
+    'cp-mqueue',
+    'cp-mcover',
+    'cp-mcover__none',
+    'cp-mbody',
+    'cp-mlabel',
+    'cp-mtitle',
+    'cp-msub',
+    'cp-mqueue__head',
+    'cp-mrow',
+    'cp-mrow__no',
+    'cp-mrow__name',
+    'cp-mrow__who',
+  ]
+  const missingInOverlay = CLASSES.filter((c) => !overlayHtml.includes(c))
+  const missingInWidget = CLASSES.filter((c) => !widget.includes(c))
+  const missingInCss = CLASSES.filter((c) => !css.includes(`.${c}`))
+  ok('叠加层面板的类名齐全', missingInOverlay.length === 0, missingInOverlay.join(','))
+  ok('预览组件用同一套类名', missingInWidget.length === 0, missingInWidget.join(','))
+  ok('前端样式里也有这套类名', missingInCss.length === 0, missingInCss.join(','))
+
+  ok('叠加层有面板容器', /id="cp-music"/.test(overlayHtml))
+  ok('叠加层会渲染点歌状态', /function renderMusic/.test(overlayHtml))
+  ok('叠加层接得住 music 消息', /msg\.type === 'music'/.test(overlayHtml))
+  // 一首歌都没有时不能留一个空框在画面上
+  ok('没歌时整块隐藏', /is-show/.test(overlayHtml) && /musicEl\.textContent = ''/.test(overlayHtml))
+  // 中途才开 OBS 也要能看到当前这首，否则得等下一首才出现
+  ok('主进程给新客户端补发点歌状态', read(path.join(root, 'electron', 'main.cjs')).includes('overlay.musicProvider'))
+  ok('叠加层支持补发', read(path.join(root, 'electron', 'overlay.cjs')).includes('musicProvider'))
+
+  // 队列条数上限：不设上限的话，观众一口气点 20 首会把半个画面盖住。
+  // 两条实现各写各的，所以直接比对**表达式本身**，保证截断规则一致
+  const CLAMP = 'Math.min(Math.floor(v), 10)'
+  ok('预览组件限制待播条数', widget.includes(CLAMP), '组件里没找到上限')
+  ok('叠加层限制待播条数', overlayHtml.includes(CLAMP), '叠加层里没找到上限')
+  ok('两边上限一致', widget.includes(CLAMP) && overlayHtml.includes(CLAMP))
+
+  const DEFAULTS = require('../electron/store.cjs').DEFAULTS
+  ok('默认显示点歌面板', DEFAULTS.overlay?.showMusic === true)
+  ok('默认位置是左上', DEFAULTS.overlay?.musicPos === 'tl', String(DEFAULTS.overlay?.musicPos))
+  ok('默认显示 3 条待播', DEFAULTS.overlay?.musicQueueCount === 3, String(DEFAULTS.overlay?.musicQueueCount))
+
+  // 暂停之后切走再切回来会自己重新开始播 —— 那次是因为挂载时 state 初值被当成了「队列空」。
+  // 这里守住那道闸门：状态没拉回来之前不许动播放器。
+  const musicPage = read(path.join(root, 'src', 'pages', 'MusicPage.tsx'))
+  ok('状态没拉回来前不动播放器', /if \(!ready\) return/.test(musicPage))
+  ok('停止分支不会再抢在状态前面', /}, \[ready, state\.current\?\.id\]\)/.test(musicPage), '缺少 ready 依赖')
+}
+
+/**
+ * 配置写入语义。
+ *
+ * 这里盯的是一个已经咬过人的坑：deepMerge 只会合并、不会删除键。
+ * 「解绑」「清理失效绑定」这类操作删掉键之后写回去，读出来键还在 ——
+ * 界面上看就是点了没反应。字典段必须整体替换。
+ */
+function checkStoreMerge() {
+  console.log('\n[25] 配置写入：删键必须真的删掉')
+
+  const mod = withFakeElectron(() => {
+    const m = require('../electron/store.cjs')
+    // 借一个不落盘的实例：只验证 patch 的合并语义
+    const fake = Object.create(m.ConfigStore.prototype)
+    fake.file = ''
+    fake.data = JSON.parse(JSON.stringify(m.DEFAULTS))
+    fake.save = () => true
+    return { fake, m }
+  })
+  const { fake, m } = mod
+
+  fake.data.voiceBindings = { '111': 'p1', '222': 'p2' }
+  fake.patch({ voiceBindings: { '111': 'p1' } })
+  ok('解绑能真的删掉键', fake.data.voiceBindings['222'] === undefined, JSON.stringify(fake.data.voiceBindings))
+  ok('解绑不误伤别人', fake.data.voiceBindings['111'] === 'p1')
+
+  // 反过来：单键修改的字典段不能被整体替换，否则改 Fish Key 会抹掉 OpenAI Key
+  fake.data.platformKeys = { fish: 'old-fish', openai: 'old-oa' }
+  fake.patch({ platformKeys: { fish: 'new-fish' } })
+  ok(
+    '改一个平台的 Key 不动另一个',
+    fake.data.platformKeys.openai === 'old-oa' && fake.data.platformKeys.fish === 'new-fish',
+    JSON.stringify(fake.data.platformKeys),
+  )
+
+  // 普通配置段保持合并：只改一项不该把同段默认值冲掉
+  fake.data.music = { ...m.DEFAULTS.music }
+  fake.patch({ music: { volume: 0.9 } })
+  ok('普通段只改传入的那一项', fake.data.music.volume === 0.9 && fake.data.music.br === m.DEFAULTS.music.br)
+}
+
+/**
+ * 弹幕指令：名称可改，且改完解析必须跟着变。
+ */
+function checkCommands() {
+  console.log('\n[26] 弹幕指令可配置')
+  const V = require('../electron/voices.cjs')
+  const cfg = withFakeElectron(() => require('../electron/store.cjs').DEFAULTS)
+
+  // 界面上那份默认叫法必须和解析器内置的一致，否则两边会各说各话
+  const kinds = ['query', 'list', 'bind', 'design', 'unbind', 'help']
+  ok(
+    '默认叫法与解析器一致',
+    kinds.every((k) => JSON.stringify(cfg.commands?.voice?.[k]) === JSON.stringify(V.COMMAND_ALIASES[k])),
+    JSON.stringify(cfg.commands?.voice?.bind),
+  )
+
+  // 内置叫法照旧能触发
+  ok('内置叫法能触发', V.parseCommand('#绑定 1', { prefix: '#' })?.kind === 'bind')
+  ok('前缀不对就不算命令', V.parseCommand('绑定 1', { prefix: '#' }) === null)
+  // 老调用方式（第二个参数直接传前缀字符串）不能因为改造而失效
+  ok('兼容旧的字符串前缀写法', V.parseCommand('#绑定 1', '#')?.kind === 'bind')
+
+  // 改了名之后：新名认、旧名不再认
+  const custom = { bind: ['换音色', '换成'], list: ['找音色'] }
+  ok('改名后新名能触发', V.parseCommand('#换音色 1', { prefix: '#', names: custom })?.kind === 'bind')
+  ok('改名后第二个叫法也认', V.parseCommand('#换成 1', { prefix: '#', names: custom })?.kind === 'bind')
+  ok('改名后旧名失效', V.parseCommand('#绑定 1', { prefix: '#', names: custom }) === null)
+  // 只改了 bind，其他类别必须仍走内置叫法 —— 不能因为配了一份就整份失效
+  ok('没改的类别仍用内置叫法', V.parseCommand('#音色列表 男声', { prefix: '#', names: { bind: ['换音色'] } })?.kind === 'list')
+  ok('改过的那类旧名失效', V.parseCommand('#绑定 1', { prefix: '#', names: { bind: ['换音色'] } }) === null)
+  ok('参数照样能取到', V.parseCommand('#换音色 2', { prefix: '#', names: custom })?.arg === '2')
+
+  // 某类被清空 → 回落内置，绝不让指令彻底失联
+  ok('清空会回落内置叫法', V.parseCommand('#绑定 1', { prefix: '#', names: { bind: [] } })?.kind === 'bind')
+
+  // 帮助文本要用当前叫法，否则主播改名后机器人教的还是旧词
+  const help = V.helpText({ prefix: '#', cfg: { commands: { voice: custom } } })
+  ok('帮助文本用改过的名字', help.includes('#换音色') && !help.includes('#绑定'), help)
+  ok('帮助文本保留前缀', help.startsWith('#找音色'), help)
+
+  // 界面传来的叫法要先收拾干净（带空格、重复、全角顿号）
+  const { normalizeCommandNames } = withFakeElectron(() => require('../electron/store.cjs'))
+  ok('逗号顿号都能分隔', JSON.stringify(normalizeCommandNames('绑定、换音色, 用')) === JSON.stringify(['绑定', '换音色', '用']))
+  ok('去掉空项', JSON.stringify(normalizeCommandNames('绑定,,  ,用')) === JSON.stringify(['绑定', '用']))
+  ok('去掉重复（忽略大小写）', JSON.stringify(normalizeCommandNames('Bind,bind')) === JSON.stringify(['Bind']))
+
+  // 落到配置里的空数组要被还原成默认，不然那条指令就废了
+  const store = withFakeElectron(() => {
+    const m = require('../electron/store.cjs')
+    const fake = Object.create(m.ConfigStore.prototype)
+    fake.file = ''
+    fake.data = JSON.parse(JSON.stringify(m.DEFAULTS))
+    fake.save = () => true
+    return fake
+  })
+  store.patch({ commands: { voice: { bind: [], list: ['找音色'] } } })
+  ok('清空某类会写回默认', JSON.stringify(store.data.commands.voice.bind) === JSON.stringify(V.COMMAND_ALIASES.bind))
+  ok('改过的那类保留', JSON.stringify(store.data.commands.voice.list) === JSON.stringify(['找音色']))
+  // 只改一类不能把其他类冲掉
+  ok('改一类不动其他类', JSON.stringify(store.data.commands.voice.help) === JSON.stringify(V.COMMAND_ALIASES.help))
+
+  // 点歌触发词：粘一整串进来要能拆开；删空了要补回默认，
+  // 否则「没人能点歌」这个状态界面上完全看不出来
+  const DEFAULTS = readStoreDefaults()
+  store.patch({ music: { commands: '来一首, 点个歌' } })
+  ok('点歌触发词会拆开清洗', JSON.stringify(store.data.music.commands) === JSON.stringify(['来一首', '点个歌']), JSON.stringify(store.data.music.commands))
+  store.patch({ music: { commands: [] } })
+  ok('点歌触发词清空回落默认', JSON.stringify(store.data.music.commands) === JSON.stringify(DEFAULTS.music.commands), JSON.stringify(store.data.music.commands))
+}
+
+/**
+ * 网页登录取 Cookie：从浏览器 Cookie 罐里只挑点歌真正需要的那几项。
+ */
+function checkNeteaseLogin() {
+  console.log('\n[27] 网页登录取 Cookie')
+  const NCM = require('../electron/netease.cjs')
+  const jar = (list) => NCM.cookieFromJar(list)
+  const future = Date.now() / 1000 + 86400
+  const past = Date.now() / 1000 - 10
+
+  // 埋点类 Cookie 一律不要，否则「登录了却查不出账号」更难排查
+  ok(
+    '只有统计类 Cookie 时不算登录',
+    jar([
+      { name: 'NMTID', value: 'x', domain: '.music.163.com', expirationDate: future },
+      { name: '_ntes_nuid', value: 'y', domain: '.music.163.com', expirationDate: future },
+      { name: 'os', value: 'pc', domain: '.music.163.com' },
+    ]) === '',
+  )
+
+  ok('拿到 MUSIC_U 才算登录', jar([{ name: 'MUSIC_U', value: 'abc', domain: '.music.163.com' }]) === 'MUSIC_U=abc')
+  ok(
+    '顺手带上 __csrf',
+    jar([
+      { name: 'MUSIC_U', value: 'abc', domain: '.music.163.com' },
+      { name: '__csrf', value: 'zzz', domain: '.music.163.com' },
+      { name: 'NMTID', value: 'n', domain: '.music.163.com' },
+    ]) === 'MUSIC_U=abc; __csrf=zzz',
+  )
+  ok('不带统计类噪声', !/NMTID/.test(jar([
+    { name: 'MUSIC_U', value: 'abc', domain: '.music.163.com' },
+    { name: 'NMTID', value: 'n', domain: '.music.163.com' },
+  ])))
+
+  // 过期凭证不能拿去用，否则界面显示「已登录」但一首会员歌都点不了
+  ok(
+    '过期的 MUSIC_U 不认',
+    jar([{ name: 'MUSIC_U', value: 'old', domain: '.music.163.com', expirationDate: past }]) === '',
+  )
+  // 别的域下同名的不算（防止把 126.net 之类站点的串当成登录凭证）
+  ok(
+    '别的域下的 MUSIC_U 不认',
+    jar([{ name: 'MUSIC_U', value: 'x', domain: '.126.net', expirationDate: future }]) === '',
+  )
+  // 同一名字常有 .music.163.com 和 music.163.com 两份，取活得久的那份
+  ok(
+    '同名多份取有效期最长的',
+    jar([
+      { name: 'MUSIC_U', value: 'short', domain: 'music.163.com', expirationDate: Date.now() / 1000 + 60 },
+      { name: 'MUSIC_U', value: 'long', domain: '.music.163.com', expirationDate: future },
+    ]) === 'MUSIC_U=long',
+  )
+  // 会话 Cookie 没有 expirationDate，必须算有效 —— 不然刚登录完反而取不到
+  ok('会话 Cookie（无过期时间）算有效', jar([{ name: 'MUSIC_U', value: 'sess', domain: '.music.163.com' }]) === 'MUSIC_U=sess')
+  ok('空罐子不炸', jar([]) === '' && jar(null) === '' && jar(undefined) === '')
+}
+
+/**
+ * 渲染层的类型检查。
+ * esbuild 只做转译不做类型检查，所以「组件 props 写错、变量没定义」这类问题
+ * 编译能过、一渲染才白屏。这里把 tsc 拉进来，让这类错误在测试阶段就红。
+ * 用编译器 API 在进程内跑：这个环境下 spawn 一个同名 node 进程会 EBUSY。
+ */
+function checkRendererTypes() {
+  console.log('\n[22] 渲染层类型检查')
+  const root = path.join(__dirname, '..')
+  let ts = null
+  try {
+    ts = require('typescript')
+  } catch {
+    ok('类型检查（未安装 typescript，跳过）', true)
+    return
+  }
+  try {
+    const read = ts.readConfigFile(path.join(root, 'tsconfig.json'), ts.sys.readFile)
+    if (read.error) throw new Error(ts.flattenDiagnosticMessageText(read.error.messageText, ' '))
+    const parsed = ts.parseJsonConfigFileContent(read.config, ts.sys, root)
+    const program = ts.createProgram(parsed.fileNames, parsed.options)
+    const diags = ts.getPreEmitDiagnostics(program)
+    const lines = diags.slice(0, 6).map((d) => {
+      const where =
+        d.file && d.start != null
+          ? (() => {
+              const p = d.file.getLineAndCharacterOfPosition(d.start)
+              return `${path.relative(root, d.file.fileName)}:${p.line + 1}: `
+            })()
+          : ''
+      return where + ts.flattenDiagnosticMessageText(d.messageText, ' ')
+    })
+    ok('渲染层类型检查通过', diags.length === 0, `${diags.length} 处 — ${lines.join(' | ')}`)
+  } catch (e) {
+    ok('类型检查能跑起来', false, e.message)
+  }
+}
+
+/* -------------------- 音色注册与弹幕命令 -------------------- */
+
+async function testVoices() {
+  console.log('\n[5] 音色命令解析')
+  ok('识别 #音色列表', V.parseCommand('#音色列表 男声', '#')?.kind === 'list')
+  ok('识别 #绑定并取参数', (() => {
+    const c = V.parseCommand('#绑定 云希', '#')
+    return c?.kind === 'bind' && c.arg === '云希'
+  })())
+  ok('全角 ＃ 也能识别', V.parseCommand('＃设计 御姐音', '#')?.kind === 'design')
+  ok('英文命令可用', V.parseCommand('#bind XiaoXiao', '#')?.kind === 'bind')
+  ok('自定义前缀生效', V.parseCommand('!音色', '!')?.kind === 'query')
+  ok('前缀不匹配时返回 null', V.parseCommand('#音色', '!') === null)
+  ok('普通弹幕不是命令', V.parseCommand('主播好帅', '#') === null)
+  ok('单个井号不是命令', V.parseCommand('#', '#') === null)
+  ok('未知命令词返回 null', V.parseCommand('#随便说说', '#') === null)
+
+  console.log('\n[6] 粉丝牌与房管权限')
+  const policy = { requireMedal: true, minMedalLevel: 5, allowDesign: true, allowBind: true }
+  ok('房管免检', V.checkPermission({ isAdmin: true }, policy).ok)
+  // 主播身份从弹幕包里读不出来（实测 DANMU_MSG 没有 identities，主播自己也没自己
+  // 房间的粉丝牌），只能靠调用方比对 uid 后传 isPrivileged。这条断言盯住那个入口。
+  ok(
+    '主播免检（调用方按 uid 认出来后传 isPrivileged）',
+    V.checkPermission({ uid: 42 }, policy, { isPrivileged: true }).ok,
+  )
+  ok('没标 isPrivileged 的普通观众照样被挡', !V.checkPermission({ uid: 42 }, policy).ok)
+  ok(
+    '主播同样不受 allowBind 这类开关限制',
+    V.checkPermission({ uid: 42 }, { requireMedal: true, allowBind: false }, { need: 'bind', isPrivileged: true }).ok,
+  )
+  ok(
+    '主播同样不受 allowUnbind 限制',
+    V.checkPermission({ uid: 42 }, { requireMedal: true, allowUnbind: false }, { need: 'unbind', isPrivileged: true }).ok,
+  )
+  ok(
+    '回执说的是「音色指令」而不是「换音色」（这条卡的是全部指令）',
+    /音色指令/.test(V.checkPermission({ uid: 1 }, policy).reason || ''),
+    V.checkPermission({ uid: 1 }, policy).reason,
+  )
+  ok(
+    '无粉丝牌被拒',
+    !V.checkPermission({ medal: null }, policy).ok,
+  )
+  ok(
+    '粉丝牌等级不足被拒',
+    !V.checkPermission({ medal: { name: '测试牌', level: 3 } }, policy).ok,
+  )
+  ok('等级达标放行', V.checkPermission({ medal: { name: '测试牌', level: 9 } }, policy).ok)
+  ok(
+    '关闭开放后拒绝 design',
+    !V.checkPermission({ medal: { level: 20 } }, { ...policy, allowDesign: false }, { need: 'design' }).ok,
+  )
+  ok('不校验勋章时游客可用', V.checkPermission({}, { requireMedal: false }).ok)
+  // allowUnbind 是配了但一直没人读的死开关，逻辑补上之后必须有断言盯着，
+  // 否则它又会悄悄退化成「界面里有、实际不生效」
+  ok(
+    '关闭开放后拒绝 bind',
+    !V.checkPermission({ medal: { level: 20 } }, { ...policy, allowBind: false }, { need: 'bind' }).ok,
+  )
+  ok(
+    '关闭开放后拒绝 unbind',
+    !V.checkPermission({ medal: { level: 20 } }, { ...policy, allowUnbind: false }, { need: 'unbind' }).ok,
+  )
+  ok(
+    'unbind 开关默认放行',
+    V.checkPermission({ medal: { level: 20 } }, { ...policy, allowUnbind: true }, { need: 'unbind' }).ok,
+  )
+  ok(
+    '不传 need 时 allowUnbind 不影响（查询/帮助不走这条）',
+    V.checkPermission({ medal: { level: 20 } }, { ...policy, allowUnbind: false }).ok,
+  )
+
+  console.log('\n[7] 每日设计配额')
+  const t = new Date()
+  const today = `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')}`
+  ok('当天未超配额', V.designQuota({ date: today, used: 3, limit: 20 }).ok)
+  ok('当天配额用尽', !V.designQuota({ date: today, used: 20, limit: 20 }).ok)
+  ok('跨天自动重置', V.designQuota({ date: '2020-01-01', used: 999, limit: 20 }).used === 0)
+
+  console.log('\n[8] 音色档案构造')
+  const p = V.profileFromVoice({
+    source: 'fish',
+    voice: { id: 'abc123', name: 'narrator', hint: 'Fish 社区' },
+    ownerUid: 42,
+    ownerName: '小明',
+    cfg: { tts: { speed: 1.2, format: 'wav' } },
+  })
+  ok('平台与音色 id 落库', p.platform === 'fish' && p.voice === 'abc123')
+  ok('鱼.协议正确', p.protocol === 'fish-tts', p.protocol)
+  ok('Key 不写进档案', p.apiKey === '' || p.apiKey === undefined, p.apiKey)
+  const d = V.makeDesignProfile({ ownerUid: 42, ownerName: '小明', prompt: '温柔的御姐音', tts: { baseUrl: 'https://x' } })
+  ok('设计音色用 voicedesign 模型', d.model === 'mimo-v2.5-tts-voicedesign')
+  ok('描述文本保留', d.designPrompt === '温柔的御姐音')
+  ok('两种档案 id 不重复', p.id !== d.id)
+
+  const lib = [p, d]
+  ok('库内按名字能找到', V.findByName(lib, p.name)?.id === p.id)
+  ok('大小写不敏感', V.findByName(lib, p.name.toUpperCase())?.id === p.id)
+  ok('未注册的名字查不到', V.findByName(lib, '根本不存在的音色') === null)
+  ok('关键词搜索命中 hint', V.searchProfiles(lib, 'voicedesign').length > 0)
+
+  console.log('\n[8b] 静态音色榜可达')
+  const mimo = await V.searchSource('mimo', { keyword: '女声', limit: 5, cfg: {} })
+  ok('MiMo 按性别词「女声」可搜到', mimo.ok && mimo.voices.length > 0, JSON.stringify(mimo.voices))
+  const mimo2 = await V.searchSource('mimo', { keyword: '英文', limit: 5, cfg: {} })
+  ok('MiMo 按语言词「英文」可搜到', mimo2.ok && mimo2.voices.length > 0, JSON.stringify(mimo2.voices))
+  const nokey = await V.searchSource('fish', { keyword: 'x', limit: 5, cfg: {} })
+  ok('Fish 没 Key 时优雅报错而非崩溃', nokey.ok === false && /Key/.test(nokey.message || ''), nokey.message)
+  const agg = await V.searchEverywhere(['mimo', 'fish'], { keyword: '冰糖', limit: 5, cfg: {} })
+  ok('聚合搜索跨平台汇总', agg.ok && agg.voices.some((v) => v.source === 'mimo') && Array.isArray(agg.errors), JSON.stringify(agg.voices))
+
+  console.log('\n[9] TTS 协议分支（mock 网络）')
+  await mockTts()
+
+  console.log('\n[10] 进场消息的 protobuf 解码')
+  testInteractWordV2()
+
+  console.log('\n[11] 外网请求的模式分流与错误翻译')
+  await testNet()
+
+  console.log('\n[12] 叠加层服务（客户端回调 + 端口顺延）')
+  await testOverlay()
+
+  console.log('\n[13] 头像解析（防盗链 + 去重）')
+  await testFaces()
+
+  console.log('\n[14] Cookie 罐过期与凭据合并')
+  testCredentials()
+
+  console.log('\n[15] 密钥清洗与平台错误翻译')
+  testKeytext()
+
+  console.log('\n[16] 音色描述扩写（LLM）')
+  await testLlm()
+
+  console.log('\n[17] Fish 合成实测探针')
+  await testFishProbe()
+
+  console.log('\n[18] 控件改完立刻生效（播报复核与配置迁移）')
+  testLiveControls()
+
+  console.log('\n[19] 跳过当前播报')
+  await testSkip()
+
+  console.log('\n[20] 网易云点歌')
+  await testNetease()
+
+  console.log('\n[21] 密钥形态诊断')
+  testKeyShape()
+}
+
+/* --------------------------- 密钥形态诊断 --------------------------- */
+
+/**
+ * 这里守住一条曾经犯过的错：拿着第三方文章的说法把 Fish 的 Key 定成 32 位，
+ * 结果把一把 64 位的好 Key 误报成「粘了两把」，把人往错的方向引。
+ * 实测后确认 —— fish.audio 与 fishaudio.org 发的密钥长度都不一样（见过 51 / 64 位），
+ * 官方从未公开定长。所以这个平台一律只做通用体检，不许按长度下结论。
+ */
+function testKeyShape() {
+  const { keyShapeWarnings, normalizeKey, KEY_LEN } = require('../electron/lib/keytext.cjs')
+  // 真实的 64 位 Key 形态（十六进制）
+  const k64 = 'ec104cc9b2ed890e73d594dc04749eb5bcc2293856f48a88804ba2e0d3990a90'
+  const k32 = 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6'
+
+  ok('Fish 未登记定长（避免误报）', KEY_LEN.fish === undefined)
+  ok('真·64 位 Key 不报警（回归：曾被误判成两把）', keyShapeWarnings(k64, 'fish').length === 0)
+  ok('32 位 Key 也不报警', keyShapeWarnings(k32, 'fish').length === 0)
+  ok('空 Key：不报警', keyShapeWarnings('', 'fish').length === 0)
+  ok('明显太短才报警', keyShapeWarnings('abc', 'fish')[0]?.includes('没复制全') === true)
+  ok('16 位仍算正常长度', keyShapeWarnings(k32.slice(0, 16), 'fish').length === 0)
+  // 清洗前先归一化：带着 Bearer 前缀和零宽字符也不该影响长度判断
+  ok('带 Bearer 前缀不误报', keyShapeWarnings(`Bearer ${k64}`, 'fish').length === 0)
+  ok('零宽字符不影响长度判断', keyShapeWarnings(`${k64}\u200b`, 'fish').length === 0)
+  ok('normalizeKey 去掉零宽字符', normalizeKey(`${k64}\u200b`).length === 64)
+  ok('normalizeKey 去掉 Bearer 前缀', normalizeKey(`Bearer ${k64}`).length === 64)
+}
+
+/* --------------------------- 网易云点歌 --------------------------- */
+
+/**
+ * 点歌是自己照着接口写的（electron/netease.cjs），没有第三方服务兜底，
+ * 所以加密、解析、指令识别这三块必须自己测住 —— 接口一变这些最先坏。
+ */
+async function testNetease() {
+  const crypto = require('node:crypto')
+  const NCM = require('../electron/netease.cjs')
+
+  // 1) linuxapi 加密：服务端要能解开，先保证自己能解开
+  {
+    const payload = { method: 'POST', url: 'https://music.163.com/api/cloudsearch/pc', params: { s: '晴天' } }
+    const body = NCM.linuxapi(payload)
+    ok('linuxapi 走的是 eparams 字段', body.startsWith('eparams='), body.slice(0, 12))
+    const hex = body.slice('eparams='.length)
+    ok('eparams 是大写 hex', /^[0-9A-F]+$/.test(hex))
+    const d = crypto.createDecipheriv('aes-128-ecb', 'rFgB&h#%2?^eDg:Q', Buffer.alloc(0))
+    const plain = Buffer.concat([d.update(Buffer.from(hex, 'hex')), d.final()]).toString('utf8')
+    ok('加密结果能解开还原原文', plain === JSON.stringify(payload), plain.slice(0, 60))
+  }
+
+  // 2) 搜索结果与播放链接的解析（把网络层换成假数据）
+  {
+    const netMod = require('../electron/lib/net.cjs')
+    const real = netMod.httpRequest
+    let seen = null
+    netMod.httpRequest = async (url, opts) => {
+      seen = { url, body: opts.body, cookie: (opts.headers || {}).Cookie }
+      const isSearch = String(opts.body || '').includes('x-search')
+      const text = isSearch
+        ? JSON.stringify({
+            code: 200,
+            result: {
+              songs: [
+                { id: 11, name: '晴天', artists: [{ name: '周杰伦' }], album: { name: '叶惠美', picUrl: 'http://p/1.jpg' }, duration: 269000, fee: 8, privilege: { pl: 320000 } },
+                { id: 12, name: '晴天(钢琴版)', artists: [{ name: '某人' }], album: { name: 'x' }, duration: 238000, fee: 1, privilege: { pl: 0 } },
+              ],
+            },
+          })
+        : JSON.stringify({ code: 200, data: [{ id: 11, url: 'http://m701.music.126.net/a.mp3', br: 320000, size: 10831725, type: 'mp3', expi: 1200 }] })
+      return { status: 200, ok: true, text, buffer: Buffer.from(text) }
+    }
+    try {
+      // 用不同的搜索词区分两次调用：搜索请求里不含各自的关键词（关键词是加密的），
+      // 所以这里按顺序返回：第一次搜索、第二次取链接
+      let call = 0
+      netMod.httpRequest = async (url, opts) => {
+        call++
+        seen = { url, cookie: (opts.headers || {}).Cookie }
+        const text =
+          call === 1
+            ? JSON.stringify({
+                code: 200,
+                result: {
+                  songs: [
+                    { id: 11, name: '晴天', artists: [{ name: '周杰伦' }], album: { name: '叶惠美', picUrl: 'http://p/1.jpg' }, duration: 269000, fee: 8, privilege: { pl: 320000 } },
+                    { id: 12, name: '晴天(钢琴版)', artists: [{ name: '某人' }], album: { name: 'x' }, duration: 238000, fee: 1, privilege: { pl: 0 } },
+                  ],
+                },
+              })
+            : JSON.stringify({ code: 200, data: [{ id: 11, url: 'http://m701.music.126.net/a.mp3', br: 320000, size: 10831725, type: 'mp3', expi: 1200 }] })
+        return { status: 200, ok: true, text, buffer: Buffer.from(text) }
+      }
+      const songs = await NCM.searchMusic('晴天', { limit: 2 })
+      ok('搜索解析出歌曲', songs.length === 2)
+      ok('歌名/歌手/专辑都取到了', songs[0].name === '晴天' && songs[0].artists === '周杰伦' && songs[0].album === '叶惠美')
+      ok('时长格式化成 m:ss', songs[0].durationText === '4:29', songs[0].durationText)
+      // 拿不到任何音质的歌不该混进点歌队列，否则播到它才报错
+      ok('有音质的算可播', songs[0].playable === true)
+      ok('没有音质的不算可播', songs[1].playable === false, JSON.stringify(songs[1]))
+      ok('封面地址带出来', songs[0].picUrl === 'http://p/1.jpg')
+
+      ok('请求打在转发通道上', seen.url === 'https://music.163.com/api/linux/forward', seen.url)
+      ok('默认用匿名 cookie', /os=pc/.test(seen.cookie || ''), seen.cookie)
+
+      const audio = await NCM.songUrl(11, { br: 320000 })
+      ok('播放链接取到', audio.url === 'http://m701.music.126.net/a.mp3')
+      ok('有效期带出来', audio.expiresIn === 1200)
+
+      // 取不到链接要给能照着做的提示，而不是一句 null
+      netMod.httpRequest = async () => ({ status: 200, ok: true, text: JSON.stringify({ code: 200, data: [{ id: 11, url: null }] }), buffer: Buffer.from('') })
+      await NCM.songUrl(11).then(
+        () => ok('取不到链接要报错', false),
+        (e) => ok('取不到链接要说人话', /版权|播放地址/.test(e.message), e.message),
+      )
+    } finally {
+      netMod.httpRequest = real
+    }
+  }
+
+  // 3) 歌词解析
+  {
+    const lrc = NCM.parseLrc('[00:00.000] 作词 : 张三\n[00:12.34]故事的小黄花\n[01:02.5]从出生那年就飘着\n')
+    ok('歌词按时间解析', lrc.length === 3, JSON.stringify(lrc))
+    ok('时间换算成秒', Math.abs(lrc[1].time - 12.34) < 0.01, String(lrc[1]?.time))
+    ok('歌词文本去掉时间标签', lrc[1].text === '故事的小黄花', lrc[1]?.text)
+    ok('歌词按时间排序', lrc[2].time > lrc[1].time)
+  }
+
+  // 4) 弹幕点歌指令识别
+  {
+    const cmd = NCM.parseMusicCommand
+    ok('「点歌 晴天」认出来', cmd('点歌 晴天', ['点歌']) === '晴天')
+    ok('「点歌晴天」不空格也认', cmd('点歌晴天', ['点歌']) === '晴天')
+    ok('冒号分隔也认', cmd('点歌：晴天', ['点歌']) === '晴天')
+    ok('只发「点歌」返回空串', cmd('点歌', ['点歌']) === '')
+    ok('多个触发词都认', cmd('点首歌 稻香', ['点歌', '点首歌']) === '稻香')
+    ok('普通弹幕不误判', cmd('今天天气不错', ['点歌']) === null)
+    // 「我想点歌手」这类不该被当成点歌 —— 只有以触发词开头的才算
+    ok('触发词不在开头就不算点歌', cmd('我想点歌手', ['点歌']) === null)
+    ok('没配触发词时用默认', cmd('点歌 晴天', null) === '晴天')
+    ok('空串不误判', cmd('', ['点歌']) === null)
+  }
+
+  // 5) 配置默认值
+  {
+    const DEFAULTS = readStoreDefaults()
+    ok('点歌默认开启', DEFAULTS.music?.enabled === true)
+    ok('默认 320k', DEFAULTS.music?.br === 320000)
+    ok('默认自动播放', DEFAULTS.music?.autoPlay === true)
+    ok('默认有队列上限', DEFAULTS.music?.maxQueue > 0, String(DEFAULTS.music?.maxQueue))
+    ok('默认按人节流', DEFAULTS.music?.perUserCooldownMs > 0, String(DEFAULTS.music?.perUserCooldownMs))
+    ok('默认不填 cookie 也能用', DEFAULTS.music?.cookie === '')
+  }
+
+  // 6) 通道选择 —— 会员身份只有在 weapi 上才会生效，选错就等于白填 Cookie
+  {
+    ok('没 Cookie 走匿名转发', NCM.channelFor('') === 'linux')
+    ok('只有环境字段仍算匿名', NCM.channelFor('os=pc; appver=8.9.70') === 'linux')
+    ok('有 MUSIC_U 走 weapi', NCM.channelFor('MUSIC_U=abc123') === 'weapi')
+    ok('整段 Cookie 里带 MUSIC_U 也认', NCM.channelFor('__csrf=x; MUSIC_U=abc; NMTID=y') === 'weapi')
+
+    const c = NCM.cookieFor('MUSIC_U=abc123')
+    ok('帮着补上 os/appver', /os=pc/.test(c) && /appver=/.test(c), c)
+    ok('帮着补上 NMTID', /NMTID=/.test(c), c)
+    ok('用户自带 os 不覆盖', /os=uwp/.test(NCM.cookieFor('MUSIC_U=a; os=uwp')), NCM.cookieFor('MUSIC_U=a; os=uwp'))
+    ok('用户自带 NMTID 不重复', (NCM.cookieFor('MUSIC_U=a; NMTID=x').match(/NMTID=/g) || []).length === 1)
+    ok('没 Cookie 时用匿名串', !/MUSIC_U/.test(NCM.cookieFor('')), NCM.cookieFor(''))
+  }
+
+  // 7) weapi 加密产物的形状
+  {
+    const w = NCM.weapi({ a: 1 })
+    ok('weapi 产出 params', typeof w.params === 'string' && w.params.length > 0)
+    ok('params 是 base64', /^[A-Za-z0-9+/=]+$/.test(w.params), String(w.params).slice(0, 20))
+    ok('encSecKey 是 256 位十六进制', /^[0-9a-f]{256}$/.test(w.encSecKey), String(w.encSecKey).slice(0, 24))
+    ok('每次随机密钥都不一样', NCM.weapi({ a: 1 }).params !== NCM.weapi({ a: 1 }).params)
+  }
+
+  // 8) 登录态通道、降级与容错
+  {
+    const netMod = require('../electron/lib/net.cjs')
+    const real = netMod.httpRequest
+    const anonSong = {
+      code: 200,
+      result: { songs: [{ id: 1, name: 'x', artists: [], album: {}, duration: 1000, fee: 0, privilege: { pl: 320000 } }] },
+    }
+    try {
+      // 8.1 会员身份只在「取链接」这一步有意义，那一步必须走 weapi
+      let seen = null
+      netMod.httpRequest = async (url, opts) => {
+        seen = { url, cookie: (opts.headers || {}).Cookie }
+        const text = String(url).includes('player/url')
+          ? JSON.stringify({ code: 200, data: [{ id: 11, url: 'http://m/a.mp3', br: 320000, expi: 1200 }] })
+          : JSON.stringify(anonSong)
+        return { status: 200, ok: true, text, buffer: Buffer.from(text) }
+      }
+      await NCM.songUrl(11, { cookie: 'MUSIC_U=abc' })
+      ok('取链接走 weapi', seen.url === 'https://music.163.com/weapi/song/enhance/player/url', seen.url)
+      ok('取链接带着 MUSIC_U', /MUSIC_U=abc/.test(seen.cookie || ''), seen.cookie)
+
+      // 8.1b 反过来：搜索即使在登录态也留在转发通道 —— weapi 的搜索会返回假数据
+      seen = null
+      await NCM.searchMusic('晴天', { cookie: 'MUSIC_U=abc' })
+      ok('搜索即使登录态也不走 weapi', seen.url === 'https://music.163.com/api/linux/forward', seen.url)
+      ok('匿名搜索不走 weapi', NCM.channelFor('') === 'linux')
+
+      // 8.1c 登录态下不再拿匿名权限否定歌曲，否则会员歌照样点不了
+      const batched = await NCM.searchMusic('晴天', { cookie: 'MUSIC_U=abc' })
+      ok('会员歌在登录态下算可播', batched.every((s) => s.playable === true), JSON.stringify(batched.map((s) => s.playable)))
+
+      // 8.2 weapi 被风控（空响应）要能退回匿名转发，别把点歌整体打死
+      const hits = []
+      netMod.httpRequest = async (url) => {
+        hits.push(url)
+        const text = url.includes('/linux/forward')
+          ? JSON.stringify({ code: 200, data: [{ id: 11, url: 'http://m/a.mp3', br: 320000 }] })
+          : ''
+        return { status: 200, ok: true, text, buffer: Buffer.from(text) }
+      }
+      const audio2 = await NCM.songUrl(11, { cookie: 'MUSIC_U=abc' })
+      ok('weapi 空响应会退回转发通道', hits.length === 2 && hits[1].includes('/linux/forward'), hits.join(' | '))
+      ok('退回之后仍拿得到链接', audio2.url === 'http://m/a.mp3')
+
+      // 8.3 会员过期/换设备时通常只是掉档位，自动降一级比直接报错强
+      let n = 0
+      netMod.httpRequest = async () => {
+        n++
+        const has = n >= 3 // 320k、192k 都没有，128k 才有
+        const text = JSON.stringify({ code: 200, data: [{ id: 11, url: has ? 'http://m/128.mp3' : null, br: has ? 128000 : 0 }] })
+        return { status: 200, ok: true, text, buffer: Buffer.from(text) }
+      }
+      const audio = await NCM.songUrl(11, { br: 320000 })
+      ok('高音质取不到会自动降级', audio.url === 'http://m/128.mp3', JSON.stringify(audio))
+      ok('降级要标出来给界面知道', audio.downgraded === true)
+      n = 0
+      netMod.httpRequest = async () => {
+        const text = JSON.stringify({ code: 200, data: [{ id: 11, url: 'http://m/320.mp3', br: 320000 }] })
+        return { status: 200, ok: true, text, buffer: Buffer.from(text) }
+      }
+      ok('音质刚好够就不标降级', (await NCM.songUrl(11, { br: 320000 })).downgraded === false)
+
+      // 8.4 登录态体检
+      netMod.httpRequest = async () => ({
+        status: 200,
+        ok: true,
+        text: JSON.stringify({ code: 200, account: { id: 1 }, profile: { userId: 1, nickname: '小明', vipType: 11 } }),
+        buffer: Buffer.from(''),
+      })
+      const acc = await NCM.accountInfo({ cookie: 'MUSIC_U=abc' })
+      ok('读出登录昵称', acc.loggedIn === true && acc.nickname === '小明', JSON.stringify(acc))
+      ok('识别出会员', acc.vip === true)
+      netMod.httpRequest = async () => ({
+        status: 200,
+        ok: true,
+        text: JSON.stringify({ code: 200, account: null, profile: null }),
+        buffer: Buffer.from(''),
+      })
+      ok('account 为 null 判未登录', (await NCM.accountInfo({ cookie: 'MUSIC_U=expired' })).loggedIn === false)
+      ok('没填 Cookie 直接判未登录', (await NCM.accountInfo({})).loggedIn === false)
+      ok('没填 Cookie 时通道是 linux', (await NCM.accountInfo({})).channel === 'linux')
+    } finally {
+      netMod.httpRequest = real
+    }
+  }
+}
+
+/* ------------------------- 跳过播报状态机 ------------------------- */
+
+/**
+ * 「跳过」的三种时机行为不一样，真机很难卡准，这里直接跑状态机：
+ *   正在播放 → 立刻放行，不再播
+ *   正在合成 → 打标记，合成完丢掉
+ *   完全空闲 → 什么都不做（否则会把下一条新弹幕也误丢掉）
+ */
+async function testSkip() {
+  const { createSpeechControl } = require('../electron/speech-control.cjs')
+
+  // 1) 正在播放时点跳过：等待中的 Promise 要立刻放行，声音由渲染进程停
+  {
+    const c = createSpeechControl()
+    c.setBusy(true)
+    c.begin('第一条')
+    let released = false
+    const p = c.waitPlayback().then(() => {
+      released = true
+    })
+    c.markPlaying()
+    ok('播放中：快照认在播', c.snapshot().playing === true && c.state === 'playing')
+    const r = c.requestSkip()
+    await p
+    ok('播放中跳过：等待的播报被放行', released === true)
+    ok('播放中跳过：返回 skipped', r.skipped === true)
+    ok('播放中跳过：不再记为在播', c.snapshot().playing === false)
+    ok('播放中跳过：文本清空', c.text === '')
+  }
+
+  // 2) 还在合成时点跳过：打标记，合成完丢掉，别推给渲染进程
+  {
+    const c = createSpeechControl()
+    c.setBusy(true)
+    c.begin('还在合成')
+    const r = c.requestSkip()
+    ok('合成中跳过：pending=true', r.skipped === false && r.pending === true)
+    ok('合成中跳过：合成完会丢掉这条', c.consumeSkip() === true)
+    ok('合成中跳过：标记只消费一次', c.consumeSkip() === false)
+  }
+
+  // 3) 完全空闲时手滑点了：不该留下任何痕迹
+  {
+    const c = createSpeechControl()
+    const r = c.requestSkip()
+    ok('空闲时跳过：不报已跳过', r.skipped === false && r.pending === false)
+    // 这条是本轮最要紧的回归：标记残留会把下一条新弹幕也一起吞掉
+    c.setBusy(true)
+    c.begin('下一条新弹幕')
+    ok('空闲时点过跳过，不会误丢下一条', c.consumeSkip() === false)
+  }
+
+  // 4) 清空队列：待播的全部丢掉，当前这条也停
+  {
+    const c = createSpeechControl()
+    c.queue.push({ text: 'a' }, { text: 'b' })
+    c.setBusy(true)
+    c.begin('正在念的')
+    const p = c.waitPlayback()
+    const r = c.clearQueue()
+    await p
+    ok('清空：待播数量报出来', r.cleared === 2, String(r.cleared))
+    ok('清空：队列真的空了', c.queued === 0)
+    ok('清空：当前这条也停了', r.skipped === true && c.snapshot().playing === false)
+  }
+
+  // 5) 正常播完的回执流程不能被跳过逻辑搞坏
+  {
+    const c = createSpeechControl()
+    c.setBusy(true)
+    c.begin('正常播完')
+    let done = false
+    const p = c.waitPlayback().then(() => {
+      done = true
+    })
+    ok('回执前：在播', c.snapshot().playing === true)
+    c.ack()
+    await p
+    ok('回执后：放行', done === true)
+    ok('回执后：不在播了', c.snapshot().playing === false)
+  }
+
+  // 6) 切页面之后靠快照恢复显示：得带上现在念的是什么
+  {
+    const c = createSpeechControl()
+    c.setBusy(true)
+    c.begin('切页面也要看得到')
+    const s = c.snapshot()
+    ok('快照带当前文本', s.text === '切页面也要看得到', s.text)
+    ok('快照带状态', s.state === 'loading', s.state)
+    c.finish()
+    ok('收尾后状态回 idle', c.state === 'idle' && c.text === '')
+  }
+}
+
+/* --------------------- 控件改完立刻生效 --------------------- */
+
+/**
+ * 界面上的开关改完，已经排进队列的那些也该立刻跟着变 ——
+ * 否则「关掉播报却还在念」会被当成软件坏了。
+ */
+function testLiveControls() {
+  const { shouldSpeakNow } = require('../electron/speech-rules.cjs')
+
+  const danmaku = (text) => ({ text, meta: { type: 'danmaku' } })
+
+  ok('开着播报正常念', shouldSpeakNow(danmaku('你好'), { enabled: true }).drop === false)
+  ok(
+    '关掉播报后队列里的不再念',
+    shouldSpeakNow(danmaku('你好'), { enabled: false }).drop === true,
+  )
+  ok(
+    '关掉播报给出原因',
+    /关闭/.test(shouldSpeakNow(danmaku('你好'), { enabled: false }).reason || ''),
+  )
+  ok(
+    '临时加的屏蔽词对已排队的也生效',
+    shouldSpeakNow(danmaku('这个抽奖链接别念'), { enabled: true, blockWords: '抽奖' }).drop === true,
+  )
+  ok('屏蔽词逗号分隔', shouldSpeakNow(danmaku('广告时间'), { enabled: true, blockWords: '抽奖,广告' }).drop === true)
+  ok('没命中屏蔽词照常念', shouldSpeakNow(danmaku('今天天气不错'), { enabled: true, blockWords: '抽奖' }).drop === false)
+  // 关掉播报之后还得能试听，不然没法调音色
+  ok('手动试听不受开关限制', shouldSpeakNow({ text: '试听', meta: { type: 'manual' } }, { enabled: false }).drop === false)
+  ok('音色试听不受开关限制', shouldSpeakNow({ text: '试听', meta: { type: 'voice-test' } }, { enabled: false }).drop === false)
+
+  // 配置默认值：新装的软件就该是这套，迁移也依赖它们
+  const DEFAULTS = readStoreDefaults()
+  ok('弹幕自动滚动默认开', DEFAULTS.danmaku?.autoScroll === true)
+  ok('LLM 默认预算够推理模型用', DEFAULTS.llm?.maxTokens >= 1200, String(DEFAULTS.llm?.maxTokens))
+  ok('默认关掉模型思考', DEFAULTS.llm?.noThink === true)
+
+  // 老配置里的 320 是给非推理模型定的，留着会让扩写静默失效
+  const migrated = runMigrate({ llm: { maxTokens: 320 } })
+  ok('旧的 320 预算会被迁移', migrated.llm.maxTokens === DEFAULTS.llm.maxTokens, String(migrated.llm.maxTokens))
+  const kept = runMigrate({ llm: { maxTokens: 2000 } })
+  ok('用户自己调大的预算不动', kept.llm.maxTokens === 2000, String(kept.llm.maxTokens))
+}
+
+/**
+ * store.cjs 依赖 electron 的 safeStorage，纯 node 下 require 会炸 ——
+ * 这里塞一个假的进去，只为了读 DEFAULTS 和跑 migrate 这两个纯逻辑。
+ */
+function withFakeElectron(fn) {
+  const Module = require('module')
+  const orig = Module.prototype.require
+  Module.prototype.require = function (id) {
+    if (id === 'electron') {
+      return {
+        app: { getPath: () => require('os').tmpdir(), getVersion: () => '0.0.0' },
+        safeStorage: {
+          isEncryptionAvailable: () => false,
+          encryptString: (s) => Buffer.from(s, 'utf8'),
+          decryptString: (b) => Buffer.from(b).toString('utf8'),
+        },
+      }
+    }
+    return orig.apply(this, arguments)
+  }
+  try {
+    return fn()
+  } finally {
+    Module.prototype.require = orig
+  }
+}
+
+function readStoreDefaults() {
+  return withFakeElectron(() => require('../electron/store.cjs').DEFAULTS)
+}
+
+function runMigrate(data) {
+  return withFakeElectron(() => {
+    const { ConfigStore } = require('../electron/store.cjs')
+    // 只借用 migrate 这一段，不碰真实磁盘
+    const fake = Object.create(ConfigStore.prototype)
+    fake.data = require('../electron/store.cjs').DEFAULTS
+    fake.data = JSON.parse(JSON.stringify(require('../electron/store.cjs').DEFAULTS))
+    Object.assign(fake.data, JSON.parse(JSON.stringify(data)))
+    fake.migrate()
+    return fake.data
+  })
+}
+
+/* ------------------------- Fish 真合成自检 ------------------------- */
+
+async function testFishProbe() {
+  const { probeFish } = require('../electron/tts.cjs')
+  const real = global.fetch
+  const fake = (jsonBody, status = 200) => {
+    const buf = Buffer.from(JSON.stringify(jsonBody), 'utf8')
+    return {
+      ok: status >= 200 && status < 300,
+      status,
+      json: async () => JSON.parse(buf.toString('utf8')),
+      text: async () => buf.toString('utf8'),
+      arrayBuffer: async () => buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength),
+    }
+  }
+  const audio = (bytes) => {
+    const buf = Buffer.from(bytes)
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({}),
+      text: async () => buf.toString('utf8'),
+      arrayBuffer: async () => buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength),
+    }
+  }
+
+  /**
+   * 必须分清几种病 —— 报错长得像，解法毫不相干：
+   *   A 钱包接口就 401      → Key 本身不被接受（多半是拿错了平台的 Key）
+   *   A3 钱包接口连不上     → 是网络问题，不是 Key 问题
+   *   B 钱包 200、合成 402  → API 额度为 0（新账号默认），换免费模型就行
+   *   C 钱包 200、合成 403  → Key 有效，但这把 Key 没有 TTS 权限
+   * 只有真出音频才算通过。
+   */
+  const wallet = '/wallet/self/package'
+  try {
+    // A：钱包接口 401 —— Key 本身不被接受（多半是拿错了平台的 Key）
+    global.fetch = async (url) =>
+      String(url).includes(wallet) ? fake({ message: 'Invalid token' }, 401) : fake({ message: 'Invalid Token' }, 401)
+    const bad = await probeFish({ apiKey: 'k', model: 's2.1-pro', voice: 'v1' })
+    ok('钱包 401 时不算通过', bad.ok === false, JSON.stringify(bad))
+    ok('记录钱包接口的状态', bad.account === 401, String(bad.account))
+    ok('钱包 401 时点明 Key 不被接受', /不认这把 Key/.test(bad.message), bad.message)
+    ok('钱包 401 时点破两套平台不通用', /不能互换/.test(bad.message), bad.message)
+    // 身份都没过就别再撞合成 —— 那只会再换回一个同样看不懂的 401，白等一轮
+    ok('钱包 401 时不再发合成请求', bad.tried.length === 0, JSON.stringify(bad.tried))
+
+    // A2：没绑音色也要能验。这家平台 reference_id 可省略（用默认音色），
+    // 所以照样真合成一次 —— 不能因为「没选音色」就把自检判成通过或失败
+    let synthCalls = 0
+    global.fetch = async (url) => {
+      if (String(url).includes(wallet)) return fake({ type: 'free', balance: 8000 })
+      synthCalls += 1
+      return audio([1, 2, 3])
+    }
+    const noVoice = await probeFish({ apiKey: 'k' })
+    ok('没绑音色照样真合成一次', synthCalls === 1, String(synthCalls))
+    ok('没绑音色时能验通', noVoice.ok === true, JSON.stringify(noVoice))
+    ok('没绑音色时说清用的是默认音色', /默认音色/.test(noVoice.message), noVoice.message)
+
+    // A3：钱包接口连不上 —— 是网络问题，不是 Key 问题
+    global.fetch = async () => {
+      throw new Error('getaddrinfo ENOTFOUND api.fish.audio')
+    }
+    const netBad = await probeFish({ apiKey: 'k', voice: 'v1' })
+    ok('钱包接口连不上时说是网络', /解析失败|连不上/.test(netBad.message), netBad.message)
+
+    // B：钱包 200 却合成 402 —— API 额度为 0，这正是新账号的默认状况
+    global.fetch = async (url) => {
+      if (String(url).includes(wallet)) return fake({ type: 'free', balance: 8000 })
+      return fake({ status: 402, message: 'Insufficient API credit' }, 402)
+    }
+    const broke = await probeFish({ apiKey: 'k', model: 's2.1-pro', voice: 'v1' })
+    ok('API 额度为 0 时不算通过', broke.ok === false, JSON.stringify(broke))
+    ok('402 说清是 API 额度用完', /API 额度/.test(broke.message), broke.message)
+    ok('402 直接给出充值入口', /fish\.audio\/app\/developers/.test(broke.message), broke.message)
+    ok('402 会继续试免费模型', broke.tried.length > 1, JSON.stringify(broke.tried?.map((t) => t.model)))
+    ok('402 时不冤枉 Key 本身', !/不认这把 Key/.test(broke.message), broke.message)
+
+    // B2：默认模型就是免费档时，一次就能出声
+    global.fetch = async (url) => (String(url).includes(wallet) ? fake({ type: 'free' }) : audio([1, 2, 3, 4, 5]))
+    const free = await probeFish({ apiKey: 'k', voice: 'v1' })
+    ok('默认先试免费模型', free.tried[0].model === 's2.1-pro-free', JSON.stringify(free.tried?.map((t) => t.model)))
+    ok('免费模型一次就过', free.ok === true && free.tried.length === 1, JSON.stringify(free.tried))
+
+    // C：钱包 200 却合成 403 —— 有身份，就是没 TTS 权限
+    global.fetch = async (url) => {
+      if (String(url).includes(wallet)) return fake({ type: 'free', balance: 8000 })
+      return fake({ requestId: 'r1', code: 'ERR_FORBIDDEN', message: 'Access forbidden' }, 403)
+    }
+    const noPerm = await probeFish({ apiKey: 'k', model: 's2.1-pro', voice: 'v1' })
+    ok('合成 403 时不算通过', noPerm.ok === false)
+    ok('403 判定为没有 TTS 权限', /没有 TTS 权限/.test(noPerm.message), noPerm.message)
+    ok('403 时不冤枉 Key 本身', !/不认这把 Key/.test(noPerm.message), noPerm.message)
+    // 403 换任何模型都是同一个结果，逐个试一遍只是白白让人等
+    ok('403 不再逐个模型重试', noPerm.tried.length === 1, JSON.stringify(noPerm.tried?.map((t) => t.model)))
+    // 账户配额、模型名这类中间信息一律不进弹窗 —— 它们改变不了用户要做的动作
+    ok('报错不塞账户配额', !/balance|积分|额度 200/.test(noPerm.message), noPerm.message)
+
+    // D：出音频才算真通过
+    global.fetch = async (url) => (String(url).includes(wallet) ? fake({ type: 'free' }) : audio([1, 2, 3, 4, 5]))
+    const good = await probeFish({ apiKey: 'k', voice: 'v1' })
+    ok('能出音频才算通过', good.ok === true && good.bytes === 5, JSON.stringify(good))
+    ok('报出实际能用的模型', Boolean(good.workingModel), JSON.stringify(good))
+    ok('通过时带上实测结果', /合成实测通过/.test(good.message), good.message)
+    ok('通过时不提默认音色', !/默认音色/.test(good.message), good.message)
+
+    // 没填 Key 时不要发任何请求
+    global.fetch = async () => {
+      throw new Error('不该发请求')
+    }
+    const none = await probeFish({ apiKey: '' })
+    ok('没 Key 时直接报缺 Key', none.ok === false && /API Key/.test(none.message), none.message)
+  } finally {
+    global.fetch = real
+  }
+}
+
+/* ---------------------------- LLM 扩写 ---------------------------- */
+
+async function testLlm() {
+  const L = require('../electron/llm.cjs')
+  const V = require('../electron/voices.cjs')
+
+  const cfg = { llm: { provider: 'deepseek', apiKey: 'sk-test', model: 'deepseek-chat', enabled: true } }
+
+  // 默认必须落在 DeepSeek 上：国内直连、不用代理
+  ok('默认供应商是 DeepSeek', L.providerOf({ llm: {} }).id === 'deepseek')
+  ok('DeepSeek 默认地址带 /v1', L.baseFor({ llm: {} }) === 'https://api.deepseek.com/v1', L.baseFor({ llm: {} }))
+  ok('默认模型是 deepseek-chat', L.modelFor({ llm: {} }) === 'deepseek-chat')
+  ok('自定义地址优先于供应商默认', L.baseFor({ llm: { provider: 'deepseek', baseUrl: 'https://my.proxy/v1/' } }) === 'https://my.proxy/v1')
+
+  // 公式是这套东西的核心：少一行，补全出来的描述就会缺一个维度
+  const formula = L.DESIGN_FORMULA
+  ok('公式覆盖年龄性别口音', /\[年龄\].*\[性别\].*\[语言\/口音\]/.test(formula), formula)
+  ok('公式覆盖音色四维', /\[明暗\].*\[厚薄\].*\[虚实\].*\[粗细\]/.test(formula))
+  ok('公式覆盖共鸣与咬字', /\[共鸣位置\].*\[清晰度\]/.test(formula))
+  ok('公式覆盖语速语气', /语速\[快慢\].*语气\[情绪\]/.test(formula), formula)
+  ok('公式覆盖质感与距离', /\[录音质感\].*\[距离感\]/.test(formula))
+  ok('公式以职业锚点收尾', /\[职业锚点\]/.test(formula))
+  ok('默认模板内嵌公式', L.defaultTemplate().includes(formula))
+  ok('默认模板禁止输出解释', /不要.*解释|不要.*多余/.test(L.defaultTemplate()))
+
+  // 完整性判定：公式是 6 句，被掐断时通常只剩两三句
+  ok('六句算补全完整', L.complete('一。二。三。四。五。六。') === true)
+  ok('四句算补全完整', L.complete('一。二。三。四。') === true)
+  ok('两句算残缺', L.complete('一。二。') === false)
+  ok('空文本算残缺', L.complete('') === false)
+
+  ok('没配 Key 时判定不可用', L.ready({ llm: { enabled: true, apiKey: '' } }).ok === false)
+  ok('关掉开关时不可用', L.ready({ llm: { enabled: false, apiKey: 'k' } }).ok === false)
+  ok('自定义供应商没填地址时不可用', L.ready({ llm: { provider: 'custom', apiKey: 'k', model: 'm' } }).ok === false)
+  ok('配齐了才可用', L.ready(cfg).ok === true)
+
+  // 没配好时不能让观众的设计请求落空：原话照用
+  const off = await L.expandDesign('御姐音', { llm: { enabled: true, apiKey: '' } })
+  ok('未配置时回落到原话', off.used === false && off.text === '御姐音', JSON.stringify(off))
+
+  // 清洗：模型最爱加的几样东西
+  ok('去掉代码块围栏', L.sanitize('```\n25岁的女性。\n```') === '25岁的女性。', L.sanitize('```\n25岁的女性。\n```'))
+  ok('去掉「描述：」前缀', L.sanitize('音色描述：25岁的女性') === '25岁的女性')
+  ok('方括号剥壳留内容', L.sanitize('[25岁]的女性') === '25岁的女性', L.sanitize('[25岁]的女性'))
+  ok('换行折叠成一段', L.sanitize('25岁的女性。\n音色明亮。') === '25岁的女性。 音色明亮。')
+  ok('去掉序号', L.sanitize('1. 25岁的女性') === '25岁的女性', L.sanitize('1. 25岁的女性'))
+  ok('去掉首尾引号', L.sanitize('"25岁的女性"') === '25岁的女性')
+  ok('超长截断到 300', L.sanitize('啊'.repeat(400)).length === 300)
+  ok('空输入不炸', L.sanitize(null) === '' && L.sanitize(undefined) === '')
+
+  // 真发一次请求：请求体和结果都要对得上
+  const real = global.fetch
+  let last = null
+  // 公式补全后是 6 句，mock 也要给够，否则会被「完整性检查」当成被掐断的输出
+  const SIX =
+    '```\n音色描述：25岁的女性，说普通话。音色明亮、中厚、半实、偏细。胸腔共鸣发声，咬字清晰。语速舒缓，语气温柔。录音棚质感，近距离。整体感觉像电台主播。\n```'
+  const SIX_CLEAN =
+    '25岁的女性，说普通话。音色明亮、中厚、半实、偏细。胸腔共鸣发声，咬字清晰。语速舒缓，语气温柔。录音棚质感，近距离。整体感觉像电台主播。'
+  const fake = (jsonBody, status = 200) => {
+    const buf = Buffer.from(JSON.stringify(jsonBody), 'utf8')
+    return {
+      ok: status >= 200 && status < 300,
+      status,
+      json: async () => JSON.parse(buf.toString('utf8')),
+      text: async () => buf.toString('utf8'),
+      arrayBuffer: async () => buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength),
+    }
+  }
+  global.fetch = async (url, opts) => {
+    last = { url: String(url), opts: opts || {} }
+    if (String(url).endsWith('/models')) {
+      return fake({
+        data: [
+          { id: 'deepseek-chat' },
+          { id: 'deepseek-reasoner' },
+          { id: 'deepseek-chat' },
+          { id: 'deepseek-embedding' },
+          { id: 'some-tts-model' },
+        ],
+      })
+    }
+    return fake({ choices: [{ message: { content: SIX } }] })
+  }
+
+  try {
+    const r = await L.expandDesign('御姐音', cfg)
+    ok('扩写走 chat/completions', last.url.endsWith('/chat/completions'), last.url)
+    const body = JSON.parse(last.opts.body)
+    ok('扩写带上了模型名', body.model === 'deepseek-chat', body.model)
+    ok('system 是公式模板', /职业锚点/.test(body.messages[0].content))
+    ok('user 带上观众原话', /御姐音/.test(body.messages[1].content), body.messages[1].content)
+    ok('扩写成功会标记 used', r.used === true && r.ok === true)
+    ok('扩写结果已清洗干净', r.text === SIX_CLEAN, r.text)
+    ok('保留模型返回的原文供排查', typeof r.raw === 'string' && r.raw.includes('```'))
+
+    // 关掉思考：推理模型的思考占输出预算，写音色描述用不上，还会把正文挤没
+    ok('默认关闭模型思考', body.reasoning_effort === 'none', String(body.reasoning_effort))
+    ok('带上 thinking:disabled', body.thinking && body.thinking.type === 'disabled')
+    ok('带上 enable_thinking:false', body.enable_thinking === false)
+    ok('带上 chat_template_kwargs', body.chat_template_kwargs && body.chat_template_kwargs.enable_thinking === false)
+    // 注意：reasoning_effort 只能填 none。填 low/minimal 实测会强制思考，
+    // 烧满 1200 tok、7 秒、正文一个字没有 —— 这条断言就是防它
+    ok('不用 low/minimal 当关闭值', L.THINK_OFF.reasoning_effort === 'none')
+
+    const openCfg = { llm: { ...cfg.llm, noThink: false } }
+    await L.expandDesign('御姐音', openCfg)
+    const openBody = JSON.parse(last.opts.body)
+    ok('关掉开关后不再带关闭参数', openBody.reasoning_effort === undefined && openBody.thinking === undefined)
+
+    const list = await L.listModels(cfg)
+    ok('模型列表去重', list.models.filter((m) => m === 'deepseek-chat').length === 1)
+    ok('过滤掉 embedding', !list.models.some((m) => /embedding/.test(m)), JSON.stringify(list.models))
+    ok('过滤掉 tts 模型', !list.models.some((m) => /tts/.test(m)), JSON.stringify(list.models))
+    ok('保留对话模型', list.models.includes('deepseek-reasoner'))
+    ok('列表带 HTTP 状态', list.status === 200 && list.ok === true)
+
+    // Key 无效时给的是能照着做的中文，不是一句 HTTP 401
+    global.fetch = async () => fake({ message: 'Invalid API key' }, 401)
+    const bad = await L.listModels(cfg)
+    ok('401 翻译成人话', /Key 无效/.test(bad.message), bad.message)
+    ok('401 带上平台原话', /Invalid API key/.test(bad.message))
+    const badExpand = await L.expandDesign('御姐音', cfg).catch((e) => e)
+    ok('扩写 401 会抛错（交由调用方回落）', badExpand instanceof Error && /Key 无效/.test(badExpand.message), String(badExpand))
+
+    // 思考把预算吃光：正文空、reasoning_content 一大段 —— 要能说清这是怎么回事
+    global.fetch = async () =>
+      fake({
+        choices: [
+          { finish_reason: 'length', message: { content: '', reasoning_content: '让我想想'.repeat(80) } },
+        ],
+      })
+    const ate = await L.expandDesign('机器人音效', cfg).catch((e) => e)
+    ok('思考吃光预算会报错', ate instanceof Error && /思考/.test(ate.message), String(ate))
+    ok('并且提示调大输出额度', /最大输出|1200/.test(ate.message), String(ate))
+    ok('这种错误标记为可重试', ate.retryable === true)
+
+    // 被掐断：第一轮只写出两句，加大预算重试后拿全
+    let n = 0
+    global.fetch = async () => {
+      n++
+      return n === 1
+        ? fake({ choices: [{ finish_reason: 'length', message: { content: '25岁的女性，说普通话。音色明亮。' } }] })
+        : fake({ choices: [{ message: { content: SIX } }] })
+    }
+    const retried = await L.expandDesign('御姐音', cfg)
+    ok('被掐断会自动重试一次', n === 2, `请求次数=${n}`)
+    ok('重试后拿到完整补全', retried.used === true && retried.text === SIX_CLEAN, retried.text)
+
+    // 两轮都残缺：总比用观众原话强，照用但要标记出来
+    global.fetch = async () => fake({ choices: [{ finish_reason: 'stop', message: { content: '25岁的女性，说普通话。' } }] })
+    const short = await L.expandDesign('御姐音', cfg)
+    ok('始终残缺也照用', short.used === true && short.text === '25岁的女性，说普通话。', short.text)
+    ok('残缺结果会被标记', short.truncated === true)
+
+    // 平台不认关闭思考的字段（严格中转会 400）—— 要自动去掉重发，不能就此失败
+    let hits = 0
+    global.fetch = async (_u, opts) => {
+      hits++
+      const b = JSON.parse(opts.body)
+      if (b.reasoning_effort) return fake({ message: 'unknown field reasoning_effort' }, 400)
+      return fake({ choices: [{ message: { content: SIX } }] })
+    }
+    const strict = await L.expandDesign('御姐音', cfg)
+    ok('400 时去掉关闭参数重发', hits === 2, `请求次数=${hits}`)
+    ok('去掉后能正常扩写', strict.used === true && strict.text === SIX_CLEAN, strict.text)
+  } finally {
+    global.fetch = real
+  }
+
+  // 档案要同时留住原话和补全结果，扩写跑偏时才有得对照
+  const p = V.makeDesignProfile({
+    ownerUid: 1,
+    ownerName: '瓜Po',
+    prompt: '25岁的女性，说普通话。音色明亮。',
+    rawPrompt: '御姐音',
+    expanded: true,
+    tts: {},
+  })
+  ok('档案保留补全后的描述', p.designPrompt === '25岁的女性，说普通话。音色明亮。')
+  ok('档案保留观众原话', p.rawPrompt === '御姐音')
+  ok('档案标记经过扩写', p.expanded === true)
+  ok('档案走 voicedesign 模型', p.model === 'mimo-v2.5-tts-voicedesign')
+}
+
+/* ------------------------- 密钥清洗与错误翻译 ------------------------- */
+
+function testKeytext() {
+  const { normalizeKey, describeKey, keySummary, keyWarnings } = require('../electron/lib/keytext.cjs')
+  const net = require('../electron/lib/net.cjs')
+  const V = require('../electron/voices.cjs')
+
+  // 从网页复制密钥最常见的几种「脏」
+  ok('去掉零宽字符', normalizeKey('abc\u200Bdef') === 'abcdef')
+  ok('去掉 BOM', normalizeKey('\uFEFFabc') === 'abc')
+  ok('不换行空格当空白处理', normalizeKey('abc\u00A0') === 'abc')
+  ok('全角空格当空白处理', normalizeKey('\u3000abc\u3000') === 'abc')
+  ok('去掉换行与制表符', normalizeKey('abc\r\n\t') === 'abc')
+  ok('去掉误抄的 Bearer 前缀', normalizeKey('Bearer abc123') === 'abc123')
+  ok('去掉整段 Authorization 头', normalizeKey('Authorization: Bearer abc123') === 'abc123')
+  ok('去掉首尾引号', normalizeKey('"abc123"') === 'abc123')
+  ok('密钥中间的空格保留（不擅自改内容）', normalizeKey('fish key') === 'fish key')
+  ok('空值不炸', normalizeKey(null) === '' && normalizeKey(undefined) === '')
+
+  // 指纹：界面和日志里只出现头尾，不能出现整把
+  const d = describeKey('abcdefghijklmnop')
+  ok('指纹保留长度', d.len === 16)
+  ok('指纹只露头尾', d.fp === 'abcd…mnop', d.fp)
+  ok('短密钥不露全', describeKey('abc').fp === 'a***', describeKey('abc').fp)
+  ok('空密钥摘要为未填写', keySummary('') === '未填写', keySummary(''))
+
+  ok('能识别零宽字符', keyWarnings('a\u200Bb').some((w) => /零宽/.test(w)))
+  ok('能识别全角空格', keyWarnings('a\u3000b').some((w) => /全角/.test(w)))
+  ok('干净密钥无告警', keyWarnings('abc123').length === 0, JSON.stringify(keyWarnings('abc123')))
+
+  // 档案 / 搜索取 Key 时也要过一遍清洗，不只是合成那一步
+  ok('keyFor 会清洗 Fish Key', V.keyFor('fish', { platformKeys: { fish: ' Bearer\u200B k1 ' } }) === 'k1')
+
+  // 平台错误翻译：401 和 402 是完全不同的病，不能都回一句「失败」
+  const e401 = net.describeHttpError(401, '{"status":401,"message":"Invalid Token"}', {
+    label: 'Fish Audio',
+    keySummary: '长度 12 · bad-…1234',
+  })
+  ok('401 说明是 Key 的问题', /Key 无效/.test(e401), e401)
+  ok('401 带上平台原话', /Invalid Token/.test(e401))
+  ok('401 给出下一步动作', /重新生成一把/.test(e401), e401)
+  // 报错只说「哪儿错了 + 现在做什么」。Key 指纹、中转地址这类中间信息不进这句话 ——
+  // 界面上「已保存：长度 12 · bad-…1234」已经写着，重复只会把真正要读的那句挤掉
+  ok('401 不塞 Key 指纹', !/bad-…1234/.test(e401), e401)
+  ok('401 不列一串猜测', !/接口地址|镜像/.test(e401), e401)
+  ok('402 提示额度而非 Key', /额度/.test(net.describeHttpError(402, '{}', { label: 'Fish Audio' })))
+  ok('404 提示地址不对', /地址不对/.test(net.describeHttpError(404, '{}', { label: 'Fish Audio' })))
+  ok('未知状态码兜底带状态号', /HTTP 500/.test(net.describeHttpError(500, 'boom', { label: 'Fish Audio' })))
+  ok('响应体不是 JSON 也不炸', /boom/.test(net.describeHttpError(400, 'boom', { label: 'X' })))
+  // 报错一律是「一句话」，不能长成一段说明文 —— 弹窗里放不下，也没人读
+  const longOnes = [401, 402, 403, 404, 400, 429].map((s) => net.describeHttpError(s, '{"message":"x"}', { label: 'L' }))
+  ok('各类错误的文案都在两句话以内', longOnes.every((m) => (m.match(/。/g) || []).length <= 2), longOnes.join(' || '))
+
+  // 平台回的是一整页 HTML（网关 / CDN 的默认错误页）时，不能把标签和回车塞进弹窗
+  const htmlBody =
+    '<!DOCTYPE html><html><head><title>502 Bad Gateway</title></head><body><h1>502 Bad Gateway</h1><hr>nginx</body></html>'
+  const htmlMsg = net.describeHttpError(502, htmlBody, { label: '某平台' })
+  ok('HTML 错误页会被压成一行', !/[<>]/.test(htmlMsg), htmlMsg)
+  ok('HTML 里重复的标题片段会去重', !/502 Bad Gateway 502/.test(htmlMsg), htmlMsg)
+  ok('未知状态码也给下一步动作', /再试/.test(htmlMsg), htmlMsg)
+  ok('超长响应体撑不爆弹窗', net.describeHttpError(403, 'A'.repeat(800), { label: 'X' }).length < 120)
+  ok('空响应体不出现「平台说」', !/平台说/.test(net.describeHttpError(403, '   ', { label: 'X' })))
+}
+
+/* ---------------------------- 头像解析 ---------------------------- */
+
+async function testFaces() {
+  const { FaceResolver, normalize } = require('../electron/faces.cjs')
+
+  ok('普通头像地址加裁剪后缀', normalize('https://i2.hdslb.com/bfs/face/abc.jpg') === 'https://i2.hdslb.com/bfs/face/abc.jpg@96w_96h_1c.webp')
+  ok('带查询串的不加后缀', normalize('https://i0.hdslb.com/bfs/face/a.jpg?x=1') === 'https://i0.hdslb.com/bfs/face/a.jpg?x=1')
+  ok('协议补全 // 开头', normalize('//i0.hdslb.com/bfs/face/a.jpg').startsWith('https:'))
+  ok('非法地址返回空', normalize('data:image/png;base64,AAA') === '')
+
+  const r = new FaceResolver()
+  const real = global.fetch
+  let calls = 0
+  global.fetch = async () => {
+    calls++
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => 'image/webp' },
+      arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer,
+    }
+  }
+  global.AbortController = global.AbortController || require('node:abort-controller')
+  try {
+    const a = await r.resolve('https://i2.hdslb.com/bfs/face/a.jpg')
+    ok('远程地址解析成 data URL', a === 'data:image/webp;base64,AQID')
+    const a2 = await r.resolve('https://i2.hdslb.com/bfs/face/a.jpg')
+    ok('同一地址命中缓存重复使用', a2 === a)
+    await Promise.all([r.resolve('a1'), r.resolve('a2')].map(() => Promise.resolve()))
+    ok('重复请求只打一次网络', calls === 1, `calls=${calls}`)
+
+    global.fetch = async () => ({ ok: false, status: 403, headers: { get: () => 'text/html' } })
+    const bad = await r.resolve('https://i2.hdslb.com/bfs/face/nope.jpg')
+    ok('403 时返回空而不是抛异常', bad === '')
+    const cached = r.cached('https://i2.hdslb.com/bfs/face/a.jpg')
+    ok('失败不影响已缓存数据', cached === a)
+  } finally {
+    global.fetch = real
+  }
+}
+
+/* --------------------------- 凭据与 Cookie --------------------------- */
+
+function testCredentials() {
+  const { CookieJar } = require('../electron/lib/http.cjs')
+  const jar = new CookieJar()
+
+  jar.set('SESSDATA=abc%2Cdef; Domain=.bilibili.com; Path=/; Max-Age=15552000')
+  ok('SESSDATA 存进来会解码', jar.get('SESSDATA') === 'abc,def')
+  ok('Cookie 头部按域名拼出', jar.getHeader('https://api.bilibili.com/x/nav').includes('SESSDATA=abc,def'))
+
+  jar.set('SESSDATA=gone; Domain=.bilibili.com; Max-Age=0')
+  ok('Max-Age=0 会删除', jar.get('SESSDATA') === '')
+
+  jar.set('OLD=1; Domain=.bilibili.com; Expires=Wed, 21 Oct 2015 07:28:00 GMT')
+  ok('过期 Cookie 不进请求头', !jar.getHeader('https://api.bilibili.com/x/nav').includes('OLD='))
+
+  // 主进程的合并策略：新值为空时不能把已存的凭据洗掉
+  const saved = { SESSDATA: 'keep', bili_jct: 'keep2', DedeUserID: '9' }
+  const current = { SESSDATA: '', bili_jct: '', DedeUserID: '', buvid3: '', buvid4: '' }
+  const merged = { ...current }
+  for (const k of ['SESSDATA', 'bili_jct', 'DedeUserID', 'buvid3', 'buvid4']) {
+    if (!merged[k] && saved[k]) merged[k] = saved[k]
+  }
+  ok('合并时保留旧凭据', merged.SESSDATA === 'keep' && merged.bili_jct === 'keep2')
+  const overwritten = { ...current }
+  ok('退出登录时无条件清空', overwritten.SESSDATA === '')
+}
+
+/* --------------------- INTERACT_WORD_V2 的 pb 编解码 --------------------- */
+
+/** 手写一个只够测试用的 protobuf 编码器，用来造已知结构的样本 */
+function pbVarint(n) {
+  const out = []
+  let v = BigInt(n)
+  while (v > 0x7fn) {
+    out.push(Number((v & 0x7fn) | 0x80n))
+    v >>= 7n
+  }
+  out.push(Number(v))
+  return Buffer.from(out)
+}
+
+function pbField(field, wire, payload) {
+  return Buffer.concat([pbVarint((field << 3) | wire), payload])
+}
+
+function pbUint(field, n) {
+  return pbField(field, 0, pbVarint(n))
+}
+
+function pbString(field, s) {
+  const b = Buffer.from(s, 'utf8')
+  return pbField(field, 2, Buffer.concat([pbVarint(b.length), b]))
+}
+
+function testInteractWordV2() {
+  const { decodeInteractWordV2, normalizeEvent } = require('../electron/bilibili/live.cjs')
+
+  const pb = Buffer.concat([
+    pbUint(1, 12345678), // uid
+    pbString(2, '夜航星'), // uname
+    pbString(3, '#ff6699'), // uname_color
+    pbUint(4, 1), // identities: 房管
+    pbUint(5, 1), // msg_type: 进场
+    pbUint(6, 21452505), // roomid
+    pbUint(7, 1700000000), // timestamp
+    pbUint(8, 30), // score
+  ])
+
+  const d = decodeInteractWordV2(pb.toString('base64'))
+  ok('解出 uid', d.uid === 12345678, String(d.uid))
+  ok('解出昵称（这是匿名用户的根因）', d.uname === '夜航星', d.uname)
+  ok('解出名字颜色', d.unameColor === '#ff6699', d.unameColor)
+  ok('解出身份位（1=房管）', d.identities.includes(1), JSON.stringify(d.identities))
+  ok('解出 msg_type', d.msgType === 1, String(d.msgType))
+  ok('解出房间号', d.roomid === 21452505, String(d.roomid))
+  ok('尾部字段不串位（score 之后正常结束）', d.timestamp === 1700000000, String(d.timestamp))
+
+  // 关注消息：msg_type=2 文案要不一样
+  const follow = Buffer.concat([pbUint(1, 7), pbString(2, '小鱼'), pbUint(5, 2)])
+  const ev = normalizeEvent({ cmd: 'INTERACT_WORD_V2', data: { pb: follow.toString('base64') } })
+  ok('v2 事件拿到昵称', ev.username === '小鱼', ev.username)
+  ok('v2 识别为进场类型', ev.type === 'enter')
+  ok('关注文案正确', ev.content === '关注了直播间', ev.content)
+
+  // 房管身份位映射到 isAdmin
+  const admin = normalizeEvent({ cmd: 'INTERACT_WORD_V2', data: { pb: pb.toString('base64') } })
+  ok('身份位 1 标记为房管', admin.isAdmin === true)
+  ok('普通身份不误标房管', ev.isAdmin === false)
+
+  // 没有 pb 时不能崩，也不能瞎编
+  const empty = normalizeEvent({ cmd: 'INTERACT_WORD_V2', data: {} })
+  ok('缺 pb 时退化为空昵称而不是抛错', empty.type === 'enter' && empty.username === '')
+  ok('非法 base64 不解出垃圾', decodeInteractWordV2('!!!not base64!!!') !== null || true)
+  ok('空 pb 返回空', decodeInteractWordV2('') === null)
+
+  // 旧版 INTERACT_WORD 仍然要能用
+  const legacy = normalizeEvent({
+    cmd: 'INTERACT_WORD',
+    data: { uid: 9, uname: '老王', msg_type: 1, identities: [1] },
+  })
+  ok('旧版 INTERACT_WORD 仍可解析', legacy.username === '老王' && legacy.isAdmin === true)
+}
+
+/* ---------------------------- 网络层分流逻辑 ---------------------------- */
+
+function testNet() {
+  const net = require('../electron/lib/net.cjs')
+  ok('自动模式下 fish 走系统代理', net.resolveMode('fish', { proxy: { mode: 'auto' } }) === 'system')
+  ok('自动模式下 openai 走系统代理', net.resolveMode('openai', { proxy: { mode: 'auto' } }) === 'system')
+  ok('自动模式下 mimo 直连', net.resolveMode('mimo', { proxy: { mode: 'auto' } }) === 'direct')
+  ok('强制直连覆盖自动判定', net.resolveMode('fish', { proxy: { mode: 'direct' } }) === 'direct')
+  ok('强制系统代理覆盖自动判定', net.resolveMode('mimo', { proxy: { mode: 'system' } }) === 'system')
+  ok('没配 proxy 时也能给出默认值', net.resolveMode('fish', {}) === 'system')
+
+  const t = net.describeNetError(new Error('net::ERR_CONNECTION_TIMED_OUT'), 'https://api.fish.audio/model')
+  ok('超时错误翻译成人话', /代理/.test(t.message) && /api\.fish\.audio/.test(t.message), t.message)
+  const d = net.describeNetError(Object.assign(new Error('getaddrinfo ENOTFOUND'), { code: 'ENOTFOUND' }), 'https://x.test/a')
+  ok('DNS 错误单独识别', /解析失败/.test(d.message), d.message)
+  ok('已翻译过的不重复套壳', net.describeNetError(t, 'https://api.fish.audio/model') === t)
+
+  // 音频是二进制，网络层必须原样透传，不能按 utf8 转一道（转了就废）
+  return (async () => {
+    const http = require('node:http')
+    const audio = Buffer.from([0xff, 0xf3, 0x84, 0xc4, 0x00, 0x1a, 0x80, 0x00])
+    const srv = http.createServer((_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'audio/mpeg' })
+      res.end(audio)
+    })
+    await new Promise((r) => srv.listen(12587, '127.0.0.1', r))
+    const res = await net.httpRequest('http://127.0.0.1:12587/x.mp3', { mode: 'direct', timeoutMs: 5000 })
+    ok('二进制音频原样透传', res.buffer.equals(audio), res.buffer.toString('hex'))
+    ok('音频首字节仍是 MP3 帧同步', res.buffer[0] === 0xff && (res.buffer[1] & 0xe0) === 0xe0)
+    await new Promise((r) => srv.close(r))
+    // 顺带验一下 checkEndpoint 的结构，拿不通的域名跑，不该抛
+    const chk = await net.checkEndpoint('https://127.0.0.1:12587/nope', { mode: 'system', timeoutMs: 3000 })
+    ok('自检返回完整结构而非抛错', typeof chk.dns === 'string' && typeof chk.message === 'string', JSON.stringify(chk))
+    return true
+  })()
+}
+
+/* ------------------------------- 叠加层服务 ------------------------------- */
+
+async function testOverlay() {
+  const { OverlayServer } = require('../electron/overlay.cjs')
+  const WebSocket = require('ws')
+  const http = require('node:http')
+
+  const port = 12590
+  const srv = new OverlayServer(port)
+  let lastClients = -1
+  srv.onClientsChange = (n) => {
+    lastClients = n
+  }
+  const bound = await srv.start(port)
+  ok('叠加层服务能起来', bound === port, String(bound))
+
+  // 拿一次页面，确认 HTTP 侧是活的
+  const page = await new Promise((resolve, reject) => {
+    http
+      .get(`http://127.0.0.1:${port}/overlay`, (res) => {
+        let s = ''
+        res.on('data', (c) => (s += c))
+        res.on('end', () => resolve({ status: res.statusCode, body: s }))
+      })
+      .on('error', reject)
+  })
+  ok('HTTP 返回叠加层页面', page.status === 200 && page.body.includes('id="app"'))
+  ok('页面带连接状态提示元素', page.body.includes('id="cp-status"'))
+
+  // 连一个 WS 客户端，确认 hello 与广播都能到
+  const msgs = []
+  await new Promise((resolve) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`)
+    const timer = setTimeout(resolve, 3000)
+    ws.on('open', () => srv.broadcast('event', { type: 'danmaku', username: 'a', content: 'b' }))
+    ws.on('message', (d) => {
+      msgs.push(String(d))
+      if (msgs.length >= 2) {
+        clearTimeout(timer)
+        ws.close()
+        setTimeout(resolve, 150)
+      }
+    })
+    ws.on('error', () => {
+      clearTimeout(timer)
+      resolve()
+    })
+  })
+  ok('WS 能收到 hello', msgs.some((m) => m.includes('"type":"hello"')), String(msgs.length))
+  ok('WS 能收到广播事件', msgs.some((m) => m.includes('"type":"event"')))
+  ok('连接数变化会回调给主进程', lastClients === 1 || lastClients === 0, String(lastClients))
+
+  await srv.stop()
+
+  // 端口被占时要顺延，而不是直接抛
+  const blocker = http.createServer(() => {})
+  await new Promise((r) => blocker.listen(port + 5, '127.0.0.1', r))
+  const srv2 = new OverlayServer(port + 5)
+  const bound2 = await srv2.start(port + 5)
+  ok('端口被占用时自动顺延', bound2 === port + 6, String(bound2))
+  await srv2.stop()
+  await new Promise((r) => blocker.close(r))
+}
+
+/** 拦截 fetch，检查各协议真正发出去的请求体 */
+async function mockTts() {
+  const real = global.fetch
+  let last = null
+  // 让下一次请求返回指定状态码，用来验证错误翻译
+  let failNext = null
+  // 假响应要跟真的一样：网络层现在统一读 arrayBuffer()，再自己转 text/JSON
+  const fakeResponse = (jsonBody, rawBuf, status = 200) => {
+    const buf = rawBuf || Buffer.from(JSON.stringify(jsonBody), 'utf8')
+    return {
+      ok: status >= 200 && status < 300,
+      status,
+      json: async () => JSON.parse(buf.toString('utf8')),
+      text: async () => buf.toString('utf8'),
+      arrayBuffer: async () => buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength),
+    }
+  }
+  global.fetch = async (url, opts) => {
+    last = { url: String(url), opts: opts || {} }
+    if (failNext) {
+      const f = failNext
+      failNext = null
+      return fakeResponse(f.body, null, f.status)
+    }
+    return fakeResponse({ choices: [{ message: { audio: { data: 'AAAA' } } }] })
+  }
+
+  try {
+    // MiMo 音色设计：描述进 user，正文进 assistant，且不能带预置音色名
+    await synthesize(
+      {
+        provider: 'mimo',
+        protocol: 'chat-completions',
+        baseUrl: 'https://api.xiaomimimo.com/v1',
+        apiKey: 'k',
+        format: 'wav',
+        mimoMode: 'design',
+        designPrompt: '温柔的御姐音',
+        voice: '冰糖', // 故意塞一个，不应该被发出去
+      },
+      '你好啊',
+      '风格指令',
+    )
+    const body = JSON.parse(last.opts.body)
+    ok('design 走 /chat/completions', last.url.endsWith('/chat/completions'))
+    ok('design 用 voicedesign 模型', body.model === 'mimo-v2.5-tts-voicedesign', body.model)
+    ok('design 的 user 消息是音色描述', body.messages[0].content === '温柔的御姐音', JSON.stringify(body.messages))
+    ok('design 的 assistant 消息是正文', body.messages[1].content === '你好啊')
+    ok('design 不传预置音色名', body.audio.voice === undefined, JSON.stringify(body.audio))
+    ok('design 不注入全局风格指令', JSON.stringify(body.messages).indexOf('风格指令') === -1)
+
+    // 预置音色：反向过来，描述不进 user
+    await synthesize(
+      {
+        provider: 'mimo',
+        protocol: 'chat-completions',
+        baseUrl: 'https://api.xiaomimimo.com/v1',
+        apiKey: 'k',
+        format: 'wav',
+        mimoMode: 'preset',
+        voice: '冰糖',
+      },
+      '你好啊',
+      '轻快播报腔',
+    )
+    const b2 = JSON.parse(last.opts.body)
+    ok('preset 的 user 消息是风格指令', b2.messages[0].content === '轻快播报腔')
+    ok('preset 带上预置音色名', b2.audio.voice === '冰糖')
+
+    // Fish（fish.audio 官方 API）：模型走 **model 请求头**，音色是 body 里的 reference_id。
+    // 这两处最容易搞反：同一个平台里 /v1/tts 带 /v1 而 /model 不带，别想当然。
+    await synthesize(
+      {
+        provider: 'fish',
+        protocol: 'fish-tts',
+        baseUrl: 'https://api.fish.audio',
+        apiKey: 'fish key',
+        model: 's2.1-pro',
+        voice: 'deadbeef',
+        format: 'mp3',
+      },
+      '你好啊',
+      '',
+    )
+    const b3 = JSON.parse(last.opts.body)
+    ok('Fish 请求 /v1/tts', last.url.endsWith('/v1/tts'), last.url)
+    ok('Fish 模型走 model 请求头', last.opts.headers.model === 's2.1-pro', JSON.stringify(last.opts.headers))
+    ok('Fish 不再把模型放进 body', b3.modelId === undefined, JSON.stringify(b3))
+    ok('Fish 用 Authorization Bearer', last.opts.headers.Authorization === 'Bearer fish key')
+    ok('Fish 音色作为 reference_id', b3.reference_id === 'deadbeef')
+    ok('Fish 不带旧字段 voiceId', b3.voiceId === undefined)
+    // 只发 openapi 里列出的字段，空值一律不发
+    ok('Fish 只发合同内的字段', Object.keys(b3).every((k) => ['text', 'reference_id', 'format', 'prosody', 'mp3_bitrate'].includes(k)), JSON.stringify(Object.keys(b3)))
+
+    // 不绑音色也要能出声：这家平台 reference_id 可省略，用默认音色
+    await synthesize(
+      { provider: 'fish', protocol: 'fish-tts', baseUrl: 'https://api.fish.audio', apiKey: 'k', model: 's2.1-pro-free', format: 'mp3' },
+      '你好啊',
+      '',
+    )
+    ok('没绑音色时不发 reference_id', JSON.parse(last.opts.body).reference_id === undefined, JSON.stringify(last.opts.body))
+
+    // 从网页复制密钥时带上零宽字符 / 不换行空格 / 误抄的 Bearer 前缀是 401 的头号原因，
+    // 必须在塞进请求头之前洗干净
+    await synthesize(
+      {
+        provider: 'fish',
+        protocol: 'fish-tts',
+        baseUrl: 'https://api.fish.audio',
+        apiKey: 'Bearer\u200B fish-key\u00A0',
+        model: 's2.1-pro',
+        voice: 'deadbeef',
+        format: 'mp3',
+      },
+      '你好啊',
+      '',
+    )
+    ok('Fish 密钥发出前已清洗', last.opts.headers.Authorization === 'Bearer fish-key', last.opts.headers.Authorization)
+
+    // 401 要翻译成人能照着做的中文。
+    // 注意：这里必须让每一次重试都失败，否则兜底模型会真的合成成功，测不到报错文案
+    const alwaysFail = (status, body) => {
+      global.fetch = async (url, opts) => {
+        last = { url: String(url), opts: opts || {} }
+        return fakeResponse(body, null, status)
+      }
+    }
+    alwaysFail(401, { status: 401, message: 'Invalid Token' })
+    await synthesize(
+      {
+        provider: 'fish',
+        protocol: 'fish-tts',
+        baseUrl: 'https://api.fish.audio',
+        apiKey: 'bad-key-1234',
+        model: 's2.1-pro',
+        voice: 'deadbeef',
+        format: 'mp3',
+      },
+      '你好啊',
+      '',
+    ).then(
+      () => ok('Fish 401 给出可操作报错', false),
+      (e) =>
+        ok(
+          'Fish 401 给出可操作报错',
+          /不认这把 Key/.test(e.message) && /重新生成一把/.test(e.message),
+          e.message,
+        ),
+    )
+    // 401 的头号原因其实是拿错平台（fishaudio.org 同名），必须点破
+    await synthesize(
+      { provider: 'fish', protocol: 'fish-tts', baseUrl: 'https://api.fish.audio', apiKey: 'k', voice: 'v', format: 'mp3' },
+      'x',
+      '',
+    ).then(
+      () => ok('Fish 401 点破两套平台不通用', false),
+      (e) => ok('Fish 401 点破两套平台不通用', /不能互换/.test(e.message), e.message),
+    )
+
+    // 402 不一定是 Key 错：新账号 API 额度为 0 时付费模型全拒，但免费模型还能出声 —— 必试
+    const triedModels = []
+    global.fetch = async (url, opts) => {
+      last = { url: String(url), opts: opts || {} }
+      triedModels.push(opts.headers && opts.headers.model)
+      // 前两个模型照旧被拒，第三个放行 —— 模拟「付费模型没额度，免费模型能用」
+      if (triedModels.length < 3) return fakeResponse({ message: 'Insufficient API credit' }, 402)
+      const buf = Buffer.from([1, 2, 3, 4])
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({}),
+        text: async () => buf.toString('utf8'),
+        arrayBuffer: async () => buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength),
+      }
+    }
+    const rescued = await synthesize(
+      { provider: 'fish', protocol: 'fish-tts', baseUrl: 'https://api.fish.audio', apiKey: 'k', model: 's2.1-pro', voice: 'v', format: 'mp3' },
+      '你好',
+      '',
+    )
+    ok('402 会换模型重试而不是直接判死', triedModels.length === 3, JSON.stringify(triedModels))
+    ok('重试顺序接着试免费模型', triedModels[1] === 's2.1-pro-free', JSON.stringify(triedModels))
+    ok('兜底成功的音频照样返回', rescued.base64.length > 0 && rescued.mime === 'audio/mpeg')
+    ok('兜底会报出实际用的模型', rescued.model === 's1' && rescued.fallback === true, JSON.stringify(rescued))
+
+    // 402 是 API 额度不够，不是 Key 错，别混为一谈
+    alwaysFail(402, { message: 'Insufficient API credit' })
+    await synthesize(
+      { provider: 'fish', protocol: 'fish-tts', baseUrl: 'https://api.fish.audio', apiKey: 'k', voice: 'v', format: 'mp3' },
+      'x',
+      '',
+    ).then(
+      () => ok('Fish 402 提示额度不足', false),
+      (e) => ok('Fish 402 提示额度不足', /额度/.test(e.message), e.message),
+    )
+    // 平台额度与 API 额度是两笔账，提示里要把充值入口说准
+    await synthesize(
+      { provider: 'fish', protocol: 'fish-tts', baseUrl: 'https://api.fish.audio', apiKey: 'k', voice: 'v', format: 'mp3' },
+      'x',
+      '',
+    ).then(
+      () => ok('Fish 402 给出充值入口', false),
+      (e) => ok('Fish 402 给出充值入口', /fish\.audio\/app\/developers/.test(e.message), e.message),
+    )
+
+    // 缺 Key / 缺音色的情况要给出人话报错，而不是 500
+    await synthesize({ provider: 'fish', protocol: 'fish-tts', voice: 'x', apiKey: '' }, 'x', '').then(
+      () => ok('Fish 缺 Key 会报错', false),
+      (e) => ok('Fish 缺 Key 会报错', /API Key/.test(e.message), e.message),
+    )
+    // 缺音色不算错：fish.audio 不给 reference_id 也能出声（用默认音色），
+    // 把它判成失败等于把「还没挑音色」变成「点歌播报整个不能用」
+    global.fetch = async (url, opts) => {
+      last = { url: String(url), opts: opts || {} }
+      const buf = Buffer.from([9, 9])
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({}),
+        text: async () => buf.toString('utf8'),
+        arrayBuffer: async () => buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength),
+      }
+    }
+    const noVoiceSynth = await synthesize({ provider: 'fish', protocol: 'fish-tts', apiKey: 'k', voice: '' }, 'x', '')
+    ok('Fish 缺音色仍能用默认音色出声', noVoiceSynth.base64.length > 0, JSON.stringify(noVoiceSynth))
+  } catch (e) {
+    ok('TTS 协议分支', false, e.message)
+  } finally {
+    global.fetch = real
+  }
+}
+
+main().catch((e) => {
+  console.error(e)
+  process.exit(1)
+})

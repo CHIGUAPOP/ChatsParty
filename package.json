@@ -1,0 +1,60 @@
+{
+  "name": "chatsparty",
+  "productName": "ChatsParty",
+  "version": "0.1.0",
+  "description": "B站直播弹幕姬 · MiMo TTS 语音播报 · MD3 动态配色 · OBS 叠加层",
+  "main": "electron/main.cjs",
+  "author": "chatsparty",
+  "license": "MIT",
+  "scripts": {
+    "dev": "node scripts/launch.cjs --dev",
+    "launch": "node scripts/launch.cjs",
+    "build:renderer": "node scripts/launch.cjs --build",
+    "build": "vite build && electron-builder",
+    "typecheck": "tsc --noEmit",
+    "test": "node scripts/smoke.cjs",
+    "e2e:danmaku": "electron scripts/e2e-danmaku.cjs",
+    "start": "electron ."
+  },
+  "dependencies": {
+    "@material/material-color-utilities": "^0.3.0",
+    "qrcode": "^1.5.4",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.31",
+    "@types/react-dom": "^18.3.7",
+    "@vitejs/plugin-react": "^4.3.4",
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8",
+    "typescript": "^5.9.3",
+    "vite": "^6.0.3"
+  },
+  "build": {
+    "appId": "com.chatsparty.app",
+    "productName": "ChatsParty",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "electron/**",
+      "dist-renderer/**",
+      "overlay/**",
+      "package.json"
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "build/icon.ico",
+      "artifactName": "ChatsParty-${version}-Setup.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico",
+      "installerHeaderIcon": "build/icon.ico"
+    }
+  }
+}

@@ -1,0 +1,605 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ChatsParty Overlay</title>
+    <style>
+      :root {
+        --cp-accent: #d0bcff;
+        --cp-font: system-ui, 'Microsoft YaHei', 'PingFang SC', sans-serif;
+      }
+
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        background: transparent;
+        font-family: var(--cp-font);
+        overflow: hidden;
+      }
+
+      #app {
+        position: fixed;
+        right: 0;
+        bottom: 0;
+        width: 100%;
+        height: 100%;
+        display: flex;
+        flex-direction: column;
+        justify-content: flex-end;
+        align-items: flex-end;
+        padding: 24px;
+        box-sizing: border-box;
+        gap: 8px;
+      }
+
+      .cp-item {
+        display: flex;
+        align-items: flex-start;
+        gap: 10px;
+        max-width: 460px;
+        padding: 10px 14px;
+        border-radius: 14px;
+        background: rgba(18, 18, 22, 0.62);
+        backdrop-filter: blur(6px);
+        -webkit-backdrop-filter: blur(6px);
+        color: #f4f2f6;
+        box-shadow: 0 2px 10px rgba(0, 0, 0, 0.28);
+        animation: cp-in 260ms cubic-bezier(0.2, 0, 0, 1);
+      }
+
+      @keyframes cp-in {
+        from {
+          opacity: 0;
+          transform: translateX(24px);
+        }
+        to {
+          opacity: 1;
+          transform: translateX(0);
+        }
+      }
+
+      .cp-item.is-gift {
+        background: rgba(96, 62, 24, 0.66);
+      }
+      .cp-item.is-superchat {
+        background: rgba(58, 40, 96, 0.72);
+        border-left: 3px solid var(--cp-accent);
+      }
+      .cp-item.is-guard {
+        background: rgba(114, 30, 30, 0.66);
+      }
+
+      .cp-face {
+        width: 34px;
+        height: 34px;
+        flex: 0 0 34px;
+        border-radius: 50%;
+        object-fit: cover;
+        background: rgba(255, 255, 255, 0.12);
+      }
+
+      .cp-face--none {
+        display: grid;
+        place-items: center;
+        font-size: 13px;
+        color: rgba(255, 255, 255, 0.7);
+      }
+
+      .cp-body {
+        min-width: 0;
+        flex: 1;
+      }
+
+      .cp-head {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        margin-bottom: 2px;
+        flex-wrap: wrap;
+      }
+
+      .cp-name {
+        font-size: 13px;
+        font-weight: 600;
+        color: var(--cp-accent);
+        text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
+      }
+
+      .cp-medal {
+        font-size: 11px;
+        padding: 1px 6px;
+        border-radius: 6px;
+        background: rgba(255, 255, 255, 0.14);
+        color: #fff;
+      }
+
+      .cp-price {
+        font-size: 11px;
+        padding: 1px 6px;
+        border-radius: 6px;
+        background: rgba(255, 255, 255, 0.2);
+        color: #fff;
+      }
+
+      .cp-text {
+        font-size: 16px;
+        line-height: 1.5;
+        word-break: break-word;
+        text-shadow: 0 1px 3px rgba(0, 0, 0, 0.6);
+      }
+
+      .cp-text img {
+        height: 24px;
+        vertical-align: middle;
+      }
+
+      /* ---------- 点歌面板 ----------
+         这套 class 名与 src/components/MusicWidget.tsx、src/styles.css 里的是同一份，
+         弹幕页的预览照着它渲染。改样式两边一起改，否则预览和 OBS 会对不上。 */
+      .cp-music {
+        position: fixed;
+        display: none;
+        flex-direction: column;
+        gap: 8px;
+        width: 300px;
+        max-width: 42vw;
+        font-family: var(--cp-font);
+        pointer-events: none;
+      }
+
+      .cp-music.is-show {
+        display: flex;
+      }
+
+      .cp-music[data-pos='tl'] {
+        left: 24px;
+        top: 24px;
+      }
+      .cp-music[data-pos='tr'] {
+        right: 24px;
+        top: 24px;
+      }
+      .cp-music[data-pos='bl'] {
+        left: 24px;
+        bottom: 24px;
+      }
+      .cp-music[data-pos='br'] {
+        right: 24px;
+        bottom: 24px;
+      }
+
+      .cp-mcard,
+      .cp-mqueue {
+        padding: 10px 14px;
+        border-radius: 14px;
+        background: rgba(18, 18, 22, 0.62);
+        backdrop-filter: blur(6px);
+        -webkit-backdrop-filter: blur(6px);
+        color: #f4f2f6;
+        box-shadow: 0 2px 10px rgba(0, 0, 0, 0.28);
+        animation: cp-in 260ms cubic-bezier(0.2, 0, 0, 1);
+      }
+
+      .cp-mcard {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+
+      .cp-mcover {
+        width: 48px;
+        height: 48px;
+        flex: 0 0 48px;
+        border-radius: 10px;
+        overflow: hidden;
+        background: rgba(255, 255, 255, 0.12);
+        display: grid;
+        place-items: center;
+      }
+
+      .cp-mcover img {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        display: block;
+      }
+
+      .cp-mcover__none {
+        font-size: 20px;
+        color: rgba(255, 255, 255, 0.55);
+      }
+
+      .cp-mbody {
+        min-width: 0;
+        flex: 1;
+      }
+
+      .cp-mlabel {
+        font-size: 11px;
+        opacity: 0.62;
+        letter-spacing: 0.5px;
+        margin-bottom: 1px;
+      }
+
+      .cp-mtitle {
+        font-size: 15px;
+        font-weight: 600;
+        line-height: 1.35;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        text-shadow: 0 1px 3px rgba(0, 0, 0, 0.6);
+      }
+
+      .cp-msub {
+        font-size: 12px;
+        opacity: 0.78;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
+      }
+
+      .cp-mqueue__head {
+        margin-bottom: 4px;
+      }
+
+      .cp-mrow {
+        display: flex;
+        align-items: baseline;
+        gap: 6px;
+        font-size: 13px;
+        line-height: 1.6;
+        min-width: 0;
+      }
+
+      .cp-mrow__no {
+        flex: 0 0 14px;
+        font-size: 11px;
+        opacity: 0.55;
+        text-align: right;
+      }
+
+      .cp-mrow__name {
+        flex: 1;
+        min-width: 0;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
+      }
+
+      .cp-mrow__who {
+        flex: 0 0 auto;
+        max-width: 34%;
+        font-size: 11px;
+        opacity: 0.62;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      #cp-custom-style {
+        display: none;
+      }
+
+      /* 连接状态提示：断线时常驻，连上后 3 秒自动淡出，不干扰画面 */
+      #cp-status {
+        position: fixed;
+        left: 24px;
+        bottom: 24px;
+        padding: 6px 12px;
+        border-radius: 999px;
+        font-size: 13px;
+        font-family: var(--cp-font);
+        background: rgba(18, 18, 22, 0.78);
+        color: #f4f2f6;
+        opacity: 0;
+        transition: opacity 300ms ease;
+        pointer-events: none;
+      }
+
+      #cp-status.is-show {
+        opacity: 1;
+      }
+
+      #cp-status.is-bad {
+        background: rgba(150, 26, 26, 0.85);
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <div id="cp-music" class="cp-music" data-pos="tl"></div>
+    <div id="cp-status"></div>
+    <style id="cp-custom-style"></style>
+
+    <script>
+      const app = document.getElementById('app')
+      const customStyle = document.getElementById('cp-custom-style')
+      let cfg = {
+        maxItems: 40,
+        showFace: true,
+        showMedal: true,
+        showGift: true,
+        showSuperchat: true,
+        showMusic: true,
+        musicPos: 'tl',
+        musicQueueCount: 3,
+        customCss: '',
+        fontFamily: 'system-ui, "Microsoft YaHei", sans-serif',
+        accent: '#D0BCFF',
+      }
+
+      function applyConfig(c) {
+        cfg = Object.assign(cfg, c || {})
+        const root = document.documentElement
+        root.style.setProperty('--cp-accent', cfg.accent)
+        root.style.setProperty('--cp-font', cfg.fontFamily)
+        customStyle.textContent = cfg.customCss || ''
+        renderMusic()
+      }
+
+      /* ---------------------------- 点歌面板 ---------------------------- */
+
+      const musicEl = document.getElementById('cp-music')
+      let musicState = { current: null, items: [], queued: 0 }
+
+      function el(tag, cls, text) {
+        const n = document.createElement(tag)
+        if (cls) n.className = cls
+        if (text !== undefined && text !== null) n.textContent = text
+        return n
+      }
+
+      function queueCount() {
+        const v = Number(cfg.musicQueueCount)
+        if (!isFinite(v) || v < 0) return 3
+        return Math.min(Math.floor(v), 10)
+      }
+
+      function renderMusic() {
+        const cur = musicState.current
+        const items = (musicState.items || []).slice(0, queueCount())
+        musicEl.setAttribute('data-pos', cfg.musicPos || 'tl')
+        // 一首歌都没有就整块藏起来，别在画面上留一个空框
+        const show = cfg.showMusic !== false && (cur || items.length > 0)
+        musicEl.classList.toggle('is-show', Boolean(show))
+        if (!show) {
+          musicEl.textContent = ''
+          return
+        }
+
+        musicEl.textContent = ''
+        if (cur) {
+          const card = el('div', 'cp-mcard')
+          const cover = el('div', 'cp-mcover')
+          if (cur.picUrl) {
+            const img = el('img')
+            img.src = cur.picUrl
+            img.alt = ''
+            cover.appendChild(img)
+          } else {
+            cover.appendChild(el('span', 'cp-mcover__none', '♪'))
+          }
+          card.appendChild(cover)
+          const body = el('div', 'cp-mbody')
+          body.appendChild(el('div', 'cp-mlabel', '正在播放'))
+          body.appendChild(el('div', 'cp-mtitle', cur.name || '未命名'))
+          const sub = [cur.artists, cur.requester ? cur.requester + ' 点的' : ''].filter(Boolean).join(' · ')
+          body.appendChild(el('div', 'cp-msub', sub || '—'))
+          card.appendChild(body)
+          musicEl.appendChild(card)
+        }
+        if (items.length) {
+          const box = el('div', 'cp-mqueue')
+          box.appendChild(el('div', 'cp-mlabel cp-mqueue__head', '待播 ' + (musicState.queued || items.length) + ' 首'))
+          items.forEach((it, i) => {
+            const row = el('div', 'cp-mrow')
+            row.appendChild(el('span', 'cp-mrow__no', String(i + 1)))
+            row.appendChild(el('span', 'cp-mrow__name', it.name || '未命名'))
+            row.appendChild(el('span', 'cp-mrow__who', it.requester || ''))
+            box.appendChild(row)
+          })
+          musicEl.appendChild(box)
+        }
+      }
+
+      /**
+       * 头像要从主进程带 Referer 抓回来才能显示 —— B站图床对非 bilibili 来源返回 403。
+       * 原 URL -> data URL 记在这张表里，事件到达时可能还没解析完，所以 DOM 要留着批量回填。
+       */
+      const faceCache = {}
+
+      function faceSrc(raw) {
+        if (!raw) return ''
+        if (raw.indexOf('data:') === 0) return raw
+        return faceCache[raw] || ''
+      }
+
+      function applyFacePatch(src, data) {
+        if (!src || !data) return
+        faceCache[src] = data
+        const nodes = app.querySelectorAll('img[data-face="' + cssEscape(src) + '"]')
+        for (let i = 0; i < nodes.length; i++) {
+          nodes[i].src = data
+          nodes[i].classList.remove('cp-face--none')
+        }
+      }
+
+      function cssEscape(s) {
+        return String(s).replace(/["\\]/g, '\\$&')
+      }
+
+      function trim() {
+        while (app.children.length > cfg.maxItems) app.removeChild(app.firstChild)
+      }
+
+      function renderEmots(text, emots) {
+        if (!emots) return null
+        const frag = document.createDocumentFragment()
+        const re = /\[([^\]]{1,12})\]/g
+        let last = 0
+        let m
+        let hit = false
+        while ((m = re.exec(text))) {
+          if (m.index > last) frag.appendChild(document.createTextNode(text.slice(last, m.index)))
+          const e = emots[m[1]]
+          if (e && e.url) {
+            hit = true
+            const img = document.createElement('img')
+            img.src = e.url
+            img.alt = m[1]
+            frag.appendChild(img)
+          } else {
+            frag.appendChild(document.createTextNode(m[0]))
+          }
+          last = m.index + m[0].length
+        }
+        if (!hit) return null
+        if (last < text.length) frag.appendChild(document.createTextNode(text.slice(last)))
+        return frag
+      }
+
+      function addItem(ev) {
+        if (ev.type === 'gift' && !cfg.showGift) return
+        if (ev.type === 'superchat' && !cfg.showSuperchat) return
+        if (ev.type === 'enter' || ev.type === 'live' || ev.type === 'offline') return
+
+        const el = document.createElement('div')
+        el.className = 'cp-item'
+        if (ev.type === 'gift') el.classList.add('is-gift')
+        if (ev.type === 'guard') el.classList.add('is-guard')
+        if (ev.type === 'superchat') el.classList.add('is-superchat')
+
+        if (cfg.showFace) {
+          if (ev.face) {
+            const img = document.createElement('img')
+            img.className = 'cp-face'
+            // 先记原 URL 便于回填；解析没到位的先用占位，避免 403 打穿 <img>
+            img.setAttribute('data-face', ev.face)
+            const ready = faceSrc(ev.face)
+            if (ready) img.src = ready
+            else img.classList.add('cp-face--none')
+            img.onerror = () => img.classList.add('cp-face--none')
+            el.appendChild(img)
+          } else {
+            const ph = document.createElement('div')
+            ph.className = 'cp-face cp-face--none'
+            ph.textContent = (ev.username || '?').slice(0, 1)
+            el.appendChild(ph)
+          }
+        }
+
+        const body = document.createElement('div')
+        body.className = 'cp-body'
+
+        const head = document.createElement('div')
+        head.className = 'cp-head'
+        const name = document.createElement('span')
+        name.className = 'cp-name'
+        name.textContent = ev.username || '观众'
+        head.appendChild(name)
+
+        if (cfg.showMedal && ev.medal && ev.medal.name) {
+          const medal = document.createElement('span')
+          medal.className = 'cp-medal'
+          medal.textContent = ev.medal.name + ' · ' + ev.medal.level
+          head.appendChild(medal)
+        }
+        if (ev.price) {
+          const price = document.createElement('span')
+          price.className = 'cp-price'
+          price.textContent = '¥' + ev.price
+          head.appendChild(price)
+        }
+        body.appendChild(head)
+
+        const text = document.createElement('div')
+        text.className = 'cp-text'
+        if (ev.emojiUrl) {
+          const img = document.createElement('img')
+          img.src = ev.emojiUrl
+          img.style.height = '40px'
+          text.appendChild(img)
+        } else {
+          const frag = renderEmots(ev.content || '', ev.emots)
+          if (frag) text.appendChild(frag)
+          else text.textContent = ev.content || ''
+        }
+        body.appendChild(text)
+        el.appendChild(body)
+        app.appendChild(el)
+        trim()
+      }
+
+      let ws
+      let retry = 0
+      let statusTimer = null
+
+      const statusEl = document.getElementById('cp-status')
+      function setStatus(text, bad, autoHideMs) {
+        if (statusTimer) {
+          clearTimeout(statusTimer)
+          statusTimer = null
+        }
+        if (!text) {
+          statusEl.classList.remove('is-show')
+          return
+        }
+        statusEl.textContent = text
+        statusEl.classList.toggle('is-bad', Boolean(bad))
+        statusEl.classList.add('is-show')
+        if (autoHideMs) statusTimer = setTimeout(() => statusEl.classList.remove('is-show'), autoHideMs)
+      }
+
+      function connect() {
+        setStatus(retry === 0 ? '叠加层连接中…' : `叠加层重连中（第 ${retry} 次）…`, true)
+        ws = new WebSocket(`ws://${location.host}/ws`)
+        ws.onopen = () => {
+          retry = 0
+          setStatus('叠加层已连接', false, 3000)
+        }
+        ws.onmessage = (e) => {
+          try {
+            const msg = JSON.parse(e.data)
+            if (msg.type === 'hello') applyConfig(msg.payload && msg.payload.overlay)
+            else if (msg.type === 'config') applyConfig(msg.payload)
+            else if (msg.type === 'event') addItem(msg.payload)
+            else if (msg.type === 'music') {
+              musicState = msg.payload || { current: null, items: [], queued: 0 }
+              renderMusic()
+            } else if (msg.type === 'face') applyFacePatch(msg.payload.src, msg.payload.data)
+            else if (msg.type === 'faces') {
+              // 迟到的客户端补发：先把映射灌进表，再回填已经渲染出来的那些
+              const list = msg.payload || []
+              for (let i = 0; i < list.length; i++) faceCache[list[i].src] = list[i].data
+              const imgs = app.querySelectorAll('img[data-face]')
+              for (let i = 0; i < imgs.length; i++) {
+                const ready = faceSrc(imgs[i].getAttribute('data-face'))
+                if (ready) {
+                  imgs[i].src = ready
+                  imgs[i].classList.remove('cp-face--none')
+                }
+              }
+            }
+          } catch (err) {
+            /* 忽略脏数据 */
+          }
+        }
+        ws.onclose = () => {
+          retry++
+          setStatus('叠加层已断开，正在重连…', true)
+          setTimeout(connect, Math.min(1000 * retry, 8000))
+        }
+        ws.onerror = () => {
+          /* onclose 会跟着触发，状态提示统一在那里更新 */
+        }
+      }
+      connect()
+    </script>
+  </body>
+</html>

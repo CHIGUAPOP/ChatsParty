@@ -1,0 +1,44 @@
+# ---------- 依赖 ----------
+node_modules/
+
+# ---------- 构建产物（可重新生成） ----------
+dist-renderer/
+dist/
+release/
+out/
+# 注意：不要忽略 build/ —— 它是 electron-builder 的资源目录，放着打包图标
+# build/icon.ico、build/icon.png，是不可或缺的源文件，删了打包就没有图标了。
+
+# ---------- 运行时配置 / 用户数据 ----------
+# 应用配置（含 safeStorage 加密后的 Key / Cookie）永远不进仓库
+*.enc
+chatsparty.enc
+userData/
+
+# ---------- 环境变量 / 本地覆盖 ----------
+.env
+.env.*
+!.env.example
+*.local
+
+# ---------- 本地调试目录 ----------
+tmp-*/
+
+# ---------- 日志 ----------
+*.log
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+logs/
+
+# ---------- 编辑器 / 系统 ----------
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---------- WorkBuddy 项目记忆（个人工作记录，不入库） ----------
+.workbuddy/
