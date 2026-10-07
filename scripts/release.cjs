@@ -67,10 +67,18 @@ function run(cmd, args, opts = {}) {
   })
 }
 
-/** 跑一个命令并继承终端（打包时能看见进度） */
+/**
+ * 跑一个命令并继承终端（打包时能看见进度）。
+ *
+ * 注意 **默认不走 shell**：走 shell 的话，参数里的路径会被 shell 再解释一遍 ——
+ * 路径里有空格（`C:\Coding programs\...`）就会被切成两半，gh 报
+ * 「no matches found」，看着像文件不存在，其实是没传对。只有 npm 需要 shell
+ * （Windows 上它是 .cmd），所以那一处单独开。
+ */
 function runLive(cmd, args, opts = {}) {
+  const { shell = false, ...rest } = opts
   return new Promise((resolve, reject) => {
-    const c = spawn(cmd, args, { stdio: 'inherit', shell: process.platform === 'win32', ...opts })
+    const c = spawn(cmd, args, { stdio: 'inherit', shell, ...rest })
     c.on('error', reject)
     c.on('exit', (code) => (code === 0 ? resolve() : reject(new Error(`${cmd} 退出码 ${code}`))))
   })
@@ -141,15 +149,18 @@ async function tokenOf(gh) {
 async function build() {
   if (SKIP_BUILD) return log('· 跳过打包（--skip-build）')
   log('· 构建渲染层 + 打包免安装版…')
-  await runLive('npm', ['run', 'build'], { cwd: ROOT })
+  // npm 在 Windows 上是 npm.cmd，不套一层 shell 起不来
+  await runLive('npm', ['run', 'build'], { cwd: ROOT, shell: true })
 }
 
 /** 找到要上传的那个 exe。产物名由 package.json 的 build.portable.artifactName 决定 */
 function findArtifact() {
-  // --file 用来传「包已经打好在别处」的情况：比如构建工作副本、发布交付仓库
+  // --file 用来传「包已经打好在别处」的情况：比如构建在工作副本、发布在交付仓库。
+  // 先按当前目录认，认不到再按项目根 —— 两种直觉都能用
   const given = val('--file')
   if (given) {
-    const full = path.resolve(ROOT, given)
+    const fromCwd = path.resolve(given)
+    const full = fs.existsSync(fromCwd) ? fromCwd : path.resolve(ROOT, given)
     if (!fs.existsSync(full)) die(`--file 指定的文件不存在：${given}`)
     return { name: path.basename(full), path: full, mb: (fs.statSync(full).size / 1048576).toFixed(1) }
   }
