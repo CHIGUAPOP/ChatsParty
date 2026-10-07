@@ -30,6 +30,10 @@ app.commandLine.appendSwitch('use-gl', 'swiftshader')
 app.disableHardwareAcceleration()
 process.env.CP_PROD = '1'
 process.env.CP_E2E = '1'
+// 叠加层端口也要错开：12450 上可能正跑着用户在直播用的那一份真实实例，
+// 测试实例去占了它，之后真实实例会被挤到 12451，而 OBS 里写的还是 12450。
+// 认这个变量的是 main.cjs 的 overlayPort()。
+process.env.CP_OVERLAY_PORT = String(20000 + Math.floor(Math.random() * 20000))
 
 const SONG_A = 9001
 const SONG_B = 9002

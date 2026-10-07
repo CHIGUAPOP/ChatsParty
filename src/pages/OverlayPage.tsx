@@ -4,6 +4,7 @@ import { Button, Card, Row, SectionTitle, Slider, Switch, TextField, TextArea, S
 import MusicWidget, { MUSIC_POS } from '../components/MusicWidget'
 import DanmakuPreview, { DANMAKU_POS } from '../components/DanmakuPreview'
 import LyricPreview, { LYRIC_POS, LYRIC_LINE_OPTIONS } from '../components/LyricPreview'
+import VoicePickPreview, { PICK_POS, PICK_HIT_OPTIONS } from '../components/VoicePickPreview'
 
 interface Props {
   config: AppConfig
@@ -19,6 +20,20 @@ interface OverlayStatus {
   error?: string
 }
 
+/**
+ * 能单独打开的几块，一块一个 OBS「浏览器」源。
+ *
+ * id 必须与 electron/overlay.cjs 的 OVERLAY_PANELS、以及 overlay/index.html 里认的
+ * 那几个名字一致 —— 对不上的话界面给出来的地址会是一个纯透明页，还不报错。
+ * （smoke 里有断言盯着这三处。）
+ */
+const PANEL_SOURCES = [
+  { id: 'danmaku', name: '弹幕', hint: '头像 + 昵称 + 内容' },
+  { id: 'lyric', name: '歌词', hint: '当前唱到的那句高亮' },
+  { id: 'music', name: '点歌', hint: '正在播放 + 队列' },
+  { id: 'voicepick', name: '音色面板', hint: '观众搜音色时弹的候选' },
+]
+
 export default function OverlayPage({ config, patch, notify }: Props) {
   const o = config.overlay
   const [status, setStatus] = React.useState<OverlayStatus>({
@@ -29,7 +44,8 @@ export default function OverlayPage({ config, patch, notify }: Props) {
   })
   const [checking, setChecking] = React.useState(false)
   const [check, setCheck] = React.useState<{ ok: boolean; message: string } | null>(null)
-  const [copied, setCopied] = React.useState(false)
+  /** 刚复制的是哪一个（'all' 或面板 id）。空串 = 谁都没复制 */
+  const [copied, setCopied] = React.useState('')
   // 端口改一次就要重启一次服务，所以这里先本地打字，回车/失焦才提交
   const [portDraft, setPortDraft] = React.useState(String(o.port))
   // 预览要拿真实的点歌队列，没歌时也能看到「空态」长什么样
@@ -97,18 +113,23 @@ export default function OverlayPage({ config, patch, notify }: Props) {
     else notify('还没有客户端连上，先在 OBS 里加上浏览器源', true)
   }
 
-  const copyUrl = async () => {
-    const url = status.url || `http://127.0.0.1:${o.port}/overlay`
+  const origin = status.url
+    ? status.url.replace(/\/overlay.*$/, '')
+    : `http://127.0.0.1:${o.port}`
+  const url = status.url || `${origin}/overlay`
+  /** 某一块的地址。'all' 就是原来那个「三块齐全」的地址 */
+  const panelUrl = (id: string) => (id === 'all' ? `${origin}/overlay` : `${origin}/overlay/${id}`)
+
+  const copy = async (key: string, text: string) => {
     try {
-      await navigator.clipboard.writeText(url)
-      setCopied(true)
-      window.setTimeout(() => setCopied(false), 1600)
+      await navigator.clipboard.writeText(text)
+      setCopied(key)
+      window.setTimeout(() => setCopied(''), 1600)
     } catch {
       notify('复制失败，手动选中地址复制吧', true)
     }
   }
 
-  const url = status.url || `http://127.0.0.1:${o.port}/overlay`
   const live = status.enabled && status.clients > 0
 
   return (
@@ -121,8 +142,7 @@ export default function OverlayPage({ config, patch, notify }: Props) {
           <div className="row" style={{ gap: 8 }}>
             <Button variant="text" small onClick={() => api.overlay.open()} icon="link">
               在浏览器打开
-            </Button>
-            {status.enabled ? (
+            </Button>            {status.enabled ? (
               <Button variant="outlined" small onClick={stop} icon="stop">
                 停止
               </Button>
@@ -164,8 +184,8 @@ export default function OverlayPage({ config, patch, notify }: Props) {
 
         <div className="row" style={{ marginTop: 14, gap: 8, flexWrap: 'wrap' }}>
           <code className="overlay-url">{url}</code>
-          <Button variant="tonal" small onClick={copyUrl}>
-            {copied ? '已复制' : '复制'}
+          <Button variant="tonal" small onClick={() => copy('all', url)}>
+            {copied === 'all' ? '已复制' : '复制'}
           </Button>
           <Button variant="outlined" small onClick={pushTest} disabled={!status.enabled} icon="send">
             推一条测试消息
@@ -199,6 +219,37 @@ export default function OverlayPage({ config, patch, notify }: Props) {
 
         <div className="tip" style={{ marginTop: 8 }}>
           别在 OBS 里勾选「源不可见时关闭浏览器源」，切场景回来会丢消息。
+        </div>
+      </Card>
+
+      <Card
+        title="拆开用（推荐）"
+        desc="一块加一个「浏览器」源，各占一层。这样歌词、弹幕、点歌就是三个独立的东西：能各自拖动、各自缩放，还能单独加滤镜或调层级，互不牵连。位置在下面各自的设置里选，指的是「在这个源里的位置」。"
+        actions={
+          <Button variant="text" small onClick={() => api.overlay.open('lyric')} icon="link">
+            预览歌词源
+          </Button>
+        }
+      >
+        <div className="panel-src">
+          {PANEL_SOURCES.map((p) => (
+            <div className="panel-src__row" key={p.id}>
+              <span className="panel-src__name">{p.name}</span>
+              <span className="panel-src__hint">{p.hint}</span>
+              <code className="overlay-url panel-src__url">{panelUrl(p.id)}</code>
+              <Button variant="tonal" small onClick={() => copy(p.id, panelUrl(p.id))}>
+                {copied === p.id ? '已复制' : '复制'}
+              </Button>
+              <Button variant="text" small onClick={() => api.overlay.open(p.id)} icon="link">
+                打开
+              </Button>
+            </div>
+          ))}
+        </div>
+        <div className="tip" style={{ marginTop: 10 }}>
+          源还是建议先按画布尺寸（1920×1080）建，再用 OBS 的变换把这一块拖到想要的位置 ——
+          和原来那个「全部」的源看到的效果一模一样，只是这次能单独调了。
+          上面那个 {url} 仍然可用：一个源里三块齐全，还会自动避让。
         </div>
       </Card>
 
@@ -355,15 +406,65 @@ export default function OverlayPage({ config, patch, notify }: Props) {
       </Card>
 
       <Card
+        title="音色选择面板"
+        desc="观众发「#音色列表 关键词」时，把候选连同信息摆到画面上供他挑；他再发「#绑定 2」，第 2 条就会被标出来。"
+      >
+        <Row label="显示选择面板">
+          <Switch value={o.showVoicePick !== false} onChange={(v) => patch({ overlay: { showVoicePick: v } })} />
+        </Row>
+        <Row label="位置" hint="挑一个不和弹幕、歌词打架的角">
+          <div style={{ width: 150 }}>
+            <Select
+              label="位置"
+              value={o.voicePickPos || 'tr'}
+              onChange={(v) => patch({ overlay: { voicePickPos: v } })}
+              options={PICK_POS}
+            />
+          </div>
+        </Row>
+        <Row label="最多列几条" hint="列太多会顶掉弹幕那一段；序号小的永远在前面">
+          <div style={{ width: 150 }}>
+            <Select
+              label="最多列几条"
+              value={String(o.voicePickHits ?? 4)}
+              onChange={(v) => patch({ overlay: { voicePickHits: Number(v) } })}
+              options={PICK_HIT_OPTIONS}
+            />
+          </div>
+        </Row>
+        <Row label="每条显示时长" hint="到点自动消失。同时有好几个人在选就按这个时长排队一个个放，不会互相盖住">
+          <div style={{ width: 220 }}>
+            <Slider
+              value={Math.round((o.voicePickTtlMs ?? 8000) / 1000)}
+              min={3}
+              max={30}
+              step={1}
+              onChange={(v) => patch({ overlay: { voicePickTtlMs: v * 1000 } })}
+              suffix=" 秒"
+            />
+          </div>
+        </Row>
+
+        <div className="obs-preview" style={{ marginTop: 12 }}>
+          <span className="obs-preview__tag">效果预览</span>
+          <VoicePickPreview pos={o.voicePickPos} hits={o.voicePickHits} />
+        </div>
+        <div className="tip" style={{ marginTop: 8 }}>
+          一次只显示一个人。后面还排着队时面板底下会写「还有 N 位在等」，倒计时条走完就换下一位。
+          关掉它，主播端的一切照旧，只是不往画面上推了。
+        </div>
+      </Card>
+
+      <Card
         title="画面适配"
-        desc="OBS 浏览器源的宽高不一定是 16:9。拖成一条窄竖带时，弹幕、点歌面板、歌词会各占一段、互不遮挡。"
+        desc="OBS 浏览器源的宽高不一定是 16:9。拖成一条窄竖带时，弹幕、点歌面板、歌词、音色面板会各占一段、互不遮挡。"
       >
         <Row label="自动避让" hint="按你选的位置摆好之后实测各块占位，同一侧真的挨在一起才上下叠开；宽画面下不动任何东西">
           <Switch value={o.autoLayout !== false} onChange={(v) => patch({ overlay: { autoLayout: v } })} />
         </Row>
         <div className="tip" style={{ marginTop: 8 }}>
-          宽度不到 640px（或高度不到 540px）时还会顺带把三块的宽度放开 —— 弹幕气泡不再按 1080p
-          的宽度撑出画面，点歌面板和歌词也会各自限定高度，给弹幕留地方。关掉它就严格照你选的位置摆，重叠也照放。
+          宽度不到 640px（或高度不到 540px）时还会顺带把各块的宽度放开 —— 弹幕气泡不再按 1080p
+          的宽度撑出画面，点歌面板、歌词、音色面板也会各自限定高度，给弹幕留地方。关掉它就严格照你选的位置摆，重叠也照放。
         </div>
       </Card>
 

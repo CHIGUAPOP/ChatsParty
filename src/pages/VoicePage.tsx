@@ -129,6 +129,14 @@ export default function VoicePage({ config, patch, notify }: Props) {
 
   const set = (k: string, v: unknown) => patch({ tts: { [k]: v } })
 
+  /**
+   * B站默认昵称改念的那个称呼。
+   * 它紧挨着 TTS 的开关，改一个字就写一次盘太伤，交给 useLiveSave 停手 600ms 再落。
+   */
+  const defaultNameDraft = useLiveSave(t.defaultUserName || '', async (v) => {
+    await set('defaultUserName', v.trim() || '一个b站用户')
+  })
+
   /* ------------------------------ 合成缓存 ------------------------------ */
   const cache = t.cache || { enabled: true, ttlMs: 7 * DAY, maxMB: 200 }
   const [ttlUnit, setTtlUnit] = React.useState(() => splitDuration(Number(t.cache?.ttlMs) || 0).unit)
@@ -329,6 +337,27 @@ export default function VoicePage({ config, patch, notify }: Props) {
         <Row label="朗读用户名" hint="关闭后只念弹幕内容">
           <Switch value={t.readUsername} onChange={(v) => set('readUsername', v)} />
         </Row>
+        <Row
+          label="默认昵称不念数字"
+          hint="bili_3706983133743519 这种没改过名的账号，念出来是一串数字"
+        >
+          <Switch
+            value={t.renameDefaultUser !== false}
+            onChange={(v) => set('renameDefaultUser', v)}
+          />
+        </Row>
+        {t.renameDefaultUser !== false && (
+          <Row label="念作" hint="纯数字的名字也按这个念">
+            <div style={{ width: 200 }}>
+              <TextField
+                label="念作"
+                value={defaultNameDraft.value}
+                onChange={defaultNameDraft.onChange}
+                onBlur={defaultNameDraft.onBlur}
+              />
+            </div>
+          </Row>
+        )}
         <Row label="礼物">
           <Switch value={t.readGift} onChange={(v) => set('readGift', v)} />
         </Row>

@@ -2074,3 +2074,378 @@ body {
   opacity: 1;
   transform: scale(1.06);
 }
+
+/* ==========================================================================
+   音色选择面板预览（叠加层页设置用）
+   class 名与 overlay/index.html 的 #cp-pick 一致，只把尺寸缩到预览台放得下的量级。
+   ========================================================================== */
+
+.pick-stage {
+  position: relative;
+  height: 210px;
+}
+
+.pick-stage .cp-pick {
+  position: absolute;
+}
+
+.pick-stage .cp-pick[data-pos='tl'],
+.pick-stage .cp-pick[data-pos='bl'] {
+  left: 12px;
+}
+.pick-stage .cp-pick[data-pos='tr'],
+.pick-stage .cp-pick[data-pos='br'] {
+  right: 12px;
+}
+.pick-stage .cp-pick[data-pos='tl'],
+.pick-stage .cp-pick[data-pos='tr'] {
+  top: 12px;
+}
+.pick-stage .cp-pick[data-pos='bl'],
+.pick-stage .cp-pick[data-pos='br'] {
+  bottom: 12px;
+}
+
+.cp-pick {
+  display: none;
+  flex-direction: column;
+  width: 250px;
+  pointer-events: none;
+}
+
+.cp-pick.is-show {
+  display: flex;
+}
+
+.cp-pick__card {
+  padding: 9px 12px 10px;
+  border-radius: 12px;
+  background: rgba(18, 18, 22, 0.72);
+  color: #f4f2f6;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.28);
+}
+
+.cp-pick__head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin-bottom: 5px;
+}
+
+.cp-pick__who {
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.cp-pick__kw {
+  min-width: 0;
+  font-size: 11px;
+  opacity: 0.62;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cp-pick__row {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  padding: 3px 5px;
+  border-radius: 7px;
+  font-size: 12px;
+  line-height: 1.45;
+  min-width: 0;
+}
+
+.cp-pick__no {
+  flex: 0 0 12px;
+  font-size: 10px;
+  opacity: 0.55;
+  text-align: right;
+}
+
+.cp-pick__name {
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cp-pick__meta {
+  flex: 1;
+  min-width: 0;
+  font-size: 10px;
+  opacity: 0.6;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cp-pick__tag {
+  flex: 0 0 auto;
+  padding: 1px 5px;
+  border-radius: 999px;
+  font-size: 9px;
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.cp-pick__tag.is-off {
+  background: rgba(190, 70, 70, 0.42);
+}
+
+.cp-pick__row.is-picked {
+  background: rgba(208, 188, 255, 0.26);
+  box-shadow: inset 0 0 0 1px var(--md-sys-color-primary, #d0bcff);
+}
+
+.cp-pick__row.is-picked .cp-pick__name,
+.cp-pick__row.is-picked .cp-pick__meta {
+  opacity: 1;
+}
+
+.cp-pick__row.is-off {
+  opacity: 0.5;
+}
+
+.cp-pick__ok {
+  flex: 0 0 auto;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--md-sys-color-primary, #d0bcff);
+}
+
+.cp-pick__fail {
+  margin-top: 5px;
+  font-size: 10px;
+  color: #ffb4ab;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cp-pick__wait {
+  margin-top: 5px;
+  font-size: 10px;
+  opacity: 0.6;
+}
+
+.cp-pick__bar {
+  margin-top: 7px;
+  height: 2px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.14);
+  overflow: hidden;
+}
+
+.cp-pick__bar-fill {
+  width: 100%;
+  height: 100%;
+  background: var(--md-sys-color-primary, #d0bcff);
+}
+
+/* -------------------------- 开播准备（连接页） -------------------------- */
+/* 程序清单是现扫出来的，条目数不固定，所以整块走竖向 flex，不写死高度 */
+
+.lp-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.lp-item {
+  padding: 10px 12px;
+  border-radius: var(--md-sys-shape-corner-medium, 12px);
+  background: var(--md-sys-color-surface-container-low);
+  border: 1px solid transparent;
+  transition:
+    background var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-short),
+    border-color var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-short);
+}
+
+.lp-item.is-on {
+  background: var(--md-sys-color-surface-container-high);
+  border-color: var(--md-sys-color-primary);
+}
+
+.lp-item__main {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+}
+
+.lp-check {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  border-radius: 5px;
+  border: 1.5px solid var(--md-sys-color-outline);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--md-sys-color-on-primary);
+  transition:
+    background var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-short),
+    border-color var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-short);
+}
+
+.lp-check.is-on {
+  background: var(--md-sys-color-primary);
+  border-color: var(--md-sys-color-primary);
+}
+
+/* 勾选顺序就是启动顺序，所以序号得摆在最显眼的地方 */
+.lp-order {
+  min-width: 14px;
+  font-size: 12px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  color: var(--md-sys-color-primary);
+}
+
+.lp-item__name {
+  font-size: 14px;
+  color: var(--md-sys-color-on-surface);
+}
+
+.lp-item__badge {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--md-sys-color-surface-container-highest);
+  color: var(--md-sys-color-on-surface-variant);
+}
+
+.lp-item__spacer {
+  flex: 1;
+}
+
+.lp-item__state {
+  font-size: 12px;
+  white-space: nowrap;
+  color: var(--md-sys-color-on-surface-variant);
+}
+
+.lp-item__state.is-running,
+.lp-item__state.is-started {
+  color: var(--md-sys-color-primary);
+}
+
+.lp-item__state.is-live {
+  color: var(--md-sys-color-tertiary);
+}
+
+.lp-item__state.is-failed {
+  color: var(--md-sys-color-error);
+}
+
+.lp-x {
+  border: 0;
+  padding: 2px;
+  background: transparent;
+  cursor: pointer;
+  border-radius: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--md-sys-color-on-surface-variant);
+  transition: color var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-short);
+}
+
+.lp-x:hover {
+  color: var(--md-sys-color-error);
+}
+
+/* 路径可能很长（Steam 库套得很深），一律单行截断，完整值放 title */
+.lp-item__path {
+  margin: 6px 0 0 28px;
+  font-size: 11px;
+  opacity: 0.75;
+  color: var(--md-sys-color-on-surface-variant);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.lp-item__msg {
+  margin: 4px 0 0 28px;
+  font-size: 11px;
+  color: var(--md-sys-color-on-surface-variant);
+}
+
+.lp-item.is-failed .lp-item__msg {
+  color: var(--md-sys-color-error);
+}
+
+/* 「需管理员」得显眼一点：它预告了待会儿桌面会弹一个窗口，
+   用户如果不知道，会以为程序卡住了 */
+.lp-item__badge.is-admin {
+  background: var(--md-sys-color-tertiary-container);
+  color: var(--md-sys-color-on-tertiary-container);
+}
+
+@media (max-width: 720px) {
+  .lp-item__badge {
+    display: none;
+  }
+  /* 别的徽章是「补充信息」，这个是「提前告知」—— 窄屏也别藏 */
+  .lp-item__badge.is-admin {
+    display: inline-block;
+  }
+}
+
+/* ---------------- 叠加层「拆开用」：一块一行地址 ----------------
+   四行都是「名字 + 说明 + 地址 + 复制 + 打开」，地址那一列要能对齐，
+   所以用 grid 而不是 flex —— 名字长短不一时 flex 会让地址参差不齐。 */
+.panel-src {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.panel-src__row {
+  display: grid;
+  grid-template-columns: 72px 132px minmax(180px, 1fr) auto auto;
+  align-items: center;
+  gap: 10px;
+}
+
+.panel-src__name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--md-sys-color-on-surface);
+}
+
+.panel-src__hint {
+  font-size: 11px;
+  color: var(--md-sys-color-on-surface-variant);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 地址已经带了等宽字体和底色，这里只把它从「一行一条」改成跟着格子走 */
+.panel-src__url {
+  min-width: 0;
+  flex: none;
+}
+
+/* 窄一点就折成三行：名字一行、地址一行、两个按钮一行 ——
+   五个格子在手机宽度下会挤成一条竖带，字全被截掉 */
+@media (max-width: 860px) {
+  .panel-src__row {
+    grid-template-columns: auto auto;
+    row-gap: 6px;
+  }
+  .panel-src__name {
+    grid-column: 1 / -1;
+  }
+  .panel-src__hint {
+    display: none;
+  }
+  .panel-src__url {
+    grid-column: 1 / -1;
+  }
+}

@@ -3,6 +3,7 @@
 const { app, BrowserWindow, ipcMain, shell, dialog, session: electronSession } = require('electron')
 const path = require('node:path')
 const fs = require('node:fs')
+const { spawn, execFile } = require('node:child_process')
 
 const { Session, Wbi } = require('./lib/http.cjs')
 const { BilibiliAPI } = require('./bilibili/api.cjs')
@@ -11,7 +12,9 @@ const { LiveClient } = require('./bilibili/live.cjs')
 const { PROVIDERS, synthesize, listVoices, probeFish } = require('./tts.cjs')
 const V = require('./voices.cjs')
 const L = require('./llm.cjs')
-const { shouldSpeakNow } = require('./speech-rules.cjs')
+const { shouldSpeakNow, speakableName } = require('./speech-rules.cjs')
+const { createPickQueue } = require('./voice-pick.cjs')
+const LP = require('./launchpad.cjs')
 const { createSpeechControl } = require('./speech-control.cjs')
 const { createTtsCache } = require('./tts-cache.cjs')
 const NCM = require('./netease.cjs')
@@ -19,7 +22,7 @@ const net = require('./lib/net.cjs')
 const { normalizeKey, describeKey, keySummary, keyWarnings, keyShapeWarnings } = require('./lib/keytext.cjs')
 const { FaceResolver } = require('./faces.cjs')
 const { Logger } = require('./log.cjs')
-const { OverlayServer } = require('./overlay.cjs')
+const { OverlayServer, OVERLAY_PANELS } = require('./overlay.cjs')
 const { ConfigStore } = require('./store.cjs')
 const pkg = require('../package.json')
 
@@ -32,6 +35,13 @@ let wbi = null
 let api = null
 let live = null
 let overlay = null
+/**
+ * 「谁在选音色」面板的队列（electron/voice-pick.cjs）。
+ * 观众搜音色 → 候选推到 OBS 画面上；随后绑定 → 把选中那条标出来。
+ * 一次只显示一条、默认 8 秒、多条排队依次放 —— 规则都在那个模块里，这里只负责推帧。
+ */
+const pickQueue = createPickQueue()
+let pickTimer = null
 let qrLogin = null
 let log = null
 // 网易云网页登录窗口（单例）。放在这里是为了关窗时能摘掉监听
@@ -76,6 +86,57 @@ function snapshotLyric() {
     lines: lines.map((l) => l.text),
     times: lines.map((l) => l.time),
   }
+}
+
+/* ---------------------------- 音色选择面板 ----------------------------
+   观众发 `#音色列表 关键词` 时，把候选摆到 OBS 画面上；他随后 `#绑定 2`，
+   面板就把第 2 条标出来。主进程持有整条队列（谁是当前、还剩几秒、后面排着几条），
+   叠加层永远只管画推给它的那一帧 —— 这样多开几个 OBS 源也是同一份状态。 */
+
+/** 把当前这一帧推给所有叠加层客户端 */
+function pushPick() {
+  if (overlay) overlay.broadcast('voicepick', pickQueue.snapshot())
+}
+
+/**
+ * 过期换人靠这个心跳。250ms 一次：面板的存活精度到这个量级就够了，
+ * 再密只是白占 CPU。没事发生时 prune 返回 false，一帧都不推。
+ * 队列空了就自己停掉 —— 没人用这个功能时不该有个定时器一直在转。
+ */
+function startPickTimer() {
+  if (pickTimer) return
+  pickTimer = setInterval(() => {
+    if (pickQueue.prune(Date.now())) pushPick()
+    if (!pickQueue.size()) stopPickTimer()
+  }, 250)
+  // 别为了一个提示面板把进程钉住不退出
+  if (pickTimer.unref) pickTimer.unref()
+}
+
+function stopPickTimer() {
+  if (!pickTimer) return
+  clearInterval(pickTimer)
+  pickTimer = null
+}
+
+/**
+ * 有人搜了一批音色 → 排队展示。
+ * @param {{uid?:number|string, who?:string, keyword?:string, hits?:Array}} item
+ */
+function announcePick(item) {
+  const ttl = Number(store?.get()?.overlay?.voicePickTtlMs)
+  if (ttl > 0) pickQueue.setTtl(ttl)
+  pickQueue.push(item)
+  startPickTimer()
+  pushPick()
+}
+
+/**
+ * 这个人选完了。n 是候选里的序号（1 起）；failed 是失败原因。
+ * 没有对应的面板（比如他自己直接发名字绑的、没搜过）就什么都不做。
+ */
+function settlePick(uid, result) {
+  if (pickQueue.resolve(uid, result)) pushPick()
 }
 
 function pushMusicState() {
@@ -510,6 +571,262 @@ function stopLive() {
   send('live:status', { status: 'idle' })
 }
 
+/* ---------------------------- 一键准备开播 ----------------------------
+   把直播要用的程序一次拉起来：Steam 库里的（OBS / VTube Studio / VBridger）默认走
+   官方 steam://rungameid/<appid>，直播姬这种独立安装的直接起 exe，最后按配置连上直播间。
+   两条纪律：
+   - **绝不碰已经在跑的程序** —— 扫到在跑就跳过，不重复拉第二遍（OBS 被重复启动会弹警告框）；
+   - 「怎么拼命令」全在 electron/launchpad.cjs 里（有测试盯着），这里只负责执行与回报进度。
+*/
+
+/** 扫描结果缓存。界面上会连着点「重新扫描」，没必要每次都把文件系统翻一遍 */
+let lpScan = null
+let lpScanAt = 0
+/** 同一时刻只允许跑一次，防连点把程序起两遍 */
+let lpBusy = false
+
+/** 当前有哪些进程在跑。查不到就返回 null（当作「不知道」）——绝不因此拦住启动 */
+function runningProcesses() {
+  return new Promise((resolve) => {
+    try {
+      execFile('tasklist', ['/FO', 'CSV', '/NH'], { windowsHide: true, timeout: 5000 }, (err, stdout) => {
+        if (err) return resolve(null)
+        resolve(LP.parseTasklistCsv(stdout))
+      })
+    } catch {
+      resolve(null)
+    }
+  })
+}
+
+function scanLaunchpad(force) {
+  const now = Date.now()
+  if (!force && lpScan && now - lpScanAt < 20000) return lpScan
+  const cfg = (store && store.get().launchpad) || {}
+  lpScan = LP.scanLaunchpad({ extraExe: Array.isArray(cfg.custom) ? cfg.custom : [] })
+  lpScanAt = now
+  return lpScan
+}
+
+/** 扫描结果 + 每个程序「是不是已经在跑」 */
+async function launchpadView(force) {
+  const scan = scanLaunchpad(force)
+  const running = await runningProcesses()
+  return {
+    steamRoot: scan.steamRoot,
+    steamExe: scan.steamExe,
+    libraries: scan.libraries,
+    errors: scan.errors,
+    apps: LP.withRunning(scan.apps, running),
+  }
+}
+
+/** 等 UAC 弹窗的上限。用户一直不理的话，一键开播不能永远停在这一步 */
+const ELEVATE_TIMEOUT_MS = 120000
+
+/**
+ * 需要管理员权限的程序：走 PowerShell 的 `Start-Process -Verb RunAs`，
+ * 让系统弹一次 UAC。
+ *
+ * 和别的程序不一样，这个**要等** —— 等的不是程序退出（直播姬会一直开着），
+ * 而是 PowerShell 把 UAC 那一下走完：用户点「否」会拿到非 0 退出码，
+ * 界面才能如实说「没起来」，而不是骗人地说启动成功。
+ */
+function runElevated(plan) {
+  const cmd = LP.elevateCommand(plan)
+  return new Promise((resolve) => {
+    let settled = false
+    let timer = null
+    const done = (v) => {
+      if (settled) return
+      settled = true
+      if (timer) clearTimeout(timer)
+      resolve(v)
+    }
+    let child
+    try {
+      child = spawn(cmd.exe, cmd.args, {
+        cwd: plan.cwd || path.dirname(plan.exe),
+        stdio: 'ignore',
+        // PowerShell 自己的窗口别让人看见；UAC 那个是系统的，不受这里影响
+        windowsHide: true,
+      })
+    } catch (e) {
+      return done({ ok: false, message: e.message || String(e) })
+    }
+    timer = setTimeout(() => {
+      try {
+        child.kill()
+      } catch {
+        /* 已经退出了 */
+      }
+      done({ ok: false, message: '等待管理员授权超时，这一步先跳过了（程序可能没起来）' })
+    }, ELEVATE_TIMEOUT_MS)
+    child.once('error', (e) => done({ ok: false, message: e.message || String(e), code: e.code, errno: e.errno }))
+    child.once('exit', (code) => {
+      if (code === 0) done({ ok: true, pid: child.pid, elevated: true })
+      else
+        done({
+          ok: false,
+          message: '它需要管理员权限，但没能起来 —— 桌面弹出的那个授权窗口要点「是」才放行（也可能是程序自己起不来）',
+        })
+    })
+  })
+}
+
+/**
+ * 拉起来就松手：detached + unref，关掉 ChatsParty 也不会把它们带走。
+ * 用 'spawn' 事件判定「起来了」，不用延时猜。
+ */
+function spawnDetached(plan) {
+  if (plan.elevate) return runElevated(plan)
+  return new Promise((resolve) => {
+    let settled = false
+    const done = (v) => {
+      if (settled) return
+      settled = true
+      resolve(v)
+    }
+    let child
+    try {
+      // .bat / .cmd 是脚本不是可执行映像，CreateProcess 直接跑不了，得让 cmd 代劳 ——
+      // 界面上允许手选这类文件，不处理的话表现就是「点了没反应」
+      const ext = path.extname(plan.exe).toLowerCase()
+      const isScript = ext === '.bat' || ext === '.cmd'
+      const file = isScript ? process.env.ComSpec || 'cmd.exe' : plan.exe
+      const args = isScript ? ['/c', plan.exe, ...(plan.args || [])] : plan.args || []
+      child = spawn(file, args, {
+        // OBS 官方文档要求：从快捷方式/计划任务拉起时工作目录必须是 exe 所在目录，
+        // 否则它找不到 data / obs-plugins，起来是个空壳
+        cwd: plan.cwd || path.dirname(plan.exe),
+        detached: true,
+        stdio: 'ignore',
+        windowsHide: false,
+      })
+    } catch (e) {
+      return done({ ok: false, message: e.message || String(e), code: e.code, errno: e.errno })
+    }
+    child.once('error', (e) => done({ ok: false, message: e.message || String(e), code: e.code, errno: e.errno }))
+    child.once('spawn', () => {
+      child.unref()
+      done({ ok: true, pid: child.pid })
+    })
+  })
+}
+
+/** 拉起一个。返回 { status: 'started'|'skipped'|'failed', message, mode } */
+async function launchOne(app, useSteam, running) {
+  const plan = LP.planLaunch(app, { useSteam })
+  if (plan.mode === 'none') {
+    return { status: 'failed', message: plan.note || '找不到可执行文件', mode: 'none' }
+  }
+  // 「已经在跑」的判断只看进程名对不对得上，而且查不到时一律不跳过 ——
+  // 宁可多启动一次，也不能因为查不到就把用户想开的程序悄悄咽掉
+  if (LP.shouldSkip(app, running)) {
+    return { status: 'skipped', message: '已经在运行，没有重复启动', mode: plan.mode }
+  }
+  if (plan.mode === 'steam') {
+    try {
+      await shell.openExternal(plan.url)
+      return {
+        status: 'started',
+        message: '已交给 Steam 启动（Steam 没开的话会先把它唤起来，要等一会儿）',
+        mode: 'steam',
+      }
+    } catch (e) {
+      return { status: 'failed', message: `唤起 Steam 失败：${e.message || e}`, mode: 'steam' }
+    }
+  }
+  let r = await spawnDetached(plan)
+  // 没预判出要提权、失败原因却像是「它要管理员权限」：再试一次，这次带上 RunAs。
+  // 用户手补的程序（自己把 livehime.exe 加进来）走的正是这条路。
+  if (!r.ok && !plan.elevate && LP.looksLikeElevationError(r)) {
+    log?.info('[launchpad] 看着像需要管理员权限，改用提权启动', app.id, r.message)
+    r = await spawnDetached({ ...plan, elevate: true })
+    if (r.ok) return { status: 'started', message: '这个程序要求管理员权限，已用管理员权限启动', mode: 'exe' }
+    return { status: 'failed', message: r.message, mode: 'exe' }
+  }
+  if (!r.ok) return { status: 'failed', message: r.message, mode: 'exe' }
+  if (r.elevated) return { status: 'started', message: '已用管理员权限启动（桌面弹的那个窗口点的「是」）', mode: 'exe' }
+  return { status: 'started', message: `已启动（pid ${r.pid}）`, mode: 'exe' }
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+
+/** 一键开播的主流程。进度一路 send 给界面，最后可选连上直播间 */
+async function runLaunchpad(payload = {}) {
+  if (lpBusy) throw new Error('上一轮还在启动中，稍等一下')
+  const cfg = store.get()
+  const lp = cfg.launchpad || {}
+  lpBusy = true
+  try {
+    const order = Array.isArray(payload.order) ? payload.order : Array.isArray(lp.order) ? lp.order : []
+    const useSteam = payload.useSteam == null ? lp.useSteam !== false : Boolean(payload.useSteam)
+    const skipRunning = payload.skipRunning == null ? lp.skipRunning !== false : Boolean(payload.skipRunning)
+    const rawGap = payload.gapMs == null ? lp.gapMs : payload.gapMs
+    const gapMs = Math.max(0, Math.min(15000, Number(rawGap) || 0))
+
+    const scan = scanLaunchpad(Boolean(payload.rescan))
+    const byId = new Map(scan.apps.map((a) => [a.id, a]))
+    const targets = order.map((id) => byId.get(String(id))).filter(Boolean)
+    if (!targets.length) throw new Error('还没选要拉起的程序')
+
+    const running = skipRunning ? await runningProcesses() : null
+    const steps = targets.map((a) => ({ id: a.id, name: a.name, status: 'pending', message: '' }))
+    send('launchpad:progress', { steps, index: -1 })
+
+    for (let i = 0; i < targets.length; i++) {
+      const app = targets[i]
+      steps[i].status = 'running'
+      // 提权那一步会弹系统的 UAC 窗口，先说清楚 —— 不然看起来就像卡住了
+      steps[i].message = LP.needsElevation(app, useSteam)
+        ? '正在请求管理员权限 —— 桌面会弹一个窗口，点「是」就行…'
+        : '正在启动…'
+      send('launchpad:progress', { steps, index: i })
+      const r = await launchOne(app, useSteam, running)
+      steps[i].status = r.status
+      steps[i].message = r.message
+      steps[i].mode = r.mode
+      if (r.status === 'failed') log?.warn('[launchpad] 启动失败', app.id, app.name, r.message)
+      else log?.info('[launchpad] 启动', app.id, app.name, r.status, r.mode)
+      send('launchpad:progress', { steps, index: i })
+      // 给上一个留点起身的时间，别一窝蜂同时抢磁盘
+      if (i < targets.length - 1 && gapMs) await sleep(gapMs)
+    }
+
+    let connect = null
+    const wantConnect = payload.connect == null ? lp.autoConnect !== false : Boolean(payload.connect)
+    if (wantConnect) {
+      const roomId = String(payload.roomId || cfg.room?.roomId || '').trim()
+      if (!roomId) {
+        connect = { ok: false, message: '还没填直播间号，跳过了自动连接' }
+      } else {
+        send('launchpad:progress', { steps, index: targets.length, connecting: true })
+        try {
+          const r = await startLive(roomId)
+          connect = { ok: true, ...r }
+          log?.info('[launchpad] 已连上直播间', r.realRoomId || roomId, r.title || '')
+        } catch (e) {
+          connect = { ok: false, message: e.message || String(e) }
+          log?.warn('[launchpad] 连直播间失败', connect.message)
+        }
+      }
+    }
+
+    const count = (s) => steps.filter((x) => x.status === s).length
+    log?.info(
+      '[launchpad] 完成',
+      `启动 ${count('started')}`,
+      `跳过 ${count('skipped')}`,
+      `失败 ${count('failed')}`,
+      connect ? (connect.ok ? '已连直播间' : `连直播间失败：${connect.message}`) : '未连直播间',
+    )
+    return { ok: count('failed') === 0, steps, connect }
+  } finally {
+    lpBusy = false
+  }
+}
+
 function onLiveEvent(ev) {
   // 头像兜底：弹幕消息不一定自带 face，异步补一次再推给前端
   if (ev.uid && !ev.face && ev.type === 'danmaku') {
@@ -769,15 +1086,86 @@ function replyChat(text) {
   return replyChain
 }
 
+/** 这个人上一次搜的结果还算不算数 */
+function freshSearchOf(uid) {
+  const cache = searchCache.get(uid)
+  return cache && Date.now() - cache.at < SEARCH_TTL ? cache.voices : null
+}
+
+/**
+ * 弹幕里「列表」到底该列出哪些音色。
+ *
+ * 以前这里只查在线平台，于是**主播已经注册到库里的音色观众永远搜不到** ——
+ * 尤其是 MiMo 文字设计出来的、以及观众自己造的那些，平台上压根没有。
+ * 结果就是「明明（库里）有这个音色，却怎么都换不过去」。
+ * 现在库里命中的排前面，再补在线搜索结果，按「平台:id」去重。
+ */
+async function searchForList(cfg, keyword, limit) {
+  const lib = cfg.voiceLibrary || []
+  const out = []
+  const seen = new Set()
+  const push = (v) => {
+    const key = `${v.source}:${v.id}`
+    if (!v.id || seen.has(key)) return
+    seen.add(key)
+    out.push(v)
+  }
+  // 1) 库里的：能直接切过去，标成「已注册」。
+  //    带上 profileId —— 设计音色（mimoMode='design'）在平台上没有对应的「音色 id」，
+  //    不带的话绑定那一步会重新造一条重复档案出来。
+  for (const p of V.searchProfiles(lib, keyword, limit)) {
+    push({ id: p.voice, name: p.name, hint: p.voiceHint || '', source: p.platform, profileId: p.id })
+  }
+  const localCount = out.length
+  // 2) 在线平台补位
+  const errors = []
+  if (cfg.voicePolicy?.allowSearch !== false) {
+    const r = await V.searchEverywhere(cfg.voicePolicy?.searchSources, { keyword, limit, cfg })
+    for (const e of r.errors || []) errors.push(e)
+    for (const v of r.voices || []) push({ id: v.id, name: v.name, hint: v.hint, source: v.source })
+  }
+  return { voices: out.slice(0, Math.max(limit, 1)), localCount, errors }
+}
+
+/**
+ * 这个音色在库里是什么状态。面板要据此标「已注册 / 已停用」——
+ * 「为什么点了却没反应」十有八九是这一栏，得让主播一眼看见。
+ */
+function libStateOf(cfg, voice) {
+  const lib = cfg.voiceLibrary || []
+  const hit =
+    (voice.profileId && lib.find((p) => p.id === voice.profileId)) ||
+    lib.find((p) => p.platform === voice.source && p.voice === voice.id && p.mimoMode !== 'design')
+  if (!hit) return 'none'
+  return hit.enabled === false ? 'disabled' : 'enabled'
+}
+
+/**
+ * 这个音色对应的档案。库里已经有就直接用它 —— 别再造一条重复的。
+ * 设计音色只能靠 profileId 认出来（它在平台上没有那个「音色 id」）。
+ */
+function profileForVoice(cfg, voice) {
+  const lib = cfg.voiceLibrary || []
+  return (
+    (voice.profileId && lib.find((p) => p.id === voice.profileId)) ||
+    lib.find((p) => p.platform === voice.source && p.voice === voice.id && p.mimoMode !== 'design') ||
+    null
+  )
+}
+
 async function pickVoiceForBind(ev, arg, policy) {
   const uid = ev.uid || 0
-  const cache = searchCache.get(uid)
-  const fresh = cache && Date.now() - cache.at < SEARCH_TTL ? cache.voices : null
+  const fresh = freshSearchOf(uid)
 
   const num = Number(arg)
   if (arg && Number.isFinite(num) && num >= 1 && fresh) {
-    return fresh[Math.floor(num) - 1] || null
+    const hit = fresh[Math.floor(num) - 1]
+    return hit ? { voice: hit, from: 'list', n: Math.floor(num) } : { voice: null, reason: 'outOfRange' }
   }
+  // 纯数字但手上没有新鲜的列表 —— 以前会把这个数字当关键词丢去在线搜，
+  // 于是「#绑定 3」可能绑到一个名字里带 3 的完全不相干的音色。
+  if (/^\d+$/.test(String(arg).trim())) return { voice: null, reason: 'staleList' }
+
   const kw = String(arg).trim().toLowerCase()
   if (fresh) {
     const hit = fresh.find(
@@ -786,15 +1174,21 @@ async function pickVoiceForBind(ev, arg, policy) {
         String(v.id).toLowerCase() === kw ||
         String(v.name).toLowerCase().includes(kw),
     )
-    if (hit) return hit
+    if (hit) return { voice: hit, from: 'list', n: fresh.indexOf(hit) + 1 }
   }
-  // 上次搜索的结果不算了（或者压根没搜过），直接在线找
+  // 上次搜索的结果不算了（或者压根没搜过），先找已注册的音色库
   const cfg = store.get()
   const local = V.findByName(cfg.voiceLibrary || [], arg)
-  if (local) return { source: local.platform, id: local.voice, name: local.name }
-  if (policy.allowSearch === false) return null
+  if (local) {
+    return {
+      voice: { source: local.platform, id: local.voice, name: local.name, hint: local.voiceHint, profileId: local.id },
+      from: 'library',
+    }
+  }
+  if (policy.allowSearch === false) return { voice: null, reason: 'noSearch' }
   const r = await V.searchEverywhere(policy.searchSources, { keyword: arg, limit: 1, cfg })
-  return r.ok ? r.voices[0] || null : null
+  if (!r.ok || !r.voices.length) return { voice: null, reason: 'notFound', errors: r.errors }
+  return { voice: r.voices[0], from: 'online' }
 }
 
 async function handleVoiceCommand(ev, cmd, policy) {
@@ -823,19 +1217,28 @@ async function handleVoiceCommand(ev, cmd, policy) {
     }
 
     case 'list': {
-      if (policy.allowSearch === false) {
+      if (policy.allowSearch === false && !(cfg.voiceLibrary || []).length) {
         await replyChat('主播没开放音色搜索')
         return
       }
-      const r = await V.searchEverywhere(policy.searchSources, {
-        keyword: cmd.arg,
-        limit: Number(policy.searchLimit) || 6,
-        cfg,
-      })
-      if (!r.ok || !r.voices.length) {
+      const limit = Number(policy.searchLimit) || 6
+      const r = await searchForList(cfg, cmd.arg, limit)
+      // 搜索这条链路以前一个字都不记，出了「搜不到」只能靠猜 —— 记下来
+      log?.info(
+        '[voices] 列表',
+        `uid ${uid}`,
+        `关键词「${cmd.arg || ''}」`,
+        `库里 ${r.localCount}`,
+        `共 ${r.voices.length}`,
+        r.errors.length ? `错误 ${r.errors.join(' / ')}` : '',
+      )
+      if (!r.voices.length) {
+        if (r.errors.length) log?.warn('[voices] 列表失败', cmd.arg || '(空)', r.errors.join(' / '))
         await replyChat(cmd.arg ? `没搜到「${clipReply(cmd.arg, 8)}」` : '暂时没有可用音色')
         return
       }
+      // 台上和聊天里必须是**同一份顺序** —— 否则观众照着聊天里的第 2 条去绑定，
+      // 绑上的是面板上的第 2 条，两个列表对不上
       searchCache.set(uid, { at: Date.now(), voices: r.voices })
       let line = ''
       for (let i = 0; i < r.voices.length; i++) {
@@ -844,6 +1247,22 @@ async function handleVoiceCommand(ev, cmd, policy) {
         line += piece
       }
       await replyChat(`${line.trim()}${policy.prefix}${N('bind')}序号`)
+      // 候选摆到直播画面上
+      announcePick({
+        uid,
+        who: name,
+        keyword: cmd.arg,
+        hits: r.voices.map((v) => {
+          const state = libStateOf(cfg, v)
+          return {
+            name: v.name,
+            source: v.source,
+            hint: v.hint,
+            registered: state !== 'none',
+            disabled: state === 'disabled',
+          }
+        }),
+      })
       return
     }
 
@@ -852,13 +1271,49 @@ async function handleVoiceCommand(ev, cmd, policy) {
         await replyChat(`要指定哪个？发${policy.prefix}${N('list')} 关键词`)
         return
       }
-      const voice = await pickVoiceForBind(ev, cmd.arg, policy)
+      const picked = await pickVoiceForBind(ev, cmd.arg, policy)
+      const voice = picked.voice
       if (!voice) {
-        await replyChat(`没找到「${clipReply(cmd.arg, 8)}」`)
+        // 数字但列表过期：**别**把它当关键词去在线搜（那样会绑到毫不相干的音色），说清楚就行
+        const msg =
+          picked.reason === 'staleList'
+            ? `列表过期了，先发一次${policy.prefix}${N('list')} 关键词`
+            : picked.reason === 'outOfRange'
+              ? '没有这个序号，重新发一次列表看看'
+              : picked.reason === 'noSearch'
+                ? '主播没开放音色搜索'
+                : `没找到「${clipReply(cmd.arg, 8)}」`
+        log?.info(
+          '[voices] 绑定失败',
+          `uid ${uid}`,
+          `「${cmd.arg}」`,
+          picked.reason || 'notFound',
+          (picked.errors || []).join(' / '),
+        )
+        settlePick(uid, { failed: msg })
+        await replyChat(msg)
         return
       }
-      const profile = ensureProfile(voice)
+      // 命中了库里已经**停用**的档案：以前这里会照常回「音色已设为 X」，
+      // 但 currentProfileOf() 会把停用的档案过滤掉 → 那个人继续听默认音色，
+      // 界面上看却「绑定成功了」。这是最难查的一种失败：说了成功，什么都没变。
+      const reused = profileForVoice(cfg, voice)
+      if (reused && reused.enabled === false) {
+        const msg = `「${clipReply(reused.name, 8)}」已经被主播停用了，挑一个别的`
+        log?.warn('[voices] 绑定到已停用的音色', `uid ${uid}`, `${voice.source}:${voice.id}`, reused.id)
+        settlePick(uid, { failed: msg })
+        await replyChat(msg)
+        return
+      }
+      const profile = reused || ensureProfile(voice)
       bindProfile(uid, profile)
+      log?.info(
+        '[voices] 绑定',
+        `uid ${uid}`,
+        `${profile.name}(${profile.platform}:${profile.voice})`,
+        `来源 ${picked.from}`,
+      )
+      settlePick(uid, picked.n ? { n: picked.n } : {})
       await replyChat(`${name}的音色已设为${clipReply(profile.name, 10)}`)
       // 立刻用新音色念一句，让观众听见效果
       previewBinding(profile, name)
@@ -977,7 +1432,7 @@ async function handleMusicRequest(ev, keyword) {
     if (m.announce !== false && cfg.tts?.enabled) {
       if (speech.queue.length > 24) speech.queue.shift()
       speech.queue.push({
-        text: `${name}点了一首${pick.name}`,
+        text: `${speakName(name, cfg.tts)}点了一首${pick.name}`,
         style: cfg.tts.stylePrompt || '',
         meta: { type: 'music' },
       })
@@ -993,7 +1448,7 @@ async function handleMusicRequest(ev, keyword) {
 function previewBinding(profile, name) {
   if (speech.queue.length > 24) speech.queue.shift()
   speech.queue.push({
-    text: `${name}换音色了，现在是这样`,
+    text: `${speakName(name)}换音色了，现在是这样`,
     style: profile.stylePrompt || '',
     profile,
     meta: { type: 'voice-preview' },
@@ -1013,7 +1468,7 @@ function previewDefault(name) {
   if (!t.enabled) return
   if (speech.queue.length > 24) speech.queue.shift()
   speech.queue.push({
-    text: `${name}换回默认音色了，现在是这样`,
+    text: `${speakName(name, t)}换回默认音色了，现在是这样`,
     style: t.stylePrompt || '',
     profile: null,
     meta: { type: 'voice-preview' },
@@ -1033,8 +1488,17 @@ function isBlocked(text, blockWords) {
   return words.some((w) => lower.includes(w.toLowerCase()))
 }
 
+/**
+ * 播报里怎么称呼这个人：B 站没改过昵称的账号是 `bili_3706983133743519` 这种，
+ * 直接念是一长串数字。统一换成「一个b站用户」（可在语音页改），节目里更好听，
+ * 也不会把观众的 uid 念给整个直播间。
+ */
+function speakName(raw, t) {
+  return speakableName(raw, t || store.get().tts)
+}
+
 function buildSpeechText(ev, t) {
-  const name = ev.username || '一位观众'
+  const name = speakName(ev.username, t) || '一位观众'
   switch (ev.type) {
     case 'danmaku':
       return t.readUsername ? `${name}说，${ev.content}` : ev.content
@@ -1171,6 +1635,11 @@ function ttsCfg(t) {
     // 外网请求走哪条网络栈（lib/net.cjs）
     proxy: cfg.proxy,
     platformBase: cfg.platformBase,
+    // 设计 / 克隆出来的音色靠描述或样音驱动，不是靠一个「音色 id」。
+    // 不带这三样，把它们设成默认音色时嗓子会照旧用 preset —— 听起来就是「换了没反应」。
+    mimoMode: t.mimoMode || 'preset',
+    designPrompt: t.designPrompt || '',
+    cloneFile: t.cloneFile || '',
   }
 }
 
@@ -1297,7 +1766,7 @@ function registerIpc() {
       await overlay.stop()
       overlay = null
       try {
-        const p = await ensureOverlay(Number(next.overlay.port) || 12450)
+        const p = await ensureOverlay(overlayPort())
         // 端口被占时会自动顺延，界面上要显示真正监听的那个
         if (Number(p) !== Number(next.overlay.port)) store.patch({ overlay: { port: p } })
         pushConfig()
@@ -1362,6 +1831,38 @@ function registerIpc() {
   ipcMain.handle('live:stop', () => {
     stopLive()
     return { ok: true }
+  })
+
+  // 扫描本机的直播相关程序（只读：读 vdf/acf、看 exe 在不在、查一下进程名）
+  ipcMain.handle('launchpad:scan', async (_e, opts) => {
+    try {
+      const v = await launchpadView(Boolean(opts && opts.force))
+      return { ok: true, ...v }
+    } catch (e) {
+      log?.warn('[launchpad] 扫描失败', e.message || String(e))
+      return { ok: false, message: e.message || String(e), apps: [], libraries: [], errors: [] }
+    }
+  })
+
+  // 一键开播
+  ipcMain.handle('launchpad:run', async (_e, payload) => {
+    try {
+      return await runLaunchpad(payload || {})
+    } catch (e) {
+      return { ok: false, message: e.message || String(e), steps: [] }
+    }
+  })
+
+  // 手补一个扫描不到的程序（装在不常见位置的那种）
+  ipcMain.handle('launchpad:pickExe', async () => {
+    const r = await dialog.showOpenDialog(win || undefined, {
+      title: '选择要加入开播准备的程序',
+      properties: ['openFile'],
+      filters: [{ name: '可执行文件', extensions: ['exe', 'bat', 'cmd'] }],
+    })
+    if (r.canceled || !r.filePaths.length) return { ok: false }
+    const file = r.filePaths[0]
+    return { ok: true, exe: file, name: path.basename(file, path.extname(file)) }
   })
 
   ipcMain.handle('live:send', async (_e, text) => {
@@ -1789,6 +2290,34 @@ function registerIpc() {
     return { ok: true }
   })
 
+  /**
+   * 把库里的某个音色设成**全局默认**（所有人共用的那条嗓子）。
+   *
+   * 以前只能在语音页那个下拉里选，而下拉列的是平台自带的音色 —— 自己注册进库的
+   * 根本不在里面，于是「明明有这个音色却换不过去」。这里直接从档案把
+   * 提供方 / 模型 / 音色 / 格式一起写进 tts 配置。
+   */
+  ipcMain.handle('voices:useAsDefault', (_e, id) => {
+    const cfg = store.get()
+    const p = (cfg.voiceLibrary || []).find((x) => x.id === id)
+    if (!p) throw new Error('这个音色不在库里')
+    const next = {
+      provider: p.platform,
+      protocol: p.protocol || '',
+      // 界面上统一指定的模型优先，换了模型不用把音色重新注册一遍（跟 profileCfg 一个口径）
+      model: cfg.platformModel?.[p.platform] || p.model || '',
+      voice: p.voice || '',
+      format: p.format || '',
+      // 设计 / 克隆音色靠这三样驱动，不带上就还是 preset 那条嗓子
+      mimoMode: p.mimoMode || 'preset',
+      designPrompt: p.designPrompt || '',
+      cloneFile: p.cloneFile || '',
+    }
+    store.patch({ tts: next })
+    log?.info('[voices] 设为默认音色', `${p.name}(${p.platform}:${p.voice})`, p.mimoMode || 'preset')
+    return { ok: true, tts: store.get().tts }
+  })
+
   // 用指定音色念一句固定的试听词
   ipcMain.handle('voices:test', async (_e, payload) => {
     const started = Date.now()
@@ -1821,7 +2350,7 @@ function registerIpc() {
 
   ipcMain.handle('overlay:start', async () => {
     ensureSession()
-    const port = Number(store.get().overlay?.port) || 12450
+    const port = overlayPort()
     try {
       const p = await ensureOverlay(port)
       store.patch({ overlay: { enabled: true, userStopped: false, port: p } })
@@ -1841,9 +2370,12 @@ function registerIpc() {
     return { ok: true }
   })
 
-  ipcMain.handle('overlay:open', async () => {
-    const port = Number(store.get().overlay?.port) || 12450
-    await shell.openExternal(`http://127.0.0.1:${port}/overlay`)
+  /** 在浏览器里打开叠加层。带 panel 就开「只有那一块」的地址，方便单独调 */
+  ipcMain.handle('overlay:open', async (_e, panel) => {
+    const port = overlayPort()
+    const p = String(panel || '').toLowerCase()
+    const suffix = p && p !== 'all' && OVERLAY_PANELS.indexOf(p) >= 0 ? `/${p}` : ''
+    await shell.openExternal(`http://127.0.0.1:${port}/overlay${suffix}`)
     return { ok: true }
   })
 
@@ -1869,7 +2401,7 @@ function registerIpc() {
 
   /** 用主进程自己去拉一次叠加层页面，能拿到 HTML 就说明本地服务是活的 */
   ipcMain.handle('overlay:selfcheck', async () => {
-    const port = Number(store.get().overlay?.port) || 12450
+    const port = overlayPort()
     const url = `http://127.0.0.1:${port}/overlay`
     const out = { url, running: Boolean(overlay), port, clients: overlay ? overlay.clientCount : 0 }
     if (!overlay) {
@@ -1980,8 +2512,24 @@ function registerIpc() {
   })
 }
 
+/**
+ * 叠加层该听哪个端口。
+ *
+ * 平时就是配置里那个（默认 12450）。**测试脚本必须把它换掉** ——
+ * `start()` 碰到端口被占是会往后顺延没错，但顺延救不了这个场景：
+ * 你正在直播、真实实例占着 12450，测试实例就会静静占掉 12451；
+ * 反过来更糟 —— 你自己没开、测试先占了 12450，之后真实实例被挤到 12451，
+ * 而 OBS 里那几个源写死的还是 12450，直播时就是一片透明、还不报错。
+ * 所以测试一律用 `CP_OVERLAY_PORT` 指一个别处的端口，别去碰 12450。
+ */
+function overlayPort() {
+  const forced = Number(process.env.CP_OVERLAY_PORT)
+  if (Number.isInteger(forced) && forced > 0) return forced
+  return Number(store.get().overlay?.port) || 12450
+}
+
 function sendOverlayStatus(error) {
-  const port = Number(store.get().overlay?.port) || 12450
+  const port = overlayPort()
   send('overlay:status', {
     enabled: Boolean(overlay),
     port,
@@ -2002,9 +2550,11 @@ async function ensureOverlay(port) {
     overlay.faceProvider = () => (faces ? [...faces.cache].map(([src, data]) => ({ src, data })) : [])
     overlay.musicProvider = () => musicSnapshot()
     overlay.lyricProvider = () => snapshotLyric()
+    // 音色选择面板：OBS 中途连上时补发当前那一条，不然要等下一个观众搜才出现
+    overlay.voicePickProvider = () => pickQueue.snapshot()
     overlay.onClientsChange = () => sendOverlayStatus()
   }
-  return overlay.start(Number(port) || 12450)
+  return overlay.start(Number(port) || overlayPort())
 }
 
 async function getLoginInfo() {
@@ -2101,7 +2651,7 @@ function bootstrap() {
   // 叠加层是纯本地服务，开销可以忽略，所以默认就拉起来 ——
   // 之前要手动点「启动」，忘了点就会以为「OBS 没效果」。除非用户主动停过。
   if (store.get().overlay?.userStopped !== true) {
-    ensureOverlay(Number(store.get().overlay?.port) || 12450)
+    ensureOverlay(overlayPort())
       .then((p) => {
         store.patch({ overlay: { enabled: true, port: p } })
         sendOverlayStatus()
@@ -2155,6 +2705,9 @@ function bootstrap() {
       replies,
       speech,
       currentProfileOf,
+      /** 音色选择面板的队列。断言「台上画的那一帧」和「主进程排的队」是不是同一件事 */
+      pickQueue,
+      pickSnapshot: () => pickQueue.snapshot(),
       /**
        * 假装本机登录着某个 B 站账号（= 主播自己扫的码）。
        * 「需要粉丝牌」门槛要靠 uid 认出主播，而登录态只有真扫码才有，

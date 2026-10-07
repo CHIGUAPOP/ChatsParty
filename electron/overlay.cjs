@@ -6,6 +6,24 @@ const { WebSocketServer } = require('ws')
 
 const OVERLAY_DIR = path.join(__dirname, '..', 'overlay')
 
+/**
+ * 可以单独打开的几块。OBS 里一块加一个「浏览器」源，各自摆位、各自缩放，
+ * 比挤在一个源里调方便得多（一个源只能整体缩放/位移）。
+ *
+ * 它们**共用同一份 overlay/index.html** —— 页面自己从 URL 认身份，
+ * 所以这里只多一条路由，不用多出四个 HTML 文件来各自维护一遍。
+ *  'all' 就是老行为：一个源里三块齐全 + 自动避让。
+ */
+const OVERLAY_PANELS = ['all', 'danmaku', 'lyric', 'music', 'voicepick']
+
+/** /overlay/<名字> 认成哪一块。认不得的一律回 'all'，别把 OBS 挂成一个空白页 */
+function panelFromPath(urlPath) {
+  const m = String(urlPath || '').match(/^\/overlay\/([A-Za-z]+)\/?$/)
+  if (!m) return ''
+  const v = m[1].toLowerCase()
+  return OVERLAY_PANELS.indexOf(v) >= 0 ? v : ''
+}
+
 const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
@@ -33,6 +51,8 @@ class OverlayServer {
     this.musicProvider = null
     // 歌词：OBS 中途连上时补发当前这一句，否则要等下一行才出现字
     this.lyricProvider = null
+    // 音色选择面板：中途连上时补发当前那一条，不然要等下一个观众搜才出现
+    this.voicePickProvider = null
     // 有客户端连上/断开时回调，主进程据此把「几个连接」推给界面
     this.onClientsChange = null
     this.requestedPort = port
@@ -67,6 +87,9 @@ class OverlayServer {
       const server = http.createServer((req, res) => {
         let urlPath = (req.url || '/').split('?')[0]
         if (urlPath === '/' || urlPath === '/overlay') urlPath = '/index.html'
+        // /overlay/lyric 这类「只开某一块」的地址也回 index.html ——
+        // 页面读 location.pathname 就知道该画哪一块，不用为每块单独留一份 HTML
+        else if (panelFromPath(urlPath)) urlPath = '/index.html'
         const filePath = path.join(OVERLAY_DIR, path.normalize(urlPath).replace(/^([/\\])+/, ''))
         if (!filePath.startsWith(OVERLAY_DIR)) {
           res.writeHead(403).end('forbidden')
@@ -80,12 +103,17 @@ class OverlayServer {
                 res.writeHead(404).end('not found')
                 return
               }
-              res.writeHead(200, { 'Content-Type': MIME_TYPES['.html'] }).end(d2)
+              res.writeHead(200, { 'Content-Type': MIME_TYPES['.html'], 'Cache-Control': 'no-store' }).end(d2)
             })
             return
           }
           const ext = path.extname(filePath)
-          res.writeHead(200, { 'Content-Type': MIME_TYPES[ext] || 'application/octet-stream' })
+          const type = MIME_TYPES[ext] || 'application/octet-stream'
+          // 页面本身不许缓存：不然程序升级之后，OBS 那只「刷新」按钮拿到的还是旧页面，
+          // 表现就是「改了代码却怎么都不生效」。图片/字体这类静态资源照旧让它缓存。
+          const headers = { 'Content-Type': type }
+          if (ext === '.html') headers['Cache-Control'] = 'no-store'
+          res.writeHead(200, headers)
           res.end(data)
         })
       })
@@ -114,6 +142,9 @@ class OverlayServer {
           // 没有词也要发这一帧 —— 「现在没有词」本身就是个事实，
           // 而且是这样一种事实：不发的话，重连上来的页面会一直挂着断开前那一首的最后一句话。
           if (lyric) ws.send(JSON.stringify({ type: 'lyric', payload: lyric }))
+          const pick = this.voicePickProvider ? this.voicePickProvider() : null
+          // 同上：「现在没人在选音色」也要说一声，否则重连上来的页面会一直挂着断开前那张面板
+          if (pick) ws.send(JSON.stringify({ type: 'voicepick', payload: pick }))
         } catch {
           /* noop */
         }
@@ -198,4 +229,4 @@ class OverlayServer {
   }
 }
 
-module.exports = { OverlayServer }
+module.exports = { OverlayServer, OVERLAY_PANELS, panelFromPath }

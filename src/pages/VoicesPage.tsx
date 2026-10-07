@@ -649,6 +649,24 @@ export default function VoicesPage({ config, patch, notify }: Props) {
     await api.voices.save({ id: v.id, enabled: !v.enabled })
   }
 
+  /**
+   * 把这条音色设成全局默认。
+   * 语音页那个「音色」下拉列的是平台自带的音色，自己注册进库的压根不在里面 ——
+   * 这里补上那条路，否则就是「明明有这个音色却换不过去」。
+   */
+  const useAsDefault = async (v: VoiceProfile) => {
+    try {
+      await api.voices.useAsDefault(v.id)
+      notify(`默认音色已换成「${v.name}」`)
+    } catch (e: any) {
+      notify(String(e?.message || e), true)
+    }
+  }
+
+  /** 这条音色是不是正在当全局默认（提供方 + 音色都对上才算） */
+  const isDefault = (v: VoiceProfile) =>
+    config.tts?.provider === v.platform && String(config.tts?.voice || '') === String(v.voice || '')
+
   const set = (k: string, val: unknown) => patch({ voicePolicy: { [k]: val } })
 
   const boundCount = Object.keys(bindings).length
@@ -870,6 +888,15 @@ export default function VoicesPage({ config, patch, notify }: Props) {
                   <Switch value={v.enabled !== false} onChange={() => toggleProfile(v)} />
                   <Button variant="text" small onClick={() => test({ profileId: v.id })} disabled={!!testingId} icon="play">
                     试听
+                  </Button>
+                  <Button
+                    variant="tonal"
+                    small
+                    onClick={() => useAsDefault(v)}
+                    disabled={isDefault(v)}
+                    icon="check"
+                  >
+                    {isDefault(v) ? '已是默认' : '设为默认'}
                   </Button>
                   <Button variant="text" small onClick={() => removeProfile(v.id)} icon="delete">
                     删除

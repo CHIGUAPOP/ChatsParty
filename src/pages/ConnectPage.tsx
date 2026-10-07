@@ -1,6 +1,7 @@
 import React from 'react'
 import { api, AppConfig, LoginInfo, Diagnostics } from '../lib/api'
 import { Button, Card, Row, SectionTitle, Switch, TextField, Icon, Avatar } from '../components/ui'
+import LaunchpadCard from '../components/LaunchpadCard'
 
 interface Props {
   config: AppConfig
@@ -110,6 +111,9 @@ export default function ConnectPage({ config, patch, notify, loginInfo, setLogin
 
   return (
     <div className="section">
+      <SectionTitle>开播准备</SectionTitle>
+      <LaunchpadCard config={config} patch={patch} notify={notify} roomId={String(roomId)} />
+
       <SectionTitle>直播间</SectionTitle>
       <Card
         title="连接直播间"

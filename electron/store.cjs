@@ -43,6 +43,12 @@ const DEFAULTS = {
     perUserCooldownMs: 8000,
     mergeDuplicate: true,
     readUsername: true,
+    /**
+     * B 站没改过昵称的账号是 `bili_3706983133743519` 这种，念出来是一长串数字。
+     * 打开后这类名字统一按 defaultUserName 念（纯数字的名字同理）。
+     */
+    renameDefaultUser: true,
+    defaultUserName: '一个b站用户',
     readGift: true,
     readGuard: true,
     readSuperchat: true,
@@ -86,6 +92,14 @@ const DEFAULTS = {
     showLyric: true,
     lyricPos: 'bc',
     lyricLines: 2,
+    /**
+     * 音色选择面板：观众发「#音色列表 关键词」时，把候选摆到直播画面上供他挑。
+     * 一次只显示一条 —— 每条存活 voicePickTtlMs，同时来了多条就排队依次放。
+     */
+    showVoicePick: true,
+    voicePickPos: 'tr',
+    voicePickHits: 4,
+    voicePickTtlMs: 8000,
     // 自动避让：画面窄（比如把 OBS 浏览器源拖成一条竖带）时，
     // 把弹幕/点歌/歌词分到互不相交的几段里，不再压成一坨
     autoLayout: true,
@@ -181,6 +195,26 @@ const DEFAULTS = {
     replyInChat: true,
     // 填自己的网易云 Cookie 可以解锁会员音质和灰色歌曲。留空用匿名身份，大部分歌也能播
     cookie: '',
+  },
+  /**
+   * 一键准备开播：把 OBS / VTube Studio / 直播姬这些直播用的程序一次拉起来。
+   * 扫描与命令构造都在 electron/launchpad.cjs（纯逻辑，不依赖 electron）。
+   */
+  launchpad: {
+    // 要拉起的程序 id，**顺序就是启动顺序**（留空 = 还没选过）。
+    // 具体有哪些 id 由现扫决定，不写死在这里
+    order: [],
+    // Steam 库里的程序默认走官方 steam://rungameid/<appid>；
+    // 关掉就直启 exe（VTS / VBridger 会自动带上官方的 -nosteam）
+    useSteam: true,
+    // 两个程序之间隔多久。OBS 起来要读一堆插件，Steam 没开时第一个还得先把 Steam 唤起来
+    gapMs: 1500,
+    // 程序拉起来之后自动连上直播间
+    autoConnect: true,
+    // 已经开着的就别再拉一遍（OBS 被重复启动会弹「已在运行」的警告框）
+    skipRunning: true,
+    // 自动扫不到的程序在这里手补（比如装在不常见位置的）
+    custom: [],
   },
   window: { width: 1180, height: 780 },
 }

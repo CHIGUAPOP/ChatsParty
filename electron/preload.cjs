@@ -54,6 +54,7 @@ const api = {
     remove: (id) => ipcRenderer.invoke('voices:remove', id),
     bind: (uid, profileId) => ipcRenderer.invoke('voices:bind', uid, profileId),
     unbind: (uid) => ipcRenderer.invoke('voices:unbind', uid),
+    useAsDefault: (id) => ipcRenderer.invoke('voices:useAsDefault', id),
     test: (payload) => ipcRenderer.invoke('voices:test', payload),
     onChanged: (cb) => on('voices:changed', cb),
   },
@@ -85,10 +86,17 @@ const api = {
   overlay: {
     start: () => ipcRenderer.invoke('overlay:start'),
     stop: () => ipcRenderer.invoke('overlay:stop'),
-    open: () => ipcRenderer.invoke('overlay:open'),
+    open: (panel) => ipcRenderer.invoke('overlay:open', panel),
     test: () => ipcRenderer.invoke('overlay:test'),
     selfcheck: () => ipcRenderer.invoke('overlay:selfcheck'),
     onStatus: (cb) => on('overlay:status', cb),
+  },
+  // 一键准备开播：扫本机的直播软件、按顺序拉起来、可选连上直播间
+  launchpad: {
+    scan: (opts) => ipcRenderer.invoke('launchpad:scan', opts),
+    run: (payload) => ipcRenderer.invoke('launchpad:run', payload),
+    pickExe: () => ipcRenderer.invoke('launchpad:pickExe'),
+    onProgress: (cb) => on('launchpad:progress', cb),
   },
   app: {
     exportLog: () => ipcRenderer.invoke('app:exportLog'),

@@ -38,6 +38,10 @@ export interface AppConfig {
     format: string
     speed: number
     pitch: string
+    /** 全局默认音色也可以是设计 / 克隆出来的，这时靠下面三样驱动，不看 voice */
+    mimoMode?: 'preset' | 'design' | 'clone'
+    designPrompt?: string
+    cloneFile?: string
     stylePrompt: string
     enabled: boolean
     volume: number
@@ -46,6 +50,9 @@ export interface AppConfig {
     perUserCooldownMs: number
     mergeDuplicate: boolean
     readUsername: boolean
+    /** B站默认昵称（bili_3706983133743519 这类）不念数字，改念 defaultUserName */
+    renameDefaultUser: boolean
+    defaultUserName: string
     readGift: boolean
     readGuard: boolean
     readSuperchat: boolean
@@ -80,8 +87,31 @@ export interface AppConfig {
     lyricLines?: number
     /** 自动避让：画面一窄就把弹幕/点歌/歌词分到互不相交的几段里（默认开） */
     autoLayout?: boolean
+    /** 音色选择面板：观众搜音色时把候选摆到直播画面上 */
+    showVoicePick?: boolean
+    /** 面板位置：tl / tr / bl / br 四个角（默认 tr） */
+    voicePickPos?: string
+    /** 面板上最多列几条候选（1–6） */
+    voicePickHits?: number
+    /** 每条候选在画面上存活多久（ms）。同时来了多条就按这个时长排队依次放 */
+    voicePickTtlMs?: number
     fontFamily: string
     accent: string
+  }
+  /** 一键准备开播：按顺序拉起本机的直播软件 */
+  launchpad?: {
+    /** 要拉起的程序 id，顺序就是启动顺序 */
+    order: string[]
+    /** Steam 库里的程序走 steam://rungameid/<appid>（关掉则直启 exe） */
+    useSteam: boolean
+    /** 两个程序之间隔多久 */
+    gapMs: number
+    /** 拉起来之后自动连上直播间 */
+    autoConnect: boolean
+    /** 已经在跑的就跳过，不再拉一遍 */
+    skipRunning: boolean
+    /** 扫描不到的手补项 */
+    custom?: { id?: string; name?: string; exe: string; hint?: string }[]
   }
   danmaku: {
     sendColor: number
@@ -324,6 +354,8 @@ interface Bridge {
     remove: (id: string) => Promise<{ ok: boolean }>
     bind: (uid: number | string, profileId: string | null) => Promise<{ ok: boolean }>
     unbind: (uid: number | string) => Promise<{ ok: boolean }>
+    /** 把库里的音色设成全局默认（所有人共用的那条嗓子） */
+    useAsDefault: (id: string) => Promise<{ ok: boolean; tts: AppConfig['tts'] }>
     test: (payload: { profileId?: string; source?: string; voice?: any }) => Promise<{ latency: number }>
     onChanged: (cb: (p: { library: VoiceProfile[]; bindings: Record<string, string> }) => void) => () => void
   }
@@ -393,7 +425,8 @@ interface Bridge {
   overlay: {
     start: () => Promise<{ ok: boolean; port?: number; message?: string }>
     stop: () => Promise<{ ok: boolean }>
-    open: () => Promise<{ ok: boolean }>
+    /** 不带参数 = 打开「全部」那个地址；带面板名 = 只开那一块（/overlay/lyric 这种） */
+    open: (panel?: string) => Promise<{ ok: boolean }>
     test: () => Promise<{ ok: boolean; clients: number }>
     selfcheck: () => Promise<{
       ok: boolean
@@ -412,6 +445,81 @@ interface Bridge {
     info: () => Promise<AppInfo>
     openExternal: (url: string) => Promise<{ ok: boolean; message?: string }>
   }
+  launchpad: {
+    /** 现扫本机的直播相关程序（只读，不启动任何东西） */
+    scan: (opts?: { force?: boolean }) => Promise<LaunchpadScan>
+    /** 一键拉起，并按配置连上直播间 */
+    run: (payload?: {
+      order?: string[]
+      useSteam?: boolean
+      skipRunning?: boolean
+      gapMs?: number
+      connect?: boolean
+      roomId?: string
+      rescan?: boolean
+    }) => Promise<LaunchpadRunResult>
+    /** 手补一个扫描不到的程序 */
+    pickExe: () => Promise<{ ok: boolean; exe?: string; name?: string }>
+    onProgress: (cb: (p: LaunchpadProgress) => void) => () => void
+  }
+}
+
+/** 「一键准备开播」扫到的一个程序 */
+export interface LaunchpadApp {
+  id: string
+  name: string
+  hint: string
+  /** capture=推流/录制，avatar=虚拟形象，tracking=面捕，audio=音频设备，custom=手补 */
+  kind: string
+  origin: 'steam' | 'external' | 'custom'
+  appid: string
+  exe: string
+  /** 有 appid 但没扫到 exe：装是装了，得手动指定 */
+  exeMissing?: boolean
+  /** 直启时要带的参数（比如 VTS 官方的 -nosteam） */
+  nosteamArg?: string
+  installdir?: string
+  library?: string
+  version?: string
+  role?: string
+  /**
+   * 它要求管理员权限（manifest 里写着 requireAdministrator，直播姬就是这样）。
+   * 启动时必须由系统弹一次 UAC，用户点「是」才起得来 —— 没有别的办法。
+   */
+  elevate?: boolean
+  /** 现在是不是已经在跑。null = 查不到（当作未知，不影响启动） */
+  running?: boolean | null
+}
+
+export interface LaunchpadScan {
+  ok: boolean
+  message?: string
+  steamRoot?: string
+  steamExe?: string
+  libraries?: string[]
+  errors?: string[]
+  apps?: LaunchpadApp[]
+}
+
+export interface LaunchpadStep {
+  id: string
+  name: string
+  status: 'pending' | 'running' | 'started' | 'skipped' | 'failed'
+  message: string
+  mode?: string
+}
+
+export interface LaunchpadProgress {
+  steps: LaunchpadStep[]
+  index: number
+  connecting?: boolean
+}
+
+export interface LaunchpadRunResult {
+  ok: boolean
+  message?: string
+  steps: LaunchpadStep[]
+  connect?: { ok: boolean; realRoomId?: number; title?: string; message?: string } | null
 }
 
 /** 「关于」页展示的版本与运行时信息。version 由主进程的 app.getVersion() 给 */

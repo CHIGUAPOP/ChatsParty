@@ -53,6 +53,10 @@ app.commandLine.appendSwitch('use-gl', 'swiftshader')
 // 直接加载构建产物，别去连可能没起来的 vite dev server（连不上主窗口就是白的）
 process.env.CP_PROD = '1'
 process.env.CP_E2E = '1'
+// 叠加层端口也要错开：12450 上可能正跑着用户在直播用的那一份真实实例，
+// 测试实例去占了它，之后真实实例会被挤到 12451，而 OBS 里写的还是 12450。
+// 认这个变量的是 main.cjs 的 overlayPort()。
+process.env.CP_OVERLAY_PORT = String(20000 + Math.floor(Math.random() * 20000))
 
 let pass = 0
 let fail = 0
@@ -122,6 +126,26 @@ async function main() {
     speech.setBusy(false)
     speech.queue.length = 0
     return items.filter((x) => x.meta && x.meta.type === 'voice-preview')
+  }
+
+  console.log('\n[0] 环境自检：测试实例没去抢直播间的端口')
+  {
+    // main.cjs 启动时会把叠加层真的拉起来。要是用了默认的 12450，而主播正开着程序
+    // 直播用同一个端口，两边的 OBS 源就会一个连到真实实例、一个连到测试实例 ——
+    // 表现出来是「直播画面里少了一半弹幕」，而且完全不报错。
+    // 所以脚本在启动主进程之前就把端口换掉了（见文件头的 CP_OVERLAY_PORT）。
+    let ov = store.get().overlay || {}
+    for (let i = 0; i < 60; i++) {
+      ov = store.get().overlay || {}
+      if (Number(ov.port) > 0 && Number(ov.port) !== 12450) break
+      await wait(100)
+    }
+    ok('测试实例没监听 12450', Number(ov.port) !== 12450, { 实际监听: ov.port, 脚本指定: process.env.CP_OVERLAY_PORT })
+    ok(
+      '用的是脚本指定的那个端口',
+      Number(ov.port) === Number(process.env.CP_OVERLAY_PORT),
+      { 实际监听: ov.port, 脚本指定: process.env.CP_OVERLAY_PORT },
+    )
   }
 
   console.log('\n[1] 观众自己换音色，随后立刻反悔（默认冷却 5 秒）')

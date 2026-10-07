@@ -349,13 +349,23 @@ function checkOverlayLayout() {
   // 居中的歌词靠 translateX(-50%) 归位，offsetLeft 还没算这一下
   ok('居中歌词的占位折了位移', /centered \? width \/ 2 : 0/.test(overlayHtml))
 
-  // 只有同侧且水平上真的挨着才叠 —— 宽画面下 tl 的点歌 + bc 的歌词互不相干，不该被挪
+  // 只有同侧且水平上真的挨着才叠 —— 宽画面下 tl 的点歌 + bc 的歌词互不相干，不该被挪。
+  // 现在按「竖带」分组：同一侧凡是被前一块的水平范围罩住的都收进来一起摞
   ok(
     '同侧又真的打架才叠开',
-    /musicTop === lyricTop && overlapsX\(m, l\)/.test(overlayHtml) && /function overlapsX/.test(overlayHtml),
+    /function touchesX\(left, right\)/.test(overlayHtml) &&
+      /touchesX\(side\[i\]\.box\.left, right\)/.test(overlayHtml),
   )
-  ok('叠放时歌词贴边、点歌让到内侧', /lyricEl\.style\.bottom = pad/.test(overlayHtml) && /musicEl\.style\.bottom = pad \+ l\.height \+ gap/.test(overlayHtml))
-  ok('上半区镜像处理', /lyricEl\.style\.top = pad \+ m\.height \+ gap/.test(overlayHtml))
+  // 谁贴边是排出来的：歌词在最外（像字幕），音色面板次之，点歌让到最内
+  ok('叠放次序是排出来的', /rank: 0 \}\)/.test(overlayHtml) && /rank: 1 \}\)/.test(overlayHtml) && /rank: 2 \}\)/.test(overlayHtml))
+  ok('块的位置从贴边处往里摞', /let cursor = pad/.test(overlayHtml) && /cursor \+= b\.box\.height \+ gap/.test(overlayHtml))
+  ok('歌词在上半区时按上边贴', /isTopSide\(lpos, \['tc', 'tl', 'tr'\]\)/.test(overlayHtml))
+  // tc/bc 是靠 translateX(-50%) 归位的，tl/tr/bl/br 不是 —— 一律当成居中量会算错占位
+  ok(
+    '只有居中的歌词才折位移',
+    /boxOf\(lyricEl, lpos === 'tc' \|\| lpos === 'bc'\)/.test(overlayHtml),
+    'tl 的歌词没有 translateX，折了位移量出来的左边就偏了半宽',
+  )
 
   ok('弹幕活动区按预留内缩', /app\.style\.top = topBand \+ gap/.test(overlayHtml) && /app\.style\.bottom = botBand \+ gap/.test(overlayHtml))
   // 内缩之外还有一道保险：塞不下就从离角落最远的那条开始删。
@@ -376,7 +386,12 @@ function checkOverlayLayout() {
   ok('面板尺寸变化也会重排', /new ResizeObserver\(scheduleLayout\)/.test(overlayHtml))
 
   // 窄条上原来那套按 1080p 定的宽度会顶出画面
-  ok('窄画面放开各块宽度', /html\.is-narrow \.cp-item/.test(overlayHtml) && /html\.is-narrow \.cp-lyric/.test(overlayHtml))
+  ok(
+    '窄画面放开各块宽度',
+    /html\.is-narrow \.cp-item/.test(overlayHtml) &&
+      /html\.is-narrow \.cp-lyric/.test(overlayHtml) &&
+      /html\.is-narrow \.cp-pick/.test(overlayHtml),
+  )
   ok('窄画面给点歌面板留了高度上限', /html\.is-narrow \.cp-music[\s\S]*?max-height: 46%/.test(overlayHtml))
   ok('窄画面给歌词也留了高度上限', /html\.is-narrow \.cp-lyric[\s\S]*?max-height: 28%/.test(overlayHtml))
   ok('单个气泡不会高过弹幕区', /html\.is-narrow \.cp-item[\s\S]*?max-height: 100%/.test(overlayHtml))
@@ -743,6 +758,753 @@ async function testVoices() {
 
   console.log('\n[22] TTS 合成缓存')
   await testTtsCache()
+
+  console.log('\n[28] 音色选择面板队列')
+  testVoicePickQueue()
+
+  console.log('\n[29] 音色搜不到 / 换不了的那几条路')
+  testVoicePickWiring()
+
+  console.log('\n[30] 一键准备开播')
+  testLaunchpad()
+
+  console.log('\n[31] 叠加层拆成多个源')
+  testOverlayPanels()
+
+  console.log('\n[32] 测试别去抢直播间的端口')
+  testE2eIsolation()
+}
+
+/**
+ * 叠加层拆成多个源：OBS 里一块加一个「浏览器」源，各自摆位、各自缩放。
+ *
+ * 这里守的核心是**四处名字必须一致**：electron/overlay.cjs 的路由表、
+ * overlay/index.html 认的身份、设置页列出的那几行、以及主进程拼地址时的那张表。
+ * 任何一处写错，界面给出的都会是一个**纯透明页，而且不报任何错** ——
+ * 主播只会看到一片空白，然后以为整个叠加层坏了。
+ */
+function testOverlayPanels() {
+  const root = path.join(__dirname, '..')
+  const read = (p) => fs.readFileSync(path.join(root, p), 'utf8')
+  const { OVERLAY_PANELS, panelFromPath } = require('../electron/overlay.cjs')
+  const WANT = ['all', 'danmaku', 'lyric', 'music', 'voicepick']
+
+  // ---- 路由表 ----
+  ok('路由表里有「全部」这一项', OVERLAY_PANELS[0] === 'all', OVERLAY_PANELS)
+  ok('歌词/弹幕/点歌/音色都能单独开', WANT.every((p) => OVERLAY_PANELS.includes(p)), OVERLAY_PANELS)
+  ok('就这五个，没有多余的名字', OVERLAY_PANELS.length === WANT.length, OVERLAY_PANELS)
+
+  // ---- 地址 -> 认成哪一块 ----
+  ok('/overlay/lyric 认成歌词', panelFromPath('/overlay/lyric') === 'lyric')
+  ok('结尾多个斜杠也认', panelFromPath('/overlay/music/') === 'music')
+  ok('大小写不敏感（主播手敲的）', panelFromPath('/overlay/LYRIC') === 'lyric')
+  // 认不得的必须回落到「全部」：宁可多画一块，也不能给一个纯透明页
+  ok('乱写的名字不认', panelFromPath('/overlay/nope') === '' && panelFromPath('/overlay/foo/bar') === '')
+  ok('/overlay 自己不算面板（那是「全部」）', panelFromPath('/overlay') === '')
+  ok('别的路径不掺和', panelFromPath('/index.html') === '' && panelFromPath('/ws') === '' && panelFromPath('') === '')
+
+  // ---- 服务端：同一份页面，多个地址 ----
+  const overlayCjs = read('electron/overlay.cjs')
+  ok(
+    '/overlay/<名字> 回的还是那份 index.html（不为每块单独存一个文件）',
+    /else if \(panelFromPath\(urlPath\)\) urlPath = '\/index.html'/.test(overlayCjs),
+  )
+  ok('老的 /overlay 原样保留', /urlPath === '\/overlay'\) urlPath = '\/index.html'/.test(overlayCjs))
+  // 不设 no-store 的话，升级程序后 OBS 点「刷新」拿到的还是旧页面
+  ok('页面不许被缓存', /'Cache-Control'\] = 'no-store'/.test(overlayCjs))
+
+  // ---- 页面自己认身份 ----
+  const html = read('overlay/index.html')
+  const raw = (html.match(/const PANELS = \[([^\]]+)\]/) || [])[1] || ''
+  const htmlPanels = raw.split(',').map((s) => s.trim().replace(/['"]/g, '')).filter(Boolean)
+  ok('页面认的名字与服务端逐字一致', JSON.stringify(htmlPanels) === JSON.stringify(OVERLAY_PANELS), htmlPanels)
+  ok('认不得的一律按「全部」走', /PANELS\.indexOf\(v\) >= 0 \? v : 'all'/.test(html))
+  ok('?panel=lyric 这种写法也认（方便手敲）', /new URLSearchParams\(location\.search\)\.get\('panel'\)/.test(html))
+  ok('单面板时给 <html> 打标记（样式要用）', /document\.documentElement\.classList\.add\('is-panel'\)/.test(html))
+
+  // ---- 每块只画自己那一份 ----
+  ok('弹幕只在弹幕源里画', /function addItem\(ev\) \{[\s\S]{0,220}?if \(!shows\('danmaku'\)\) return/.test(html))
+  ok('点歌面板只在点歌源里画', /if \(!shows\('music'\)\)/.test(html))
+  ok('歌词只在歌词源里画', /if \(!shows\('lyric'\)\)/.test(html))
+  ok('音色面板只在音色源里画', /if \(!shows\('voicepick'\)\)/.test(html))
+  // 少画的那几块要顺手把 is-show 摘掉，不然切地址时会留着上一轮的内容
+  ok('不画的那块会收起 is-show', (html.match(/classList\.remove\('is-show'\)/g) || []).length >= 3)
+
+  const layoutBody = (html.match(/function layout\(\) \{([\s\S]*?)\n      \}/) || [])[1] || ''
+  ok('找得到 layout 函数体', layoutBody.length > 0)
+  // 单块源的画布上就它一个，没有「别压到谁身上」这回事；
+  // 也不该把 #app 缩进去 —— 那本来是给同侧别的块腾地方的
+  ok('单面板不做自动避让', /if \(ONLY\) return/.test(layoutBody) && /autoLayout === false/.test(layoutBody))
+  ok('避让那一段在 ONLY 之后（不会先缩了再返回）', layoutBody.indexOf('if (ONLY) return') < layoutBody.indexOf('if (cfg.autoLayout === false) return'))
+
+  // 四个源各弹一句「已连接」会叠在同一处，看起来像出了故障
+  ok('单面板只保留出错状态提示', /if \(ONLY && !bad\) \{/.test(html))
+
+  // ---- 单面板的尺寸规则 ----
+  ok(
+    '放开三分画布时定的百分比上限',
+    /html\.is-panel \.cp-lyric \{/.test(html) && /html\.is-panel \.cp-music,\s*\n\s*html\.is-panel \.cp-pick \{/.test(html),
+  )
+  ok('歌词源里字幕占满整个源', /html\.is-panel \.cp-lyric \{[\s\S]{0,120}?width: 100%;/.test(html))
+  // 两边选择器权重一样（html.is-panel .cp-lyric 对 html.is-narrow .cp-lyric），
+  // 只能靠顺序取胜 —— 顺序一颠倒，窄源上就会退回 28%/42%/46% 那套
+  ok('is-panel 排在 is-narrow 之后', html.indexOf('html.is-narrow .cp-pick') < html.lastIndexOf('html.is-panel .cp-lyric'))
+
+  // ---- 设置页给出的地址 ----
+  const page = read('src/pages/OverlayPage.tsx')
+  const ids = Array.from(page.matchAll(/\{ id: '([a-z]+)', name:/g)).map((x) => x[1])
+  ok('设置页列出的四块与服务端一致', JSON.stringify(ids) === JSON.stringify(WANT.filter((p) => p !== 'all')), ids)
+  ok('地址按面板名拼出来', /\$\{origin\}\/overlay\/\$\{id\}/.test(page))
+  ok('那一行还能单独打开', /api\.overlay\.open\(p\.id\)/.test(page))
+  ok('旧的「全部」地址仍然给出来', /id === 'all' \? `\$\{origin\}\/overlay`/.test(page))
+  ok('复制按钮认得出复制的是哪一条', /copied === p\.id \? '已复制'/.test(page) && /copied === 'all' \? '已复制'/.test(page))
+  ok('地址样式在样式表里', /\.panel-src__row \{/.test(read('src/styles.css')))
+
+  // ---- 主进程与预加载把面板名透下来 ----
+  ok('预加载把面板名透过去', /open: \(panel\) => ipcRenderer\.invoke\('overlay:open', panel\)/.test(read('electron/preload.cjs')))
+  ok('渲染层接口有类型', /open: \(panel\?: string\)/.test(read('src/lib/api.ts')))
+  ok(
+    '主进程按面板名拼地址，认不得的退回「全部」',
+    /OVERLAY_PANELS\.indexOf\(p\) >= 0 \? `\/\$\{p\}` : ''/.test(read('electron/main.cjs')),
+  )
+}
+
+/**
+ * 测试自己的隔离：跑测试时别去占主播正在直播用的那个端口。
+ *
+ * 叠加层端口被占时 `start()` 会往后顺延，看着像是「撞不上」，其实会撞出两种后果：
+ * 用户没开程序时测试先占了 12450，之后真实实例被挤到 12451，
+ * 而 OBS 里那几个浏览器源写死的还是 12450 —— 直播时一片透明，而且不报任何错。
+ * 所以凡是**会起主进程**的 e2e，都必须先把端口换到别处去。
+ */
+function testE2eIsolation() {
+  const root = path.join(__dirname, '..')
+  const read = (p) => fs.readFileSync(path.join(root, p), 'utf8')
+  const main = read('electron/main.cjs')
+
+  // ---- 主进程：端口只有一条来路 ----
+  const at = main.indexOf('function overlayPort()')
+  ok('端口读法收在一处', at > 0)
+  const body = at > 0 ? main.slice(at, at + 800) : ''
+  ok('它优先认 CP_OVERLAY_PORT', /process\.env\.CP_OVERLAY_PORT/.test(body))
+  ok('默认还是配置里那个端口', /store\.get\(\)\.overlay\?\.port/.test(body))
+
+  // 去掉注释后只该剩 overlayPort 里那一处 —— 留一处就够让某条路径绕开隔离
+  const code = main.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+  const bare = code.split('\n').filter((l) => l.includes('12450'))
+  ok('别处不再写死 12450', bare.length === 1, bare)
+
+  ok('产品自己的默认端口没变（还是 12450）', /port: 12450/.test(read('electron/store.cjs')))
+
+  // ---- 起主进程的 e2e 一律先换端口 ----
+  const files = fs.readdirSync(path.join(root, 'scripts')).filter((f) => /^e2e-.*\.cjs$/.test(f))
+  ok('找得到 e2e 脚本', files.length >= 5, files)
+  for (const f of files) {
+    const src = read(`scripts/${f}`)
+    if (!src.includes("'main.cjs'")) continue // 不起主进程的那些（比如 panels）不受影响
+    ok(`${f} 起主进程前换掉了叠加层端口`, /process\.env\.CP_OVERLAY_PORT\s*=/.test(src))
+    // 只看代码：注释里提到 12450 本来就是应该的，那是解释「为什么不能碰它」。
+    // 拿它做比较（`!== 12450`）也允许 —— 要拦的是**把它当默认值写死**那种写法，
+    // 那才是绕开隔离、又悄无声息的那种。
+    const noComment = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+    const assigns = /(^|[^=!<>+\-*/])\s*=\s*12450\b/.test(noComment)
+    const fallback = /\|\|\s*12450\b/.test(noComment)
+    ok(`${f} 没把 12450 写死成默认端口`, !assigns && !fallback, { assigns, fallback })
+  }
+}
+
+/**
+ * 一键准备开播：扫描本机的直播软件、算怎么把它们拉起来。
+ *
+ * 这里守的是**解析与命令构造**（纯逻辑，是这套东西最容易悄悄坏掉的地方）：
+ *  - Steam 的 libraryfolders.vdf 有两代格式，都得认；
+ *  - appmanifest 里的 appid/name/installdir 决定程序装在哪，不能按目录硬猜；
+ *  - 直播姬的版本目录要按**数字**比版本号（字符串比会把 7.9.1 判成比 7.64.0 新）；
+ *  - OBS 官方要求拉起时工作目录 = exe 所在目录，拼错了起来是空壳。
+ * 真正「启动别人程序」那步一律不在测试里做 —— 那会把用户正在用的 OBS 再拉一份起来。
+ */
+function testLaunchpad() {
+  const LP = require('../electron/launchpad.cjs')
+
+  /* --- libraryfolders.vdf 的两代格式 --- */
+  {
+    const modern = `"libraryfolders"
+{
+	"0"
+	{
+		"path"		"C:\\\\Program Files (x86)\\\\Steam"
+		"label"		""
+		"apps"
+		{
+			"228980"		"10953481152198204146"
+		}
+	}
+	"1"
+	{
+		"path"		"D:\\\\SteamLibrary"
+	}
+}`
+    const vdf = LP.parseVdf(modern)
+    ok('能读出 libraryfolders 段', Boolean(vdf.libraryfolders))
+    const paths = LP.libPathsFrom(vdf)
+    ok('新版格式的两个库都拿到了', paths.length === 2, paths)
+    ok('库路径的反斜杠被还原了', paths[0] === 'C:\\Program Files (x86)\\Steam', paths[0])
+    ok('嵌套的 apps 不会被当成库路径', !paths.includes('10953481152198204146'), paths)
+
+    // 老版格式：键是数字、值是路径，另外夹着两个非数字键的统计字段
+    const legacy = `"LibraryFolders"
+{
+	"TimeNextStatsReport"	"1234567890"
+	"ContentStatsID"		"-123456789"
+	"1"		"D:\\\\mygames"
+}`
+    const old = LP.libPathsFrom(LP.parseVdf(legacy))
+    ok('旧版格式也能拿到库路径', old.length === 1 && old[0] === 'D:\\mygames', old)
+
+    // 脏数据不该把整份解析带崩
+    ok('空文本不炸', Object.keys(LP.parseVdf('')).length === 0)
+    ok('只有半边引号也不炸', typeof LP.parseVdf('"a" "b').a === 'string')
+    ok('注释会被跳过', LP.parseVdf('// 注释\n"a" "b"').a === 'b')
+    ok('未知段不误伤', LP.libPathsFrom(LP.parseVdf('"x" { "y" "z" }')).length === 0)
+  }
+
+  /* --- appmanifest_*.acf --- */
+  {
+    const acf = `"AppState"
+{
+	"appid"		"1905180"
+	"Universe"		"1"
+	"name"		"OBS Studio"
+	"StateFlags"		"4"
+	"installdir"		"OBS Studio"
+	"SizeOnDisk"		"123456789"
+	"LastUpdated"		"1700000000"
+	"UserConfig"
+	{
+		"language"		"schinese"
+	}
+}`
+    const a = LP.parseAppManifest(acf, '0')
+    ok('读出 appid', a.appid === '1905180', a.appid)
+    ok('读出 name', a.name === 'OBS Studio', a.name)
+    ok('读出 installdir', a.installdir === 'OBS Studio', a.installdir)
+    ok('StateFlags = 4 表示装完了', a.stateFlags === 4, a.stateFlags)
+    ok('文件名兜底也能用', LP.parseAppManifest('"AppState" { }', '999').appid === '999')
+  }
+
+  /* --- 版本号必须按数字比 --- */
+  {
+    ok('版本号按数字分段', JSON.stringify(LP.versionKey('7.64.0.10819')) === JSON.stringify([7, 64, 0, 10819]))
+    ok('7.64 比 7.9 新（字符串比会判反）', LP.cmpVersion('7.64.0', '7.9.1') > 0, LP.cmpVersion('7.64.0', '7.9.1'))
+    ok('段数不同也能比', LP.cmpVersion('7.64', '7.64.0.1') < 0)
+    ok('一样就是 0', LP.cmpVersion('1.2.3', '1.2.3') === 0)
+    const picked = LP.pickLatestVersion(['7.9.1', '7.64.0.10819', '7.30.0.9821', 'livehime.exe'])
+    ok('挑出真正最新的那一版', picked === '7.64.0.10819', picked)
+    ok('空清单返回空串', LP.pickLatestVersion([]) === '')
+  }
+
+  /* --- 命令怎么拼 --- */
+  {
+    const obs = { id: 'obs', name: 'OBS Studio', appid: '1905180', exe: 'C:\\S\\common\\OBS Studio\\bin\\64bit\\obs64.exe' }
+    const steam = LP.planLaunch(obs, { useSteam: true })
+    ok('默认走官方 Steam 协议', steam.mode === 'steam' && steam.url === 'steam://rungameid/1905180', steam)
+    ok('Steam 模式下不直接碰 exe', !steam.exe, steam)
+
+    const direct = LP.planLaunch(obs, { useSteam: false })
+    ok('关掉 Steam 就直启 exe', direct.mode === 'exe' && direct.exe === obs.exe, direct)
+    // OBS 官方文档写明了这一条：工作目录必须是 obs64.exe 所在目录
+    ok('工作目录设成 exe 所在目录（OBS 官方要求）', direct.cwd === path.dirname(obs.exe), direct.cwd)
+    ok('没有 appid 时不带 -nosteam', JSON.stringify(direct.args) === '[]', direct.args)
+
+    // VTS / VBridger 官方自带的 start_without_steam.bat 就是这么写的
+    const vts = { id: 'vts', appid: '1325860', exe: 'C:\\S\\VTube Studio\\VTube Studio.exe', nosteamArg: '-nosteam' }
+    const vtsGo = LP.planLaunch(vts, { useSteam: false })
+    ok('绕过 Steam 时带上官方的 -nosteam', vtsGo.args.includes('-nosteam'), vtsGo.args)
+    // 走 Steam 的话就什么都别加，交给 Steam 自己管
+    ok('走 Steam 时不加 -nosteam', !(LP.planLaunch(vts, { useSteam: true }).args || []).length)
+
+    const live = { id: 'livehime', name: '哔哩哔哩直播姬', appid: '', exe: 'C:\\Program Files\\bililive\\livehime\\livehime.exe' }
+    ok('没 appid 的独立程序只能直启', LP.planLaunch(live, { useSteam: true }).mode === 'exe')
+    ok('没 appid 时不硬套 Steam', !LP.planLaunch(live, { useSteam: true }).url)
+
+    // 装了但扫不到 exe：要说清楚，别给一个空命令
+    const broken = LP.planLaunch({ id: 'x', appid: '1', exe: '' }, { useSteam: false })
+    ok('没有可执行文件时明确报出来', broken.mode === 'none' && broken.label.includes('没找到'), broken)
+    ok('只装没 exe 但有 appid 时给出线索', broken.note.includes('appid'), broken.note)
+    // 走 Steam 就不需要 exe —— Steam 认的是 appid，不是我们猜的路径。
+    // 所以「装了但没扫到 exe」在默认设置下**依然能起来**，报失败才是错的
+    ok(
+      '只有 appid、没扫到 exe 时走 Steam 依然能起来',
+      LP.planLaunch({ id: 'x', appid: '1', exe: '' }, { useSteam: true }).mode === 'steam',
+    )
+    ok(
+      '而且拼的是那个 appid 的官方协议',
+      LP.planLaunch({ id: 'x', appid: '1', exe: '' }, { useSteam: true }).url === 'steam://rungameid/1',
+    )
+  }
+
+  /* --- 需要管理员权限的程序（哔哩哔哩直播姬） --- */
+  {
+    // 实测：livehime.exe 的内嵌 manifest 写着 requireAdministrator。
+    // 普通权限的进程 spawn 它，Windows 直接返回 740 —— 只能弹 UAC，没有别的路
+    const live = {
+      id: 'livehime',
+      name: '哔哩哔哩直播姬',
+      appid: '',
+      exe: 'C:\\Program Files\\bililive\\livehime\\livehime.exe',
+      elevate: true,
+    }
+
+    ok('要提权的程序直启时会被标出来', LP.planLaunch(live, { useSteam: false }).elevate === true)
+    ok('普通的程序不会被标', !LP.planLaunch({ id: 'o', exe: 'C:\\a\\o.exe' }, { useSteam: false }).elevate)
+
+    ok('needsElevation：要提权 + 直启 = 是', LP.needsElevation(live, false) === true)
+    // 走 Steam 是 Steam 去拉它，UAC 那一步不归咱们管 —— 别乱标
+    ok('needsElevation：交给 Steam 就不管提权', LP.needsElevation({ ...live, appid: '1' }, true) === false)
+    ok('needsElevation：没标记的永远不是', LP.needsElevation({ id: 'x' }, false) === false)
+    ok('needsElevation：null 不炸', LP.needsElevation(null, false) === false)
+
+    /* 参数怎么拼进命令行 */
+    ok('普通参数原样', LP.winArgv(['-nosteam']) === '-nosteam')
+    // PowerShell 的 Start-Process -ArgumentList 收到数组时是「空格 join 完就交出去」，
+    // 元素里的空格不会自动加引号 —— 参数带个路径就会散架，所以自己引
+    ok('带空格的参数要加引号', LP.winArgv(['--collection', 'My OBS Setup']) === '--collection "My OBS Setup"')
+    ok('参数里的引号要转义', LP.winArgv(['a"b']) === '"a\\"b"')
+    ok('空参数表给空串', LP.winArgv([]) === '' && LP.winArgv(null) === '')
+
+    ok('PowerShell 单引号字符串：单引号写两遍', LP.psQuote("it's") === "'it''s'")
+    ok('psQuote 吃 null 不炸', LP.psQuote(null) === "''")
+
+    const cmd = LP.elevateCommand({ exe: live.exe, args: ['-x'], cwd: 'C:\\Program Files\\bililive\\livehime' })
+    const line = cmd.args.join(' ')
+    ok('提权走系统自带的 powershell', cmd.exe === 'powershell.exe', cmd.exe)
+    ok('用的是 runas 动作', line.includes('-Verb RunAs'), line)
+    ok('这是要等的命令（好拿到退出码）', cmd.wait === true)
+    // 点了「否」Start-Process 会抛异常，得让它以非 0 退出，界面才认得出「没起来」
+    ok('授权失败时以非 0 退出', line.includes('catch { exit 1 }'), line)
+    // 实测踩过的坑：`$ErrorActionPreference='Stop'` 后面少一个分号就是 ParserError
+    //（PowerShell 会说「try」不是有效语句），退出码 1 —— 表现就是「点了没反应」。
+    // 这条断言专门盯那个语句分隔符。
+    ok('脚本里两条语句是隔开的（少了分号会语法错）', /'Stop';\s*try\s*\{/.test(line), line)
+    ok('脚本以 catch 收尾，语法是完整的', /\}\s*catch\s*\{\s*exit 1\s*\}\s*$/.test(line), line)
+    ok('工作目录照样带给它', line.includes("'C:\\Program Files\\bililive\\livehime'"), line)
+    ok('exe 路径也引上了', line.includes(`'${live.exe}'`), line)
+    // 空格分隔的参数不能被拆成两个
+    ok('带空格的参数在真实命令里也是一个整体', LP.elevateCommand({ exe: 'C:\\a.exe', args: ['--collection', 'My Setup'] }).args.join(' ').includes("'--collection \"My Setup\"'"))
+    ok('提权命令有个人能看懂的名字', cmd.label.includes('管理员') && cmd.label.includes('livehime.exe'), cmd.label)
+
+    /* 没预判到、但失败原因像提权的：用户手补的程序走的正是这条 */
+    ok('认得出 EPERM', LP.looksLikeElevationError({ code: 'EPERM' }) === true)
+    ok('认得出 EACCES', LP.looksLikeElevationError({ code: 'EACCES' }) === true)
+    // Windows 的 740 到了 libuv 手里会变成 spawn UNKNOWN
+    ok('认得出 740 在 libuv 里变的那张脸', LP.looksLikeElevationError({ message: 'spawn UNKNOWN' }) === true)
+    ok('认得出 errno -4094', LP.looksLikeElevationError({ errno: -4094 }) === true)
+    ok('找不着文件不能当成要提权', LP.looksLikeElevationError({ code: 'ENOENT', message: 'spawn ENOENT' }) === false)
+    ok('空的不炸', LP.looksLikeElevationError(null) === false)
+  }
+
+  /* --- 「已经在跑了吗」 --- */
+  {
+    const csv = [
+      '"obs64.exe","12345","Console","1","123,456 K"',
+      '"vtuberstudio.exe","678","Console","1","234,567 K"',
+      '"VTube Studio.exe","900","Console","1","345,678 K"',
+      '信息: 没有运行的任务匹配指定标准。',
+      '',
+    ].join('\r\n')
+    const set = LP.parseTasklistCsv(csv)
+    ok('读出正在跑的进程名', set.has('obs64.exe') && set.has('vtuberstudio.exe'), Array.from(set))
+    ok('统一转小写', set.has('OBS64.EXE') === false && set.size === 3, Array.from(set))
+    ok('中文提示行不会被当成进程名', !Array.from(set).some((n) => n.includes('信息')), Array.from(set))
+    // 进程名里可以有空格（VTube Studio.exe 就是）。挡掉空格的后果很具体：
+    // 用户已经开着 VTS，点一键开播会又拉起一个 —— 正是这功能最该避免的事
+    ok('名字里带空格的进程也认得出来', set.has('vtube studio.exe'), Array.from(set))
+    ok('空输出返回空集合', LP.parseTasklistCsv('').size === 0)
+    ok('null 也不炸', LP.parseTasklistCsv(null).size === 0)
+  }
+
+  /* --- 该不该跳过：查不到时宁可不跳 --- */
+  {
+    const obs = { id: 'obs', exe: 'C:\\OBS\\bin\\64bit\\obs64.exe' }
+    ok('进程表查不到（null）时一律不跳过', LP.shouldSkip(obs, null) === false)
+    ok('给了个不是集合的东西也不跳过', LP.shouldSkip(obs, {} ) === false)
+    ok('名字对得上才跳', LP.shouldSkip(obs, new Set(['obs64.exe'])) === true)
+    // tasklist 原样吐出来的可能是 "OBS64.EXE"，归一这步在 parseTasklistCsv 里做。
+    // 这里连着走一遍，验的是真实链路而不是一个凭空的约定
+    ok(
+      'tasklist 原样给大写，走一遍解析也对得上',
+      LP.shouldSkip(obs, LP.parseTasklistCsv('"OBS64.EXE","1","Console","1","1 K"')) === true,
+    )
+    ok('名字对不上就照常启动', LP.shouldSkip(obs, new Set(['chrome.exe'])) === false)
+    // 没有 exe 的条目问不出「在不在跑」，只能不跳
+    ok('没有 exe 的条目不跳过', LP.shouldSkip({ id: 'x', exe: '' }, new Set(['a.exe'])) === false)
+  }
+
+  /* --- 附上「是不是已经在跑」 --- */
+  {
+    const list = LP.withRunning([{ id: 'a', exe: 'C:\\OBS\\OBS64.exe' }], new Set(['obs64.exe']))
+    ok('对上了就是 true', list[0].running === true, list[0])
+
+    // 查不到进程表时必须说「不知道」—— false 会被界面读成「没在跑」，
+    // 用户看到的是个确凿的结论，而我们其实什么都没查到
+    const unknown = LP.withRunning([{ id: 'a', exe: 'C:\\OBS\\OBS64.exe' }], null)
+    ok('查不到进程表时 running 是 null（不是 false）', unknown[0].running === null, unknown[0])
+    ok('查不到时不会误报成 true', unknown[0].running !== true)
+    ok('没有 exe 的条目也是 null', LP.withRunning([{ id: 'b', exe: '' }], new Set(['a.exe']))[0].running === null)
+    ok('原条目别的字段一个不少', unknown[0].id === 'a' && unknown[0].exe === 'C:\\OBS\\OBS64.exe', unknown[0])
+    ok('不会改动传进来的数组', Array.isArray(LP.withRunning([], null)))
+    ok('乱传也不炸', LP.withRunning(null, null).length === 0)
+  }
+
+  /* --- Steam 根目录候选 --- */
+  {
+    const fakeEnv = { ProgramFiles: 'P:\\PF', 'ProgramFiles(x86)': 'P:\\PF86', LOCALAPPDATA: 'P:\\LA' }
+    const roots = LP.steamRootCandidates(fakeEnv)
+    ok('认 Program Files (x86)', roots.includes(path.normalize('P:\\PF86\\Steam')), roots)
+    ok('也认 Program Files', roots.includes(path.normalize('P:\\PF\\Steam')))
+    ok('各盘符的库目录都试一遍', roots.some((p) => /^C:\\Steam$/.test(p)), roots.slice(0, 6))
+    ok('候选不重复', new Set(roots).size === roots.length)
+    ok('能追加用户自己指定的', LP.steamRootCandidates(fakeEnv, ['Z:\\MySteam']).includes('Z:\\MySteam'))
+  }
+
+  /* --- 真扫一遍本机（只读：读配置、看 exe 在不在） --- */
+  {
+    const scan = LP.scanLaunchpad()
+    ok('扫描不抛异常', Array.isArray(scan.apps) && Array.isArray(scan.libraries), scan)
+    ok('每个条目都有 id / name / origin', scan.apps.every((a) => a.id && a.name && a.origin))
+    ok('扫到的 exe 都是真实存在的', scan.apps.filter((a) => a.exe).every((a) => fs.existsSync(a.exe)))
+    ok('Steam 库路径都真实存在', scan.libraries.every((p) => fs.existsSync(p)), scan.libraries)
+    // 这台机器上装的东西是固定的，但别的机器不一定 —— 所以只在扫到的时候校验字段
+    const obs = scan.apps.find((a) => a.id === 'obs')
+    if (obs) {
+      ok('OBS 记下了 appid', /^\d+$/.test(obs.appid), obs.appid)
+      ok('OBS 的 exe 名字对', path.basename(obs.exe).toLowerCase() === 'obs64.exe', obs.exe)
+    }
+    // 它的 manifest 里写着 requireAdministrator，界面上要提示用户会弹 UAC
+    const livehime = scan.apps.find((a) => a.id === 'livehime')
+    if (livehime) ok('真机扫到的直播姬标着「需管理员」', livehime.elevate === true, livehime)
+    // 假环境不该炸：库目录一个都不存在时，安静地返回空
+    const empty = LP.scanLaunchpad({ env: { ProgramFiles: 'P:\\none', 'ProgramFiles(x86)': 'P:\\none' } })
+    ok('扫不到东西时安静返回', empty.apps.length === 0 && empty.errors.length === 0, empty)
+    ok('同一类程序不会出现两条', new Set(scan.apps.map((a) => a.id)).size === scan.apps.length, scan.apps.map((a) => a.id))
+  }
+
+  /* --- 接线：主进程 / 预加载 / 配置默认值 / 界面 --- */
+  {
+    const root = path.join(__dirname, '..')
+    const read = (p) => fs.readFileSync(path.join(root, p), 'utf8')
+    const main = read('electron/main.cjs')
+    const preload = read('electron/preload.cjs')
+    const apiTs = read('src/lib/api.ts')
+    const page = read('src/pages/ConnectPage.tsx')
+    const card = read('src/components/LaunchpadCard.tsx')
+    const css = read('src/styles.css')
+
+    ok('主进程有扫描口', /ipcMain\.handle\('launchpad:scan'/.test(main))
+    ok('主进程有一键开播口', /ipcMain\.handle\('launchpad:run'/.test(main))
+    ok('能手补扫描不到的程序', /ipcMain\.handle\('launchpad:pickExe'/.test(main))
+    ok('Steam 用官方协议唤起', /shell\.openExternal\(plan\.url\)/.test(main))
+    ok('进度一路推给界面', /send\('launchpad:progress'/.test(main))
+    ok('防连点：同一时刻只跑一次', /let lpBusy = false/.test(main) && /if \(lpBusy\) throw/.test(main))
+    ok('扫到在跑的会跳过', /已经在运行，没有重复启动/.test(main))
+    ok('启动前先查进程', /execFile\('tasklist', \['\/FO', 'CSV', '\/NH'\]/.test(main))
+    ok('查不到进程也不拦着启动', /if \(err\) return resolve\(null\)/.test(main))
+    ok('拉起的程序活得比本程序久', /detached: true/.test(main) && /child\.unref\(\)/.test(main))
+    ok('.bat/.cmd 会交给 cmd 跑', /ext === '\.bat' \|\| ext === '\.cmd'/.test(main))
+    ok('启动失败会落日志', /'\[launchpad\] 启动失败'/.test(main))
+    // 直播姬的 manifest 是 requireAdministrator，普通权限拉不起来 —— 得走 UAC
+    ok('需要提权时会去弹 UAC', /function runElevated\(plan\)/.test(main) && /LP\.elevateCommand\(plan\)/.test(main))
+    ok('提权那一步会等（好拿到退出码）', /child\.once\('exit', \(code\)/.test(main))
+    ok('用户点「否」不会被谎报成成功', /授权窗口要点「是」/.test(main))
+    ok('一直不理也不能卡死', /ELEVATE_TIMEOUT_MS/.test(main) && /等待管理员授权超时/.test(main))
+    ok('没预判到但报错像提权的会重试一次', /LP\.looksLikeElevationError\(r\)/.test(main))
+    ok('提权时不弹黑框', /windowsHide: true/.test(main))
+    ok('轮到提权那一步会先说清楚', /正在请求管理员权限/.test(main))
+    ok('跑完自动连直播间', /await startLive\(roomId\)/.test(main))
+    ok('预加载暴露了这四个口', /scan: \(opts\) => ipcRenderer\.invoke\('launchpad:scan'/.test(preload) && /onProgress:/.test(preload))
+    ok('类型定义补齐', /launchpad\?: \{/.test(apiTs) && /interface LaunchpadApp/.test(apiTs))
+    ok('连接页最上面就是它', /<LaunchpadCard config=\{config\}/.test(page))
+    ok('界面上能逐个勾选、顺序就是启动顺序', /const toggle = \(id: string\)/.test(card) && /order\.indexOf\(a\.id\) \+ 1/.test(card))
+    ok('界面上标出了要管理员权限的那一项', /需管理员/.test(card))
+    ok('而且要提前说会弹窗', /桌面会弹一个窗口/.test(card))
+    ok('界面上有样式', /\.lp-item\b/.test(css) && /\.lp-check\b/.test(css))
+    // 别的徽章是补充信息，这个是提前告知 —— 窄屏也别藏
+    ok('「需管理员」的徽章窄屏也留着', /\.lp-item__badge\.is-admin\s*\{[^}]*display:\s*inline-block/.test(css))
+
+    const DEFAULTS = readStoreDefaults()
+    ok('配置有 launchpad 段', Boolean(DEFAULTS.launchpad))
+    ok('默认走 Steam', DEFAULTS.launchpad?.useSteam === true)
+    ok('默认拉完就连直播间', DEFAULTS.launchpad?.autoConnect === true)
+    ok('默认跳过已在运行的', DEFAULTS.launchpad?.skipRunning === true)
+    ok('默认顺序是空的（等用户勾）', Array.isArray(DEFAULTS.launchpad?.order) && DEFAULTS.launchpad.order.length === 0)
+    ok('间隔留了默认值', Number(DEFAULTS.launchpad?.gapMs) > 0)
+  }
+}
+
+/**
+ * 「谁在选音色」面板的队列。主播定的三条规矩都在这里守着：
+ *  ① 一次只显示一条，默认 8 秒；
+ *  ② 同时来多条**排队依次**放，不叠加、不互相覆盖；
+ *  ③ 排队等着的那条不能提前把 8 秒耗掉（计时懒启动），
+ *     而被标上「已绑定」的那条要**重新计满**。
+ */
+function testVoicePickQueue() {
+  const { createPickQueue, DEFAULT_TTL_MS, MAX_QUEUE, MAX_HITS } = require('../electron/voice-pick.cjs')
+
+  ok('默认 8 秒', DEFAULT_TTL_MS === 8000)
+
+  // 没人搜的时候，面板必须是收掉的（不是空白卡片挂在画面上）
+  {
+    const q = createPickQueue()
+    const s = q.snapshot(Date.now())
+    ok('没人选的时候面板收掉', s.panel === null && s.waiting === 0)
+    ok('没人时队列是空的', q.size() === 0)
+  }
+
+  // ① 一条：满 8 秒自己消失
+  {
+    const q = createPickQueue()
+    q.push({ uid: 1, who: '小明', keyword: '御姐', hits: [{ name: '御姐A' }, { name: '御姐B' }] })
+    const t0 = Date.now()
+    const s = q.snapshot(t0)
+    ok('搜完立刻有一帧', Boolean(s.panel) && s.panel.hits.length === 2)
+    ok('就一个人在选，后面没人等', s.waiting === 0)
+    ok('候选从 1 开始编号', s.panel.hits[0].n === 1 && s.panel.hits[1].n === 2)
+    ok('不到 8 秒还在', q.snapshot(t0 + 7900).panel !== null)
+    ok('满 8 秒自动收掉', q.snapshot(t0 + 8000).panel === null)
+    ok('收掉后队列也空了', q.size() === 0)
+  }
+
+  // ② 两个人：先来的先显示，到点才换人
+  {
+    const q = createPickQueue()
+    q.push({ uid: 1, who: 'A', hits: [{ name: 'a' }] })
+    q.push({ uid: 2, who: 'B', hits: [{ name: 'b' }] })
+    const t0 = Date.now()
+    const s1 = q.snapshot(t0)
+    ok('先来的先显示', s1.panel.who === 'A' && s1.waiting === 1)
+    const s2 = q.snapshot(t0 + 8000)
+    ok('到点了换后面那位', Boolean(s2.panel) && s2.panel.who === 'B' && s2.waiting === 0)
+    // 这一条是关键：B 在 A 显示的那 8 秒里一直排队，它自己的 8 秒得从**上场那一刻**算
+    ok('排队等的那位不会提前过期', q.snapshot(t0 + 8000 + 7900).panel !== null)
+    ok('B 也是满 8 秒才走', q.snapshot(t0 + 8000 + 8000).panel === null)
+  }
+
+  // ③ 三条排队：一条一条来，谁也不盖谁
+  {
+    const q = createPickQueue()
+    const who = ['甲', '乙', '丙']
+    for (let i = 0; i < 3; i++) q.push({ uid: i + 1, who: who[i], hits: [{ name: 'v' + i }] })
+    const t0 = Date.now()
+    const seen = []
+    for (let i = 0; i < 3; i++) {
+      const s = q.snapshot(t0 + i * 8000)
+      seen.push(s.panel ? s.panel.who : null)
+    }
+    ok('三条按顺序依次显示', seen.join('') === '甲乙丙', seen.join(','))
+    ok('最后一条到点后队列清空', q.snapshot(t0 + 3 * 8000).panel === null && q.size() === 0)
+  }
+
+  // ④ 被选中：标上序号，并重新计满 8 秒
+  {
+    const q = createPickQueue()
+    q.push({ uid: 1, who: 'A', hits: [{ name: 'a' }, { name: 'b' }] })
+    q.snapshot(Date.now())
+    ok('没选之前不标已绑定', q.snapshot(Date.now()).panel.picked === 0)
+    ok('没搜过的人结算不动队列', q.resolve(999, { n: 1 }) === null)
+    ok('选中的那条能结算到', q.resolve(1, { n: 2 }) !== null)
+    const s = q.snapshot(Date.now())
+    ok('选中的序号标上去', s.panel.picked === 2)
+    // 标完重新计满 —— 否则可能刚标上就到点消失，观众根本没看见
+    ok('标上后重新计满 8 秒', q.snapshot(Date.now() + 7000).panel !== null)
+    ok('重新计的 8 秒到点才收', q.snapshot(Date.now() + 8500).panel === null)
+  }
+
+  // ⑤ 绑定失败：原因也要摆在面板上，不然观众只看到自己那条莫名消失
+  {
+    const q = createPickQueue()
+    q.push({ uid: 1, who: 'A', hits: [{ name: 'a' }] })
+    q.snapshot(Date.now())
+    q.resolve(1, { failed: '列表过期了' })
+    const s = q.snapshot(Date.now())
+    ok('失败原因摆在面板上', s.panel.failed === '列表过期了' && s.panel.picked === 0)
+    ok('失败的那条也会到点自己收', q.snapshot(Date.now() + 8500).panel === null)
+  }
+
+  // ⑥ 同一个人连着搜第二次：顶掉自己上一条，别排在自己后面
+  {
+    const q = createPickQueue()
+    q.push({ uid: 7, who: 'A', keyword: '第一次', hits: [{ name: 'a' }] })
+    q.push({ uid: 7, who: 'A', keyword: '第二次', hits: [{ name: 'b' }] })
+    const s = q.snapshot(Date.now())
+    ok('重搜会顶掉自己上一条', q.size() === 1 && s.panel.keyword === '第二次')
+    ok('数字 uid 和字符串 uid 是同一个人', q.resolve('7', { n: 1 }) !== null)
+  }
+
+  // 已经选完的那条不该被顶掉 —— 它正显示着「已绑定」，是给观众看的回执
+  {
+    const q = createPickQueue()
+    q.push({ uid: 8, who: 'A', keyword: '一', hits: [{ name: 'a' }] })
+    q.snapshot(Date.now())
+    q.resolve(8, { n: 1 })
+    q.push({ uid: 8, who: 'A', keyword: '二', hits: [{ name: 'b' }] })
+    ok('已选完的那条不会被顶掉', q.size() === 2)
+  }
+
+  // ⑦ OBS 没开的时候面板推不出去、没人消费，队列不能无限攒着
+  {
+    const q = createPickQueue()
+    for (let i = 0; i < 30; i++) q.push({ uid: i + 1, hits: [{ name: 'v' + i }] })
+    ok('队列有上限', q.size() === MAX_QUEUE && MAX_QUEUE > 0)
+    q.clear()
+    ok('能一次清干净', q.size() === 0 && q.snapshot(Date.now()).panel === null)
+  }
+
+  // ⑧ 候选条数有上限：列太多会顶掉弹幕，而且没人会看第 7 条
+  {
+    const q = createPickQueue()
+    q.push({ uid: 1, hits: Array.from({ length: 20 }, (_, i) => ({ name: 'v' + i })) })
+    const s = q.snapshot(Date.now())
+    ok('候选最多列 6 条', s.panel.hits.length === MAX_HITS && MAX_HITS === 6)
+    ok('截掉的是后面的', s.panel.hits[0].name === 'v0' && s.panel.hits[MAX_HITS - 1].name === 'v' + (MAX_HITS - 1))
+  }
+
+  // ⑨ 时长可配：设置页改了要能生效，并且推给叠加层跟主进程对得上
+  {
+    const q = createPickQueue()
+    q.push({ uid: 1, hits: [{ name: 'a' }] })
+    ok('没配过就用默认', q.snapshot(Date.now()).panel.ttlMs === DEFAULT_TTL_MS)
+    q.setTtl(3000)
+    ok('改了时长立刻生效', q.snapshot(Date.now()).panel.ttlMs === 3000)
+    q.setTtl(0)
+    ok('非正数的时长不采纳', q.snapshot(Date.now()).panel.ttlMs === 3000)
+    q.setTtl('abc')
+    ok('乱填的时长不采纳', q.snapshot(Date.now()).panel.ttlMs === 3000)
+    const q2 = createPickQueue({ ttlMs: 5000 })
+    q2.push({ uid: 1, hits: [{ name: 'a' }] })
+    ok('构造时就指定了时长', q2.snapshot(Date.now()).panel.ttlMs === 5000)
+  }
+
+  // ⑩ 面板上的文字来自不可信输入（弹幕昵称、平台返回的音色名），一律按位截断
+  {
+    const q = createPickQueue()
+    const long = 'x'.repeat(80)
+    q.push({ uid: 1, who: long, keyword: long, hits: [{ name: long, source: long, hint: long }] })
+    const s = q.snapshot(Date.now()).panel
+    ok('昵称会截断', s.who.length === 24)
+    ok('关键词会截断', s.keyword.length === 24)
+    ok('候选名会截断', s.hits[0].name.length === 24)
+    ok('平台名会截断', s.hits[0].source.length === 16)
+    ok('说明会截断', s.hits[0].hint.length === 40)
+    ok('标记原样带过去，不丢', s.hits[0].registered === false && s.hits[0].disabled === false)
+  }
+
+  // ⑪ 已注册 / 已停用的标记：面板要据此告诉主播「为什么点了没反应」
+  {
+    const q = createPickQueue()
+    q.push({
+      uid: 1,
+      who: 'A',
+      hits: [{ name: 'a', registered: true }, { name: 'b', registered: true, disabled: true }],
+    })
+    const s = q.snapshot(Date.now()).panel
+    ok('已注册带过去了', s.hits[0].registered === true && s.hits[0].disabled === false)
+    ok('已停用带过去了', s.hits[1].disabled === true)
+    ok('脏数据不炸', (() => { const z = createPickQueue(); z.push({}); return z.snapshot(Date.now()).panel.hits.length === 0 })())
+  }
+
+  // ⑫ 主进程那侧的心跳：队列空就停，别留个定时器空转
+  {
+    const root = path.join(__dirname, '..')
+    const mainSrc = fs.readFileSync(path.join(root, 'electron', 'main.cjs'), 'utf8')
+    ok('心跳在队列空了以后自己停', /if \(!pickQueue\.size\(\)\) stopPickTimer\(\)/.test(mainSrc))
+    ok('心跳不会把进程钉住不退出', /if \(pickTimer\.unref\) pickTimer\.unref\(\)/.test(mainSrc))
+    ok('没事发生时不白推帧', /if \(pickQueue\.prune\(Date\.now\(\)\)\) pushPick\(\)/.test(mainSrc))
+    ok('刚放进队列就推一帧', /pickQueue\.push\(item\)\s*\n\s*startPickTimer\(\)\s*\n\s*pushPick\(\)/.test(mainSrc))
+  }
+}
+
+/**
+ * 「明明有这个音色，却怎么都换不过去」—— 这句话背后有四条独立的路，
+ * 每条都写过一遍。这里把它们钉住，免得哪天又被顺手改回去：
+ *  ① 列表只搜在线平台 → 库里注册的（尤其是文字设计出来的）永远搜不到；
+ *  ② 榜上确实有，但档案被停用了 → 回执说成功，实际继续用默认嗓子；
+ *  ③ `#绑定 3` 的列表过期后，这个 3 被当成关键词丢去在线搜 → 绑到毫不相干的音色；
+ *  ④ 文字设计 / 音色复刻出来的音色设不成全局默认 → 换了跟没换一样。
+ * 顺带：搜索与绑定这条链路以前一个字都不记，出问题只能靠猜，现在要有日志。
+ */
+function testVoicePickWiring() {
+  const root = path.join(__dirname, '..')
+  const read = (p) => fs.readFileSync(path.join(root, p), 'utf8')
+  const main = read('electron/main.cjs')
+  const overlayCjs = read('electron/overlay.cjs')
+  const overlayHtml = read('overlay/index.html')
+  const preload = read('electron/preload.cjs')
+  const apiTs = read('src/lib/api.ts')
+  const storeSrc = read('electron/store.cjs')
+
+  // ---- ① 列表：库里优先，在线补位 ----
+  ok('列表会先查已注册的音色库', /V\.searchProfiles\(lib, keyword, limit\)/.test(main))
+  ok('带上 profileId（设计音色在平台上没有 id）', /profileId: p\.id/.test(main))
+  ok('在线结果只作补位', /await V\.searchEverywhere\(cfg\.voicePolicy\?\.searchSources/.test(main))
+  ok('按「平台:id」去重', /const key = `\$\{v\.source\}:\$\{v\.id\}`/.test(main) && /if \(!v\.id \|\| seen\.has\(key\)\) return/.test(main))
+  ok('库里已注册的标出来', /const state = libStateOf\(cfg, v\)/.test(main) && /registered: state !== 'none'/.test(main))
+  ok('已停用的也标出来', /disabled: state === 'disabled'/.test(main))
+  // 台上与聊天里必须是同一份顺序，否则观众照聊天里的第 2 条去绑定会绑错
+  ok('面板与回执共用同一份列表', /searchCache\.set\(uid, \{ at: Date\.now\(\), voices: r\.voices \}\)/.test(main))
+
+  // ---- ② 绑定到已停用的档案：必须拒绝，不能假装成功 ----
+  ok('绑定前复核档案是否被停用', /if \(reused && reused\.enabled === false\)/.test(main))
+  ok('停用时明确拒绝并说明', /已经被主播停用了，挑一个别的/.test(main))
+  ok('复用已有档案不重复造', /const profile = reused \|\| ensureProfile\(voice\)/.test(main))
+
+  // ---- ③ 纯数字但列表过期：不能当关键词去在线搜 ----
+  ok('纯数字 + 列表过期单独分流', /reason: 'staleList'/.test(main))
+  ok('过期时把数字当关键词这条路被堵住', /if \(\/\^\\d\+\$\/\.test\(String\(arg\)\.trim\(\)\)\) return \{ voice: null, reason: 'staleList' \}/.test(main))
+  ok('过期时的话术是「先发一次列表」', /列表过期了，先发一次/.test(main))
+  ok('序号越界也有明确话术', /没有这个序号，重新发一次列表看看/.test(main))
+
+  // ---- ④ 设计 / 克隆音色能设成全局默认 ----
+  ok('ttsCfg 带上设计模式', /mimoMode: t\.mimoMode \|\| 'preset'/.test(main))
+  ok('ttsCfg 带上设计描述', /designPrompt: t\.designPrompt \|\| ''/.test(main))
+  ok('ttsCfg 带上复刻样音', /cloneFile: t\.cloneFile \|\| ''/.test(main))
+  ok('有「设为默认」的 IPC', /ipcMain\.handle\('voices:useAsDefault'/.test(main))
+  ok('设为默认会把设计三件套一起写进去', /mimoMode: p\.mimoMode \|\| 'preset',\s*\n\s*designPrompt: p\.designPrompt \|\| '',\s*\n\s*cloneFile: p\.cloneFile \|\| '',/.test(main))
+  ok('界面上的模型别名优先于档案里那个', /model: cfg\.platformModel\?\.\[p\.platform\] \|\| p\.model \|\| ''/.test(main))
+  ok('渲染层预加载暴露了 useAsDefault', /useAsDefault: \(id\) => ipcRenderer\.invoke\('voices:useAsDefault', id\)/.test(preload))
+  ok('api 类型里有 useAsDefault', /useAsDefault: \(id: string\)/.test(apiTs))
+
+  // ---- 日志：这条链路以前一个字都不记 ----
+  ok('列表落日志', /'\[voices\] 列表'/.test(main))
+  ok('列表失败落日志', /'\[voices\] 列表失败'/.test(main))
+  ok('绑定成功落日志', /'\[voices\] 绑定'/.test(main))
+  ok('绑定失败落日志', /'\[voices\] 绑定失败'/.test(main))
+  ok('绑到已停用的音色落日志', /'\[voices\] 绑定到已停用的音色'/.test(main))
+  ok('设为默认音色落日志', /'\[voices\] 设为默认音色'/.test(main))
+
+  // ---- 叠加层：主进程推帧 + 客户端补发 + 页面渲染 ----
+  ok('叠加层服务给出补发钩子', /this\.voicePickProvider = null/.test(overlayCjs))
+  ok('连上时补发当前面板', /type: 'voicepick', payload: pick/.test(overlayCjs))
+  ok('主进程队列就是那个钩子', /overlay\.voicePickProvider = \(\) => pickQueue\.snapshot\(\)/.test(main))
+  ok('叠加层有面板容器', /id="cp-pick"/.test(overlayHtml))
+  ok('叠加层收得下这一帧', /msg\.type === 'voicepick'/.test(overlayHtml))
+  ok('同一帧不重复重建（进度条不会重头播）', /if \(key === pickDrawn\)/.test(overlayHtml))
+  ok('进度条时长跟主进程对得上', /fill\.style\.animationDuration = pickTtl\(\) \+ 'ms'/.test(overlayHtml))
+  ok('排队情况显示在面板上', /'后面还有 ' \+ pickState\.waiting \+ ' 位在等'/.test(overlayHtml))
+  ok('选中的那条高亮', /'✓ 已绑定'/.test(overlayHtml) && /is-picked/.test(overlayHtml))
+  ok('失败原因显示在面板上', /'没换成：' \+ p\.failed/.test(overlayHtml))
+  ok('四角可放', /const PICK_POS = \['tl', 'tr', 'bl', 'br'\]/.test(overlayHtml) && /data-pos/.test(overlayHtml))
+  ok('面板参与自动避让', /blocks\.push\(\{ el: pickEl, box: k, top: isTopSide\(pickPos\(\), TOP_SIDE\), rank: 1 \}\)/.test(overlayHtml))
+  ok('叠加层默认值齐备', /showVoicePick: true/.test(overlayHtml) && /voicePickTtlMs: 8000/.test(overlayHtml))
+  ok('窄画面下截住面板本身', /html\.is-narrow \.cp-pick \{/.test(overlayHtml))
+
+  // ---- 配置默认值：三处取值必须一致 ----
+  const DEFAULTS = readStoreDefaults()
+  ok('配置默认开着音色面板', DEFAULTS.overlay?.showVoicePick === true)
+  ok('配置默认位置是右上', DEFAULTS.overlay?.voicePickPos === 'tr')
+  ok('配置默认列 4 条', DEFAULTS.overlay?.voicePickHits === 4)
+  ok('配置默认 8 秒', DEFAULTS.overlay?.voicePickTtlMs === 8000)
+  ok('叠加层与配置的默认位置一致', /voicePickPos: 'tr'/.test(storeSrc) && /voicePickPos: 'tr'/.test(overlayHtml))
 }
 
 /**
@@ -1236,7 +1998,7 @@ async function testSkip() {
  * 否则「关掉播报却还在念」会被当成软件坏了。
  */
 function testLiveControls() {
-  const { shouldSpeakNow } = require('../electron/speech-rules.cjs')
+  const { shouldSpeakNow, speakableName } = require('../electron/speech-rules.cjs')
 
   const danmaku = (text) => ({ text, meta: { type: 'danmaku' } })
 
@@ -1259,8 +2021,54 @@ function testLiveControls() {
   ok('手动试听不受开关限制', shouldSpeakNow({ text: '试听', meta: { type: 'manual' } }, { enabled: false }).drop === false)
   ok('音色试听不受开关限制', shouldSpeakNow({ text: '试听', meta: { type: 'voice-test' } }, { enabled: false }).drop === false)
 
+  /* ---------------- 默认昵称不念数字 ----------------
+     没改过昵称的 B 站账号是 `bili_3706983133743519`：念出来是一串数字，
+     观众听不出是谁，主播也记不住，等于白读。 */
+  ok(
+    'B站默认昵称念成「一个b站用户」',
+    speakableName('bili_3706983133743519') === '一个b站用户',
+    speakableName('bili_3706983133743519'),
+  )
+  ok('前缀大小写都认', speakableName('BILI_1234567') === '一个b站用户', speakableName('BILI_1234567'))
+  ok('没有下划线也认', speakableName('bilibili1234567') === '一个b站用户', speakableName('bilibili1234567'))
+  ok('中文前缀也认', speakableName('用户_1234567') === '一个b站用户', speakableName('用户_1234567'))
+  // 纯数字的名字同理：1234567890 念出来也没人听得懂
+  ok('纯数字的名字也改念', speakableName('3706983133743519') === '一个b站用户', speakableName('3706983133743519'))
+  ok('正常昵称原样不动', speakableName('小明') === '小明')
+  // 自己起的名里带几个数字是常态，不能一杆子全打掉
+  ok('名字里夹数字的照念', speakableName('小明2333') === '小明2333', speakableName('小明2333'))
+  ok('短数字不当成默认名', speakableName('12345') === '12345', speakableName('12345'))
+  ok(
+    '关掉开关就念原名',
+    speakableName('bili_3706983133743519', { renameDefaultUser: false }) === 'bili_3706983133743519',
+  )
+  ok(
+    '称呼可以自己改',
+    speakableName('bili_3706983133743519', { defaultUserName: '一位路人' }) === '一位路人',
+  )
+  ok(
+    '称呼填成空白时回落到默认',
+    speakableName('bili_3706983133743519', { defaultUserName: '   ' }) === '一个b站用户',
+  )
+  ok('空名字不会炸', speakableName('') === '' && speakableName(null) === '' && speakableName(undefined) === '')
+
   // 配置默认值：新装的软件就该是这套，迁移也依赖它们
   const DEFAULTS = readStoreDefaults()
+  ok('默认开着「默认昵称不念数字」', DEFAULTS.tts?.renameDefaultUser === true)
+  ok('默认称呼就是「一个b站用户」', DEFAULTS.tts?.defaultUserName === '一个b站用户')
+
+  // 光有函数不够 —— 真正念出口的那几处都得走这道转换
+  {
+    const root = path.join(__dirname, '..')
+    const mainSrc = fs.readFileSync(path.join(root, 'electron', 'main.cjs'), 'utf8')
+    ok('弹幕播报过转换', /const name = speakName\(ev\.username, t\)/.test(mainSrc))
+    ok('点歌播报过转换', /speakName\(name, cfg\.tts\)\}点了一首/.test(mainSrc))
+    ok('换音色试听过转换', /speakName\(name\)\}换音色了/.test(mainSrc))
+    ok('恢复默认音色试听过转换', /speakName\(name, t\)\}换回默认音色了/.test(mainSrc))
+    // 回执是发到直播间给人看的文字，不是念出来的 —— 保留真名，别顺手改了
+    ok('文字回执仍用真名', /await replyChat\(p \? `\$\{name\}的音色：/.test(mainSrc))
+  }
+
   ok('弹幕自动滚动默认开', DEFAULTS.danmaku?.autoScroll === true)
   ok('LLM 默认预算够推理模型用', DEFAULTS.llm?.maxTokens >= 1200, String(DEFAULTS.llm?.maxTokens))
   ok('默认关掉模型思考', DEFAULTS.llm?.noThink === true)

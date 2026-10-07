@@ -427,6 +427,200 @@
         transform-origin: center;
       }
 
+      /* ---------- 音色选择面板 ----------
+         观众发「#音色列表 关键词」时，把候选摆到画面上供他挑；他再发「#绑定 2」，
+         第 2 条就会被标出来。一次只显示一条，后面还排着队就在底下提一声。
+         这套 class 名与 src/components/VoicePickPreview.tsx 用的是同一份，
+         设置页的预览照着它渲染 —— 改样式两边一起改。 */
+      .cp-pick {
+        position: fixed;
+        display: none;
+        flex-direction: column;
+        width: calc(300 * var(--cp-u));
+        max-width: 42vw;
+        font-family: var(--cp-font);
+        pointer-events: none;
+        animation: cp-pick-in 220ms cubic-bezier(0.2, 0, 0, 1);
+      }
+
+      .cp-pick.is-show {
+        display: flex;
+      }
+
+      .cp-pick[data-pos='tl'] {
+        left: calc(24 * var(--cp-u));
+        top: calc(24 * var(--cp-u));
+      }
+      .cp-pick[data-pos='tr'] {
+        right: calc(24 * var(--cp-u));
+        top: calc(24 * var(--cp-u));
+      }
+      .cp-pick[data-pos='bl'] {
+        left: calc(24 * var(--cp-u));
+        bottom: calc(24 * var(--cp-u));
+      }
+      .cp-pick[data-pos='br'] {
+        right: calc(24 * var(--cp-u));
+        bottom: calc(24 * var(--cp-u));
+      }
+
+      /* 方向无关的进场：淡入 + 轻微放大。用 cp-in 那套左右位移的话，
+         贴左边的面板会从画面外滑进来 */
+      @keyframes cp-pick-in {
+        from {
+          opacity: 0;
+          transform: scale(0.97);
+        }
+        to {
+          opacity: 1;
+          transform: scale(1);
+        }
+      }
+
+      .cp-pick__card {
+        padding: calc(10 * var(--cp-u)) calc(14 * var(--cp-u)) calc(12 * var(--cp-u));
+        border-radius: calc(14 * var(--cp-u));
+        background: rgba(18, 18, 22, 0.62);
+        backdrop-filter: blur(calc(6 * var(--cp-u)));
+        -webkit-backdrop-filter: blur(calc(6 * var(--cp-u)));
+        color: #f4f2f6;
+        box-shadow: 0 calc(2 * var(--cp-u)) calc(10 * var(--cp-u)) rgba(0, 0, 0, 0.28);
+      }
+
+      .cp-pick__head {
+        display: flex;
+        align-items: baseline;
+        gap: calc(6 * var(--cp-u));
+        margin-bottom: calc(6 * var(--cp-u));
+      }
+
+      .cp-pick__who {
+        font-size: calc(13 * var(--cp-fs));
+        font-weight: 600;
+        white-space: nowrap;
+        text-shadow: 0 calc(1 * var(--cp-u)) calc(3 * var(--cp-u)) rgba(0, 0, 0, 0.6);
+      }
+
+      .cp-pick__kw {
+        min-width: 0;
+        font-size: calc(12 * var(--cp-fs));
+        opacity: 0.62;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .cp-pick__row {
+        display: flex;
+        align-items: baseline;
+        gap: calc(8 * var(--cp-u));
+        padding: calc(3 * var(--cp-u)) calc(6 * var(--cp-u));
+        border-radius: calc(8 * var(--cp-u));
+        font-size: calc(13 * var(--cp-fs));
+        line-height: 1.45;
+        min-width: 0;
+      }
+
+      .cp-pick__no {
+        flex: 0 0 calc(14 * var(--cp-u));
+        font-size: calc(11 * var(--cp-fs));
+        opacity: 0.55;
+        text-align: right;
+      }
+
+      .cp-pick__name {
+        font-weight: 600;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .cp-pick__meta {
+        flex: 1;
+        min-width: 0;
+        font-size: calc(11 * var(--cp-fs));
+        opacity: 0.6;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .cp-pick__tag {
+        flex: 0 0 auto;
+        padding: calc(1 * var(--cp-u)) calc(6 * var(--cp-u));
+        border-radius: calc(999 * var(--cp-u));
+        font-size: calc(10 * var(--cp-fs));
+        background: rgba(255, 255, 255, 0.14);
+      }
+
+      /* 库里有、但被主播停用了：这是「点了却没反应」的头号原因，必须显眼 */
+      .cp-pick__tag.is-off {
+        background: rgba(190, 70, 70, 0.42);
+      }
+
+      /* 他挑中的那条：提亮 + 描边 */
+      .cp-pick__row.is-picked {
+        background: rgba(208, 188, 255, 0.26);
+        box-shadow: inset 0 0 0 calc(1 * var(--cp-u)) var(--cp-accent);
+      }
+
+      .cp-pick__row.is-picked .cp-pick__name,
+      .cp-pick__row.is-picked .cp-pick__meta {
+        opacity: 1;
+      }
+
+      .cp-pick__row.is-off {
+        opacity: 0.5;
+      }
+
+      .cp-pick__ok {
+        flex: 0 0 auto;
+        font-size: calc(11 * var(--cp-fs));
+        font-weight: 600;
+        color: var(--cp-accent);
+      }
+
+      .cp-pick__fail {
+        margin-top: calc(6 * var(--cp-u));
+        font-size: calc(11 * var(--cp-fs));
+        color: #ffb4ab;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .cp-pick__wait {
+        margin-top: calc(6 * var(--cp-u));
+        font-size: calc(11 * var(--cp-fs));
+        opacity: 0.6;
+      }
+
+      /* 倒计时进度条：时长由脚本按配置写成 animation-duration，
+         跟主进程那边「这一条还剩几秒」对得上 */
+      .cp-pick__bar {
+        margin-top: calc(8 * var(--cp-u));
+        height: calc(2 * var(--cp-u));
+        border-radius: calc(999 * var(--cp-u));
+        background: rgba(255, 255, 255, 0.14);
+        overflow: hidden;
+      }
+
+      .cp-pick__bar-fill {
+        width: 100%;
+        height: 100%;
+        background: var(--cp-accent);
+        animation: cp-pick-countdown linear forwards;
+      }
+
+      @keyframes cp-pick-countdown {
+        from {
+          width: 100%;
+        }
+        to {
+          width: 0%;
+        }
+      }
+
       /* ---------- 窄画面 ----------
          比如把 OBS 浏览器源拖成一条竖带。三块谁站哪一段由脚本里的 layout() 算，
          这里只负责把宽度放开：上面那套尺寸是按 1080p 画布定的，窄条上会顶出画面。 */
@@ -451,6 +645,14 @@
         /* 窄条上字号一放大，两三行就能顶掉半屏。截掉的是后面几句预告，
            当前正在唱的那句在第一个，永远看得到 */
         max-height: 28%;
+        overflow: hidden;
+      }
+
+      html.is-narrow .cp-pick {
+        max-width: calc(100% - 48 * var(--cp-u));
+        /* 候选多 + 字号大时把面板本身截住，别把弹幕那一段挤没。
+           截掉的是后面的候选，序号小的永远看得到 */
+        max-height: 42%;
         overflow: hidden;
       }
 
@@ -481,16 +683,66 @@
       #cp-status.is-bad {
         background: rgba(150, 26, 26, 0.85);
       }
+      /* ---------- 拆开成单独的浏览器源 ----------
+         一块单占一个 OBS 源时，这个源里就它一份，不用再给谁腾地方：
+         原来那几个百分比上限（歌词 28% / 音色 42% / 点歌 46%）是「三块同挤一个
+         画布」时定的，现在整块源都是它的，全部放开。
+         这几条放在 .is-narrow 那一组**后面** —— 两边同时命中时选择器权重一样，
+         靠顺序取胜，所以顺序不能调。 */
+      html.is-panel .cp-lyric {
+        /* 字幕该占满整个源：主播把源拉多宽，字就跟着走 */
+        width: 100%;
+        max-width: none;
+        max-height: 100%;
+        overflow: hidden;
+      }
+
+      html.is-panel .cp-music,
+      html.is-panel .cp-pick {
+        /* 宽度保留各自的原生尺寸（卡片拉满整屏很难看），只把上限放开，
+           免得源一窄就被 42vw 卡住 */
+        max-width: 100%;
+        max-height: 100%;
+        overflow: hidden;
+      }
     </style>
   </head>
   <body>
     <div id="app" data-pos="br"></div>
     <div id="cp-music" class="cp-music" data-pos="tl"></div>
     <div id="cp-lyric" class="cp-lyric" data-pos="bc"></div>
+    <div id="cp-pick" class="cp-pick" data-pos="tr"></div>
     <div id="cp-status"></div>
     <style id="cp-custom-style"></style>
 
     <script>
+      /* ---------------------------- 我是哪一块 ----------------------------
+         同一个页面被多个 OBS 浏览器源共用，靠 URL 认身份：
+           /overlay            全部（老行为：三块齐全 + 自动避让）
+           /overlay/danmaku    只画弹幕
+           /overlay/lyric      只画歌词
+           /overlay/music      只画点歌面板
+           /overlay/voicepick  只画音色选择面板
+         ?panel=lyric 这种写法也认，方便手敲。认不得的一律按「全部」走 ——
+         宁可多画一块，也不能因为写错一个字母给主播一个纯透明页。 */
+      const PANELS = ['all', 'danmaku', 'lyric', 'music', 'voicepick']
+      const PANEL = (function () {
+        const m = location.pathname.match(/\/overlay\/([A-Za-z]+)/)
+        const q = new URLSearchParams(location.search).get('panel')
+        const v = String((m && m[1]) || q || 'all').toLowerCase()
+        return PANELS.indexOf(v) >= 0 ? v : 'all'
+      })()
+      /** true = 这个源只负责一块 */
+      const ONLY = PANEL !== 'all'
+      /** 这块该不该由本页负责 */
+      function shows(name) {
+        return !ONLY || PANEL === name
+      }
+      if (ONLY) {
+        document.documentElement.classList.add('is-panel')
+        document.documentElement.setAttribute('data-panel', PANEL)
+      }
+
       const app = document.getElementById('app')
       const customStyle = document.getElementById('cp-custom-style')
       let cfg = {
@@ -509,6 +761,11 @@
         showLyric: true,
         lyricPos: 'bc',
         lyricLines: 2,
+        // 观众搜音色时把候选摆出来。一次一条，默认 8 秒，多条排队
+        showVoicePick: true,
+        voicePickPos: 'tr',
+        voicePickHits: 4,
+        voicePickTtlMs: 8000,
         // 画面一窄就把三块分到互不相交的几段里，别压在彼此身上
         autoLayout: true,
         customCss: '',
@@ -520,6 +777,8 @@
       const DANMAKU_POS = ['tl', 'tr', 'bl', 'br']
       // 歌词默认底部居中，像字幕；贴边时也能左右摆放
       const LYRIC_POS = ['tc', 'bc', 'tl', 'tr', 'bl', 'br']
+      // 音色选择面板是个列表，居中不好看，只给四个角
+      const PICK_POS = ['tl', 'tr', 'bl', 'br']
 
       function danmakuPos() {
         return DANMAKU_POS.indexOf(cfg.danmakuPos) >= 0 ? cfg.danmakuPos : 'br'
@@ -527,6 +786,10 @@
 
       function lyricPos() {
         return LYRIC_POS.indexOf(cfg.lyricPos) >= 0 ? cfg.lyricPos : 'bc'
+      }
+
+      function pickPos() {
+        return PICK_POS.indexOf(cfg.voicePickPos) >= 0 ? cfg.voicePickPos : 'tr'
       }
 
       /** 百分比 -> 倍率。留 0.5~2 的余量：再小看不见，再大出画 */
@@ -559,6 +822,7 @@
         app.setAttribute('data-pos', danmakuPos())
         renderMusic()
         renderLyric()
+        renderPick()
         // 配置一改位置就可能变，直接同步重排一次，别等下一帧（改完马上要看到效果）
         layout()
         fit()
@@ -583,6 +847,13 @@
       }
 
       function renderMusic() {
+        // 这个源不负责点歌就整块不画（哪怕配置里开着）——
+        // 拆开用的时候，主播是拿四个源各自摆位的，多画一块反而碍事
+        if (!shows('music')) {
+          musicEl.classList.remove('is-show')
+          musicEl.textContent = ''
+          return
+        }
         const cur = musicState.current
         const items = (musicState.items || []).slice(0, queueCount())
         musicEl.setAttribute('data-pos', cfg.musicPos || 'tl')
@@ -637,6 +908,11 @@
       let lyricState = { songId: 0, lines: [], times: [], index: -1, playing: false }
 
       function renderLyric() {
+        if (!shows('lyric')) {
+          lyricEl.classList.remove('is-show')
+          lyricEl.textContent = ''
+          return
+        }
         lyricEl.setAttribute('data-pos', lyricPos())
         const hasLines = lyricState.lines && lyricState.lines.length > 0
         const show = cfg.showLyric !== false && hasLines
@@ -663,6 +939,89 @@
           lyricEl.appendChild(line)
           drawn++
         }
+        scheduleLayout()
+      }
+
+      /* ------------------------ 音色选择面板 ------------------------
+         观众发「#音色列表 关键词」时摆出来的候选。主进程那边持有整条队列
+         （谁是当前、还剩几秒、后面排着几条），这里只管画推过来的那一帧。 */
+
+      const pickEl = document.getElementById('cp-pick')
+      let pickState = { panel: null, waiting: 0 }
+      /** 上一次画的是哪一帧。同一张面板只是配置变了就别重建 —— 重建会把进度条从头再播一遍 */
+      let pickDrawn = ''
+
+      function pickHitCount() {
+        const v = Number(cfg.voicePickHits)
+        if (!isFinite(v) || v < 1) return 4
+        return Math.min(Math.floor(v), 6)
+      }
+
+      function pickTtl() {
+        const v = Number(cfg.voicePickTtlMs)
+        return isFinite(v) && v >= 500 ? v : 8000
+      }
+
+      function renderPick() {
+        if (!shows('voicepick')) {
+          pickEl.classList.remove('is-show')
+          pickEl.textContent = ''
+          pickDrawn = ''
+          return
+        }
+        pickEl.setAttribute('data-pos', pickPos())
+        const p = pickState.panel
+        const hits = p && Array.isArray(p.hits) ? p.hits.slice(0, pickHitCount()) : []
+        const show = cfg.showVoicePick !== false && Boolean(p) && hits.length > 0
+        pickEl.classList.toggle('is-show', Boolean(show))
+        if (!show) {
+          pickEl.textContent = ''
+          pickDrawn = ''
+          scheduleLayout()
+          return
+        }
+
+        const key = [p.id, p.picked, p.failed || '', hits.length, pickState.waiting].join('|')
+        if (key === pickDrawn) {
+          scheduleLayout()
+          return
+        }
+        pickDrawn = key
+
+        pickEl.textContent = ''
+        const card = el('div', 'cp-pick__card')
+
+        const head = el('div', 'cp-pick__head')
+        head.appendChild(el('span', 'cp-pick__who', p.who ? p.who + ' 在选音色' : '有人在选音色'))
+        if (p.keyword) head.appendChild(el('span', 'cp-pick__kw', '「' + p.keyword + '」'))
+        card.appendChild(head)
+
+        hits.forEach((h) => {
+          const row = el('div', 'cp-pick__row')
+          if (h.n === p.picked) row.classList.add('is-picked')
+          if (h.disabled) row.classList.add('is-off')
+          row.appendChild(el('span', 'cp-pick__no', String(h.n)))
+          row.appendChild(el('span', 'cp-pick__name', h.name || '未命名'))
+          row.appendChild(el('span', 'cp-pick__meta', h.hint || h.source || ''))
+          if (h.disabled) row.appendChild(el('span', 'cp-pick__tag is-off', '已停用'))
+          else if (h.registered) row.appendChild(el('span', 'cp-pick__tag', '已注册'))
+          // 选中的那条再点一个勾，光靠底色在小画面上不够显眼
+          if (h.n === p.picked) row.appendChild(el('span', 'cp-pick__ok', '✓ 已绑定'))
+          card.appendChild(row)
+        })
+
+        if (p.failed) card.appendChild(el('div', 'cp-pick__fail', '没换成：' + p.failed))
+        if (pickState.waiting > 0) {
+          card.appendChild(el('div', 'cp-pick__wait', '后面还有 ' + pickState.waiting + ' 位在等'))
+        }
+
+        const bar = el('div', 'cp-pick__bar')
+        const fill = el('div', 'cp-pick__bar-fill')
+        fill.style.animationDuration = pickTtl() + 'ms'
+        bar.appendChild(fill)
+        card.appendChild(bar)
+
+        pickEl.appendChild(card)
         scheduleLayout()
       }
 
@@ -693,9 +1052,14 @@
         return { left: left, right: left + width, width: width, height: height }
       }
 
-      /** 水平上是否真的挨着。只差半像素的重叠不算，免得浮动误差一直触发叠放 */
-      function overlapsX(a, b) {
-        return a.left < b.right - 0.5 && b.left < a.right - 0.5
+      /**
+       * 水平上是不是真挨着。只差半像素的重叠不算 ——
+       * 不然浮点误差会让「各占一角」的三块老被当成打架，白白挪位置。
+       * @param {number} left 待判定的那块的左边
+       * @param {number} right 已经收进这一竖带的所有块的最右边
+       */
+      function touchesX(left, right) {
+        return left < right - 0.5
       }
 
       function isTopSide(pos, tops) {
@@ -709,7 +1073,12 @@
         musicEl.style.bottom = ''
         lyricEl.style.top = ''
         lyricEl.style.bottom = ''
+        pickEl.style.top = ''
+        pickEl.style.bottom = ''
       }
+
+      /** 贴在画布上半区的四个位置。tc/bc 是歌词专有的，不算 */
+      const TOP_SIDE = ['tl', 'tr']
 
       function layout() {
         clearOffsets()
@@ -717,37 +1086,55 @@
         // 除了「窄」，矮也算 —— 1920×400 这种横条一样会挤。
         const tight = window.innerWidth < NARROW_W || window.innerHeight < NARROW_H
         document.documentElement.classList.toggle('is-narrow', tight)
+        // 拆开用的源里只有一块，没有「别压到谁身上」这回事 ——
+        // 也不该把 #app 缩进去（那本来是给同侧别的块腾地方的）
+        if (ONLY) return
         if (cfg.autoLayout === false) return
 
         const pad = 24 * uiScale
         const gap = 12 * uiScale
-        const musicTop = isTopSide(cfg.musicPos || 'tl', ['tl', 'tr'])
-        const lyricTop = isTopSide(lyricPos(), ['tc', 'tl', 'tr'])
+        const lpos = lyricPos()
+        // 同一侧、水平上真的挨着的那几块才需要上下叠开。
+        // rank 决定谁贴边：歌词永远在最外（像字幕），音色面板次之，点歌面板让到最内。
+        const blocks = []
         const m = boxOf(musicEl, false)
-        const l = boxOf(lyricEl, true)
-        const stacked = Boolean(m && l && musicTop === lyricTop && overlapsX(m, l))
+        if (m) blocks.push({ el: musicEl, box: m, top: isTopSide(cfg.musicPos || 'tl', TOP_SIDE), rank: 2 })
+        const l = boxOf(lyricEl, lpos === 'tc' || lpos === 'bc')
+        if (l) blocks.push({ el: lyricEl, box: l, top: isTopSide(lpos, ['tc', 'tl', 'tr']), rank: 0 })
+        const k = boxOf(pickEl, false)
+        if (k) blocks.push({ el: pickEl, box: k, top: isTopSide(pickPos(), TOP_SIDE), rank: 1 })
 
-        // 同一侧又水平打架才叠开。贴边的永远是歌词（像字幕），点歌面板让到内侧
-        if (stacked) {
-          if (lyricTop) {
-            musicEl.style.top = pad + 'px'
-            lyricEl.style.top = pad + m.height + gap + 'px'
-          } else {
-            lyricEl.style.bottom = pad + 'px'
-            musicEl.style.bottom = pad + l.height + gap + 'px'
-          }
-        }
-
-        // 每侧要预留多少高度：叠起来的两块算高度之和，并排的取最大值
+        // 每侧算两件事：每条竖带里各块摞起来的位置，以及这一侧总共要预留多高。
+        // 预留高度 = 该侧最高的那条竖带（#app 自己带 24u 内边距，所以要从这里再让出去）
         let topBand = 0
         let botBand = 0
-        if (stacked && lyricTop) topBand = m.height + gap + l.height
-        else if (stacked) botBand = l.height + gap + m.height
-        else {
-          if (m && musicTop) topBand = Math.max(topBand, m.height)
-          if (l && lyricTop) topBand = Math.max(topBand, l.height)
-          if (m && !musicTop) botBand = Math.max(botBand, m.height)
-          if (l && !lyricTop) botBand = Math.max(botBand, l.height)
+        for (const top of [true, false]) {
+          const side = blocks.filter((b) => b.top === top).sort((a, b) => a.box.left - b.box.left)
+          let band = 0
+          let i = 0
+          while (i < side.length) {
+            // 一"竖带"：从这一块起，凡是跟它水平上挨着的都收进来
+            const group = [side[i]]
+            let right = side[i].box.right
+            i++
+            while (i < side.length && touchesX(side[i].box.left, right)) {
+              group.push(side[i])
+              right = Math.max(right, side[i].box.right)
+              i++
+            }
+            group.sort((a, b) => a.rank - b.rank)
+            let cursor = pad
+            let used = 0
+            for (const b of group) {
+              if (top) b.el.style.top = cursor + 'px'
+              else b.el.style.bottom = cursor + 'px'
+              cursor += b.box.height + gap
+              used += b.box.height + gap
+            }
+            band = Math.max(band, used - gap)
+          }
+          if (top) topBand = band
+          else botBand = band
         }
 
         // #app 自己带 24u 内边距，所以从这里再让出「块高 + 一个间距」就够了
@@ -798,6 +1185,7 @@
         const ro = new ResizeObserver(scheduleLayout)
         ro.observe(musicEl)
         ro.observe(lyricEl)
+        ro.observe(pickEl)
       }
 
       /**
@@ -857,6 +1245,8 @@
       }
 
       function addItem(ev) {
+        // 歌词源 / 点歌源里不该冒出弹幕
+        if (!shows('danmaku')) return
         if (ev.type === 'gift' && !cfg.showGift) return
         if (ev.type === 'superchat' && !cfg.showSuperchat) return
         if (ev.type === 'enter' || ev.type === 'live' || ev.type === 'offline') return
@@ -943,6 +1333,12 @@
           statusEl.classList.remove('is-show')
           return
         }
+        // 拆开用的时候四个源各弹一句「已连接」，会叠在同一处看起来像出了故障。
+        // 所以那一类就只留「出错」这一种 —— 断线本来也是要立刻看见的。
+        if (ONLY && !bad) {
+          statusEl.classList.remove('is-show')
+          return
+        }
         statusEl.textContent = text
         statusEl.classList.toggle('is-bad', Boolean(bad))
         statusEl.classList.add('is-show')
@@ -984,6 +1380,15 @@
                 playing: Boolean(p.playing),
               }
               renderLyric()
+            }
+            else if (msg.type === 'voicepick') {
+              // 逐字段取值：panel 为 null 就是「现在没人在选」，得把面板收掉
+              const p = msg.payload || {}
+              pickState = {
+                panel: p.panel || null,
+                waiting: Number(p.waiting) || 0,
+              }
+              renderPick()
             }
             else if (msg.type === 'faces') {
               // 迟到的客户端补发：先把映射灌进表，再回填已经渲染出来的那些

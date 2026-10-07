@@ -15,6 +15,10 @@
     "test": "node scripts/smoke.cjs",
     "e2e:danmaku": "electron scripts/e2e-danmaku.cjs",
     "e2e:lyric": "electron scripts/e2e-lyric-switch.cjs",
+    "e2e:tts": "electron scripts/e2e-tts-name.cjs",
+    "e2e:voicepick": "electron scripts/e2e-voicepick.cjs",
+    "e2e:launchpad": "electron scripts/e2e-launchpad.cjs",
+    "e2e:panels": "electron scripts/e2e-panels.cjs",
     "start": "electron ."
   },
   "dependencies": {
