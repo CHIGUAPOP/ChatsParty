@@ -27,6 +27,20 @@ B 站直播间弹幕姬 · 弹幕语音播报 · 多平台 TTS · MD3 动态配�
 - **Material Design 3 主题** —— 跟随封面取色的动态配色，深浅色模式。
 - **配置安全** —— 所有密钥与 Cookie 使用 Electron `safeStorage` 加密后存本地，**不写入仓库**。
 
+## 直接下载使用（免安装）
+
+不想装 Node、也不想自己构建的话，去 **[Releases](https://github.com/CHIGUAPOP/ChatsParty/releases)**
+下载最新的 `ChatsParty-x.y.z-Portable.exe`，双击即用。
+
+- **免安装**：不写注册表、不留卸载项，扔 U 盘里也能跑。
+- **升级**：直接用新版本的 exe 覆盖旧的就行。但**别删 `%APPDATA%\ChatsParty`** —— 你的密钥、
+  Cookie、音色库都在那儿，删了就要重新配。
+- **防火墙**：首次启动会弹一次提示，叠加层要监听本地 12450 端口给 OBS 连，选「专用网络」允许即可。
+- **SmartScreen**：程序没有买代码签名证书，首次运行可能被拦一下，点「更多信息」→「仍要运行」。
+
+> 想要安装版（带开始菜单项和卸载项）也可以自己打：把 `package.json` 里
+> `build.win.target` 改回 `"nsis"`，再 `npm run build`。
+
 ## 环境要求
 
 - **Node.js ≥ 18**（推荐 20 / 22）
@@ -122,8 +136,20 @@ build/               打包资源：应用图标 build/icon.png（源图）与 b
 ## 打包
 
 ```bash
-npm run build      # vite build + electron-builder（输出到 release/）
+npm run build            # vite build + electron-builder → release/ChatsParty-x.y.z-Portable.exe
+npm run verify:package   # 起一次包确认真能跑（临时配置 + 随机端口，跑完自动关掉）
+npm run release          # 打包 → 传到 GitHub Releases
 ```
+
+打出来的是**免安装版单文件**，双击即用。
+
+发布一律走 GitHub Releases，**exe 不进 git 仓库**：一个包七十多 MB，而 git 的历史只增不减 ——
+提交进去以后每次发版都留一份，仓库很快上 GB，想清理只能重写历史。`release/` 已在 `.gitignore` 里。
+
+`npm run release` 需要 [GitHub CLI](https://cli.github.com/)（`gh`），凭据按
+「环境变量 `GH_TOKEN` → gh 已登录的账号 → 本机 git 凭据」的顺序找，所以只要你能 `git push`，就能发版。
+常用参数：`--skip-build`（只重传现成的包）、`--draft`（先发草稿）、`--file <路径>`（传别处打好的包）、
+`--dry-run`（只打包不上传）。
 
 ## 声明
 

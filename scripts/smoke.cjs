@@ -773,6 +773,84 @@ async function testVoices() {
 
   console.log('\n[32] 测试别去抢直播间的端口')
   testE2eIsolation()
+
+  console.log('\n[33] 打包与发布')
+  testPackaging()
+}
+
+/**
+ * 打包与发布：让用户能直接下到一个双击就能用的 exe。
+ *
+ * 这里守的核心是**exe 绝不进 git 仓库**。一个免安装版一百多 MB，而 git 的历史只增不减 ——
+ * 提交进去以后每次发版都留一份，仓库很快上 GB，clone 越来越慢，而且**删不掉**
+ * （除非重写历史）。所以 `release/` 必须在 .gitignore 里，发版一律走 GitHub Releases。
+ */
+function testPackaging() {
+  const root = path.join(__dirname, '..')
+  const read = (p) => fs.readFileSync(path.join(root, p), 'utf8')
+  const pkg = JSON.parse(read('package.json'))
+
+  // ---- 产物：免安装版 ----
+  ok('打的是免安装版（不用装就能跑）', pkg.build.win.target === 'portable', pkg.build.win.target)
+  ok(
+    '产物名带 Portable，一眼看得出是哪个',
+    /Portable/.test(pkg.build.portable.artifactName),
+    pkg.build.portable.artifactName,
+  )
+  ok('产物名带版本号（多版本堆一起时分得清）', /\$\{version\}/.test(pkg.build.portable.artifactName))
+  // 不设的话每次启动都解压到随机临时目录：启动慢，temp 里还会越堆越多
+  ok(
+    '解压到固定目录（第二次启动才快）',
+    typeof pkg.build.portable.unpackDirName === 'string',
+    pkg.build.portable.unpackDirName,
+  )
+  ok('图标还在', pkg.build.win.icon === 'build/icon.ico')
+
+  // ---- 本段最要紧的一条 ----
+  const ignore = read('.gitignore')
+  ok(
+    'release/ 被忽略：exe 绝不进仓库',
+    /^release\/$/m.test(ignore),
+    ignore.split('\n').filter((l) => l.includes('release')),
+  )
+  // 反向确认：别哪天为了「省事」又把 release 放出来
+  ok('没有 !release 这种反向例外', !/^!.*release/m.test(ignore))
+  ok('开发脚本不打进包（用户不需要它们）', !pkg.build.files.some((f) => /^scripts/.test(f)), pkg.build.files)
+  ok('界面产物打了进去（不然起来是白屏）', pkg.build.files.includes('dist-renderer/**'))
+  ok('叠加层打了进去（不然 OBS 那片是空的）', pkg.build.files.includes('overlay/**'))
+
+  // ---- 发布脚本 ----
+  ok('有一键发布的命令', pkg.scripts.release === 'node scripts/release.cjs', pkg.scripts.release)
+  const rel = read('scripts/release.cjs')
+  // 发 Release 只要 repo 权限；`gh auth login` 还会额外要 read:org，那条路走不通时得能自己取 token
+  ok('凭据能自己取（能 push 就够发 Release）', /git credential fill/.test(rel) && /GH_TOKEN/.test(rel))
+  ok('认识装在 LOCALAPPDATA 里的 gh', /gh-cli/.test(rel))
+  ok('重传时覆盖，而不是报错了事', /--clobber/.test(rel))
+  ok('能只重传、不重新打包', /--skip-build/.test(rel))
+  ok('能先发成草稿确认一下', /--draft/.test(rel))
+  // 包常常是在工作副本里打的，而发布要在交付仓库里跑（那里才有 git 上下文）
+  ok('能从别处拿现成的包', /val\('--file'\)/.test(rel))
+  // 异步 execFile **没有** input 选项，忘了手动喂 stdin，`git credential fill` 会卡到超时
+  ok('往 stdin 喂数据是自己写的（异步 execFile 没这选项）', /child\.stdin\.write\(input\)/.test(rel))
+  ok('传的就是免安装版那个文件', /Portable\/i\.test/.test(rel))
+
+  // ---- 发版前先验一遍包真的能跑 ----
+  ok(
+    '有「验一次包」的命令',
+    pkg.scripts['verify:package'] === 'node scripts/verify-package.cjs',
+    pkg.scripts['verify:package'],
+  )
+  const ver = read('scripts/verify-package.cjs')
+  // 这两条是踩过的坑：有些 shell 里 ELECTRON_RUN_AS_NODE=1，会被子进程继承，
+  // 于是 Electron 退化成纯 Node —— 不开窗口、不起服务，表现就是「双击了没反应」。
+  ok('验包时会清掉 ELECTRON_RUN_AS_NODE', /delete env\.ELECTRON_RUN_AS_NODE/.test(ver))
+  ok('也不把 NODE_OPTIONS 带进去', /delete env\.NODE_OPTIONS/.test(ver))
+  // userData 跟着 APPDATA 走：这样才读不到真实配置、不会自动连直播间
+  ok('用临时配置目录跑（不碰真实设置）', /APPDATA: TMP/.test(ver) && /user-data-dir=/.test(ver))
+  ok('用随机端口跑（不抢 12450）', /CP_OVERLAY_PORT: String\(PORT\)/.test(ver) && /30000 \+ Math\.floor/.test(ver))
+  // 拉起来就不管的话会留一个卡住的窗口，用户上次就是被这个吓到的
+  ok('跑完强制结束，不留窗口', /Stop-Process/.test(ver))
+  ok('超时也有兜底', /hardStop/.test(ver))
 }
 
 /**

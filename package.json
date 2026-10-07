@@ -11,6 +11,8 @@
     "launch": "node scripts/launch.cjs",
     "build:renderer": "node scripts/launch.cjs --build",
     "build": "vite build && electron-builder",
+    "release": "node scripts/release.cjs",
+    "verify:package": "node scripts/verify-package.cjs",
     "typecheck": "tsc --noEmit",
     "test": "node scripts/smoke.cjs",
     "e2e:danmaku": "electron scripts/e2e-danmaku.cjs",
@@ -50,9 +52,12 @@
       "package.json"
     ],
     "win": {
-      "target": "nsis",
-      "icon": "build/icon.ico",
-      "artifactName": "ChatsParty-${version}-Setup.${ext}"
+      "target": "portable",
+      "icon": "build/icon.ico"
+    },
+    "portable": {
+      "artifactName": "ChatsParty-${version}-Portable.${ext}",
+      "unpackDirName": "ChatsParty"
     },
     "nsis": {
       "oneClick": false,
