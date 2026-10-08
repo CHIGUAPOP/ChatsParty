@@ -17,12 +17,14 @@ const { createPickQueue } = require('./voice-pick.cjs')
 const LP = require('./launchpad.cjs')
 const { createSpeechControl } = require('./speech-control.cjs')
 const { createTtsCache } = require('./tts-cache.cjs')
+const VW = require('./viewers.cjs')
 const NCM = require('./netease.cjs')
 const net = require('./lib/net.cjs')
 const { normalizeKey, describeKey, keySummary, keyWarnings, keyShapeWarnings } = require('./lib/keytext.cjs')
 const { FaceResolver } = require('./faces.cjs')
 const { Logger } = require('./log.cjs')
 const { OverlayServer, OVERLAY_PANELS } = require('./overlay.cjs')
+const { FloatWindows, FLOAT_PANELS } = require('./float.cjs')
 const { ConfigStore } = require('./store.cjs')
 const pkg = require('../package.json')
 
@@ -47,6 +49,8 @@ let log = null
 // 网易云网页登录窗口（单例）。放在这里是为了关窗时能摘掉监听
 let ncmWin = null
 let ncmSession = null
+/** 桌面浮窗（弹幕/观众/礼物/音乐四个）。懒建：要用才起窗口，配置里没开过就不占一个窗口 */
+let floats = null
 // 是我们自己关的（登录成功）还是用户手动关的。用户手动关要通知界面解除「等待登录中」
 let ncmClosedByUs = false
 const NCM_LOGIN_PARTITION = 'persist:ncm-login'
@@ -366,6 +370,13 @@ function createWindow() {
     store.patch({ window: { width: w, height: h } })
   })
 
+  // 浮窗是个常驻小窗，它开着的时候「所有窗口都关了」这个信号永远等不到 ——
+  // 结果就是主界面关了、进程还在后台跑，任务栏里又看不见。所以主窗口没了就整个退出。
+  win.on('closed', () => {
+    if (floats) floats.closeAll()
+    if (process.platform !== 'darwin') app.quit()
+  })
+
   if (isDev) {
     win.webContents.on('console-message', (_e, level, message, line, sourceId) => {
       if (level === 'error' || level === 3 || level === 2) {
@@ -384,12 +395,19 @@ function createWindow() {
  * 此时 webContents 已经没了，直接 send 会抛 "Render frame was disposed"。
  */
 function send(channel, payload) {
-  try {
-    if (win && !win.isDestroyed() && !win.webContents.isDestroyed()) {
-      win.webContents.send(channel, payload)
+  /**
+   * 广播给所有窗口，不只是主窗口 —— 浮窗也是渲染层本尊（同一个 preload），
+   * float:state / config:changed / 弹幕事件这些它同样要收。
+   * 窗口正在关闭时 send 会抛 "Render frame was disposed"，逐个 try。
+   */
+  for (const w of BrowserWindow.getAllWindows()) {
+    try {
+      if (!w.isDestroyed() && !w.webContents.isDestroyed()) {
+        w.webContents.send(channel, payload)
+      }
+    } catch {
+      /* 这个窗口已经在关闭了，丢掉这一帧就行 */
     }
-  } catch {
-    /* 窗口已经在关闭了，丢掉这一帧就行 */
   }
 }
 
@@ -558,8 +576,13 @@ async function startLive(roomIdInput) {
   live.on('popularity', (p) => send('live:popularity', { popularity: p }))
   live.on('error', (e) => send('live:error', { message: e.message || String(e) }))
   live.on('event', (ev) => onLiveEvent(ev))
+  // 每个 cmd 只记一次。出了「某种事件根本不显示」的问题时，这是唯一能立刻回答
+  // 「包到底发过来没有」的东西 —— 没有它只能靠猜（是没收到，还是收到了没认出来）。
+  live.on('raw', logLiveCmd)
 
   await live.start()
+  // 进了房间才知道主播 uid，到时候才能查高能榜
+  startViewersPolling()
   return { realRoomId, title: info.title || '' }
 }
 
@@ -568,7 +591,169 @@ function stopLive() {
     live.stop()
     live = null
   }
+  // 房间断了就没得问了 —— 留着定时器只会一路撞风控
+  stopViewersPolling()
   send('live:status', { status: 'idle' })
+}
+
+/* ------------------------------ 在线观众 ------------------------------
+   高能榜。B站没有任何接口能给出「此刻房间里都有谁」，只有这一张榜：
+   当前在线、且**有过互动**（发弹幕 / 投喂 / 点赞）的人，按贡献值排行。
+   所以界面上永远写「高能榜」，不写成「观众总数」——
+   榜上 80 人不等于直播间的观看人数，写错了主播会误判。
+
+   合并分页、去重、间隔钳制、错误翻译都在 electron/viewers.cjs（纯逻辑，有测试盯着），
+   这里只负责轮询、推帧，以及把头像接进既有的抓取管线。
+*/
+
+/** 最近一次拉到的名单。推给界面和叠加层的是同一份 */
+let viewersState = {
+  ok: false,
+  roomId: 0,
+  anchorUid: 0,
+  onlineNum: 0,
+  items: [],
+  updatedAt: 0,
+  error: '',
+  /**
+   * 「在线用户」那一路单独的错误。
+   *
+   * 两份名单的来源不同：高能榜匿名就能调，在线名单**必须登录**。
+   * 所以没登录时不能把整张榜判死 —— 榜上那几十人还是好的，
+   * 只是看不到「在线但没互动」的那批。这个字段就是用来把这件事说清楚的。
+   */
+  onlineError: '',
+  fetching: false,
+}
+let viewersTimer = null
+/** 同一时刻只跑一次 —— 自动轮询和用户手点刷新会撞在一起 */
+let viewersBusy = false
+/**
+ * 真正发出去的请求次数。
+ * 用来分辨「定时器根本没跳」和「跳了但榜单没变化」—— 这两种毛病在界面上长得一模一样，
+ * 只看结果分不出来。
+ */
+let viewersFetches = 0
+
+function viewersConfig() {
+  const v = store.get().viewers || {}
+  return { enabled: v.enabled !== false, intervalMs: VW.clampInterval(v.intervalMs) }
+}
+
+function viewersSnapshot() {
+  return viewersState
+}
+
+function pushViewersState() {
+  send('viewers:state', viewersState)
+  if (overlay) overlay.broadcast('viewers', viewersState)
+}
+
+/**
+ * 拉一次高能榜。
+ *
+ * 「还没连上直播间」不算错误 —— 那是启动后的常态，只是没东西可拉。
+ * 真正的错误（风控 -352 之类）留在 state.error 里，界面按需展示。
+ */
+async function refreshViewers({ manual = false } = {}) {
+  const room = store.get().room || {}
+  const roomId = Number(room.realRoomId || room.roomId || 0)
+  const anchorUid = Number(room.anchorUid || 0)
+  if (!roomId || !anchorUid) {
+    viewersState = { ...viewersState, ok: false, fetching: false, roomId, anchorUid, error: '还没连上直播间' }
+    if (manual) pushViewersState()
+    return viewersState
+  }
+  // 手点刷新撞上自动轮询时直接返回上一份，别把两次请求打成一前一后（风控就是这么来的）
+  if (viewersBusy) return viewersState
+
+  // api 是懒建的：没连过直播间时它还是 null，而「在线用户」那一路要登录态，
+  // 必须先把会话建出来（ensureSession 是幂等的）
+  ensureSession()
+
+  viewersBusy = true
+  viewersFetches++
+  try {
+    // 推帧也要在 try 里：以前这行在 try 外面，它一旦抛出去（比如叠加层广播出问题），
+    // viewersBusy 就永远停在 true —— 之后每次轮询都在上面那行直接 return，
+    // 界面从此定格在第一份名单上，而且**什么日志都没有**。
+    viewersState = { ...viewersState, fetching: true, roomId, anchorUid }
+    pushViewersState()
+    const merged = await api.getOnlineViewers({ roomId, anchorUid })
+
+    // 「在线用户」是另一路：人在房间里就算，不要求互动过，网页端那批
+    // 排名栏显示「-」的人就是它给的。**要登录**，所以它失败**不算**整体失败 ——
+    // 榜上那几十人还是好的，只是少一批「只看不说」的人。
+    let online = { onlineNum: 0, items: [] }
+    let onlineError = ''
+    try {
+      online = VW.mergeOnlineRank(await api.getOnlineRank({ roomId, anchorUid }))
+    } catch (e) {
+      onlineError = e.message || String(e)
+      log?.warn('[viewers] 在线名单拉取失败（榜上的人不受影响）', onlineError)
+    }
+
+    const items = VW.combineViewers(merged.items, online.items)
+    // 头像有防盗链，必须由主进程带 Referer 抓回来转 data:。抓回来会广播 face 帧，
+    // 叠加层按 data-face 回填 —— 和弹幕走的是同一条路，不用另起一套
+    for (const it of items) if (it.face) ensureFace(it.face)
+    viewersState = {
+      ok: true,
+      roomId,
+      anchorUid,
+      // 在线人数优先用「在线用户」那份：它算的是「人在房间里」，比高能榜的
+      // onlineNum 更接近网页端右上角那个数字。拿不到就退回榜单的
+      onlineNum: online.onlineNum || merged.onlineNum,
+      items,
+      updatedAt: Date.now(),
+      error: '',
+      onlineError,
+      fetching: false,
+    }
+  } catch (e) {
+    // 拉失败时**保留上一份名单**（清空会让画面闪一下变空），但 error 要留着 ——
+    // 界面必须能看见「这是旧的」，否则一份卡住的旧数据和一个空房间长得一样
+    viewersState = { ...viewersState, ok: false, fetching: false, error: e.message || String(e), updatedAt: Date.now() }
+    log?.warn('[viewers] 高能榜拉取失败', viewersState.error)
+  } finally {
+    viewersBusy = false
+    try {
+      pushViewersState()
+    } catch {
+      /* 推帧失败不该把锁卡住，上面已经放开了 */
+    }
+  }
+  return viewersState
+}
+
+function stopViewersPolling() {
+  if (viewersTimer) {
+    clearInterval(viewersTimer)
+    viewersTimer = null
+  }
+}
+
+/**
+ * 房间连上之后才开始轮询，连上先立刻拉一次（不然要等一整个间隔才看到东西）。
+ * 间隔下限 10 秒是接口的风控底线，改小会被 clampInterval 钳回去。
+ */
+function startViewersPolling() {
+  stopViewersPolling()
+  const { enabled, intervalMs } = viewersConfig()
+  if (!enabled) {
+    log?.info('[viewers] 自动刷新是关的，不轮询')
+    return
+  }
+  // 记一笔「轮询开了、间隔多少」。这里不写日志的话，出了「名单不动」的问题
+  // 只能靠猜：日志里既没有失败、也看不出到底有没有在跑
+  log?.info('[viewers] 开始轮询高能榜，间隔', `${Math.round(intervalMs / 1000)} 秒`)
+  refreshViewers().catch((e) => log?.warn('[viewers] 这一轮异常', e?.message || String(e)))
+  // 定时器里这个 promise 没人接：一旦 reject，Node 会按 unhandledRejection 处理，
+  // 在 Electron 主进程里那是**整个应用直接退出**。所以这里必须自己收掉。
+  viewersTimer = setInterval(
+    () => refreshViewers().catch((e) => log?.warn('[viewers] 这一轮异常', e?.message || String(e))),
+    intervalMs,
+  )
 }
 
 /* ---------------------------- 一键准备开播 ----------------------------
@@ -825,6 +1010,40 @@ async function runLaunchpad(payload = {}) {
   } finally {
     lpBusy = false
   }
+}
+
+/**
+ * 每个 cmd 只在日志里记一次。
+ *
+ * 为什么值得专门记：出了「某种事件根本不显示」的问题时（比如礼物），
+ * 唯一的第一个问题就是「包到底发过来没有」。没有这行日志，只能靠猜 ——
+ * 是没收到、还是收到了没认出来、还是认出来了没画出来，三者长得一模一样。
+ * B站改字段名/改 cmd 名的时候，这里也是最直接的证据。
+ */
+
+/** 和「钱」有关的 cmd。这些连 payload 一起记，其余只记名字 */
+const MONEY_CMD = /GIFT|GUARD|SUPER_CHAT|TOAST|COMBO/
+
+const seenLiveCmds = new Set()
+function logLiveCmd(raw) {
+  const cmd = String(raw?.cmd || '')
+  if (!cmd || seenLiveCmds.has(cmd)) return
+  seenLiveCmds.add(cmd)
+  // 只记名字不够：礼物那次就是「包收到了、但 cmd 变成了 SEND_GIFT_V2」，
+  // 光看「收到了 SEND_GIFT_V2」还得再猜一次字段名。钱相关的包留一份 payload，
+  // 下次 B站 再改名字/改结构，日志本身就能给出答案。
+  // 其余 cmd 只记名字 —— 弹幕一秒十条，全存会把日志刷爆。
+  if (MONEY_CMD.test(cmd)) {
+    let dump = ''
+    try {
+      dump = JSON.stringify(raw?.data ?? null).slice(0, 900)
+    } catch {
+      dump = '(payload 无法序列化)'
+    }
+    log?.info('[live] 收到 cmd', cmd, dump)
+    return
+  }
+  log?.info('[live] 收到 cmd', cmd)
 }
 
 function onLiveEvent(ev) {
@@ -1761,6 +1980,15 @@ function registerIpc() {
     }
     // 叠加层设置改了要立刻推给已连接的 OBS 页面
     if (patch && patch.overlay && overlay) overlay.broadcast('config', next.overlay)
+    // 浮窗的开关 / 旋钮改了要当场落到窗口上（开着就是「拖滑块马上看得见」）
+    if (patch && patch.float) {
+      ensureFloats().syncAll()
+    }
+    // 在线观众的开关 / 刷新间隔改了：重开定时器，不然新间隔要等下次连房间才生效
+    if (patch && patch.viewers) {
+      stopViewersPolling()
+      if (live) startViewersPolling()
+    }
     // 改端口要重启服务，否则界面显示的地址和实际监听的对不上
     if (patch && patch.overlay && Number(next.overlay?.port) !== Number(before) && overlay) {
       await overlay.stop()
@@ -1778,6 +2006,11 @@ function registerIpc() {
     return store.get()
   })
   ipcMain.handle('config:reset', () => store.reset())
+
+  /* 在线观众（高能榜）。没连直播间时返回一份「空的但结构完整」的状态，
+     界面据此显示「先连上直播间」，而不是空白或者报错 */
+  ipcMain.handle('viewers:state', () => viewersSnapshot())
+  ipcMain.handle('viewers:refresh', () => refreshViewers({ manual: true }))
 
   ipcMain.handle('tts:providers', () => PROVIDERS)
 
@@ -2399,6 +2632,44 @@ function registerIpc() {
     return { ok: true, clients: overlay.clientCount }
   })
 
+  /* ------------------------ 桌面浮窗（弹幕/观众/礼物/音乐） ------------------------ */
+  // 管家本体在模块层（bootstrap 的启动恢复也要用它，见 ensureFloats 定义处）
+
+  ipcMain.handle('float:state', () => ensureFloats().state())
+
+  ipcMain.handle('float:open', async (_e, panel) => {
+    if (!FLOAT_PANELS.includes(panel)) return { ok: false, message: `不认识的浮窗：${panel}` }
+    try {
+      await ensureFloats().open(panel)
+      store.patch({ float: { panels: { [panel]: { opened: true } } } })
+      pushConfig()
+      return { ok: true }
+    } catch (e) {
+      log?.warn('[float] 打开失败', e.message || String(e))
+      return { ok: false, message: e.message || String(e) }
+    }
+  })
+
+  ipcMain.handle('float:close', (_e, panel) => {
+    if (!FLOAT_PANELS.includes(panel)) return { ok: false, message: `不认识的浮窗：${panel}` }
+    if (floats && floats.isOpen(panel)) {
+      floats.close(panel)
+    } else {
+      log?.info(`[float] 收到收起指令，但${panel}浮窗并没有开着`)
+    }
+    store.patch({ float: { panels: { [panel]: { opened: false } } } })
+    pushConfig()
+    return { ok: true }
+  })
+
+  /** 浮窗里的设置弹层：改不透明度 / 字体大小，当场生效 */
+  ipcMain.handle('float:set', (_e, panel, patch) => {
+    if (!FLOAT_PANELS.includes(panel)) return { ok: false, message: `不认识的浮窗：${panel}` }
+    ensureFloats().set(panel, patch || {})
+    pushConfig()
+    return { ok: true }
+  })
+
   /** 用主进程自己去拉一次叠加层页面，能拿到 HTML 就说明本地服务是活的 */
   ipcMain.handle('overlay:selfcheck', async () => {
     const port = overlayPort()
@@ -2415,7 +2686,7 @@ function registerIpc() {
       out.http = r.status
       out.message = r.ok
         ? out.clients
-          ? `服务正常，且已有 ${out.clients} 个连接（OBS 已连上）`
+          ? `服务正常，且已有 ${out.clients} 个连接（OBS 浏览器源或桌面浮窗）`
           : '服务正常，但还没有客户端连上 —— 检查 OBS 浏览器源的 URL 是否一致'
         : `HTTP ${r.status}`
     } catch (e) {
@@ -2552,6 +2823,8 @@ async function ensureOverlay(port) {
     overlay.lyricProvider = () => snapshotLyric()
     // 音色选择面板：OBS 中途连上时补发当前那一条，不然要等下一个观众搜才出现
     overlay.voicePickProvider = () => pickQueue.snapshot()
+    // 在线观众：OBS 中途连上时补发当前名单，不然要等下一次轮询（十几秒）
+    overlay.viewersProvider = () => viewersSnapshot()
     overlay.onClientsChange = () => sendOverlayStatus()
   }
   return overlay.start(Number(port) || overlayPort())
@@ -2617,6 +2890,53 @@ if (!gotSingleInstanceLock) {
   app.whenReady().then(bootstrap)
 }
 
+/**
+ * 四个桌面浮窗（弹幕/观众/礼物/音乐）的管家。懒建，模块层 ——
+ * registerIpc 的四个 IPC 和 bootstrap 的启动恢复都要用它。
+ *
+ * 浮窗加载的是应用渲染层本尊（?float=<panel> 只渲染那一个区域），
+ * 和主窗口共用同一份 preload —— 所以弹幕浮窗能直接发弹幕，
+ * 观众/礼物/音乐三块就是弹幕页右侧栏那几个组件本尊，样式天然一致。
+ */
+function ensureFloats() {
+  if (floats) return floats
+  floats = new FloatWindows({
+    preload: path.join(__dirname, 'preload.cjs'),
+    icon: appIcon,
+    // 浮窗「开了但看不见」和「压根没开」在屏幕上完全一样，只能靠日志分辨
+    log: (m, e) => log?.info(m, e),
+    getConfig: () => store.get().float || {},
+    patchConfig: (p) => {
+      store.patch({ float: p })
+      pushConfig()
+    },
+    load: async (w, panel) => {
+      if (isDev) {
+        await w.loadURL(`http://127.0.0.1:5180/?float=${panel}`)
+      } else {
+        await w.loadFile(path.join(__dirname, '..', 'dist-renderer', 'index.html'), {
+          query: { float: panel },
+        })
+      }
+      // 头像缓存整包补发给新开的浮窗：ensureFace 解析过一个头像只广播一次，
+      // 那时浮窗还没开的话它那边 cache 是空的 —— 之后同一个人再说话也不会
+      // 重播（faceDispatched 挡着），浮窗里就一直显示首字母占位。
+      try {
+        const cached = faces ? [...faces.cache] : []
+        for (const [src, data] of cached) {
+          if (!w.isDestroyed() && !w.webContents.isDestroyed()) {
+            w.webContents.send('live:face', { src, data })
+          }
+        }
+      } catch {
+        /* 补发失败只是头像变占位，不影响别的 */
+      }
+    },
+    onState: (s) => send('float:state', s),
+  })
+  return floats
+}
+
 /** 主进程启动流程。抽出来是为了让上面的「单实例」判断保持扁平。 */
 function bootstrap() {
   log = new Logger(app.getPath('userData'))
@@ -2660,6 +2980,13 @@ function bootstrap() {
   } else {
     sendOverlayStatus()
   }
+
+  // 上次开着的浮窗都带回来（每个面板独立判断）
+  setTimeout(() => {
+    ensureFloats()
+      .restore()
+      .catch((e) => log?.warn('[float] 恢复浮窗失败', e.message || String(e)))
+  }, 300)
 
   // 上次勾了自动连接就顺手接上
   const room = store.get().room
@@ -2716,6 +3043,39 @@ function bootstrap() {
       setOwnUid(uid) {
         ensureSession()
         session.jar.set(`DedeUserID=${Number(uid) || 0}; Domain=.bilibili.com; Path=/; Max-Age=3600`)
+      },
+      /**
+       * 在线观众（高能榜）的派发口。
+       *
+       * 「拉了一次就不再刷新」这种毛病只有把**真正的轮询**跑起来才看得见 ——
+       * 静态断言和单测都验不到「定时器到底有没有在跳」。
+       * `setFetcher` 换掉取榜单的实现，测试里不必真联网，只验链路。
+       */
+      viewers: {
+        snapshot: () => viewersSnapshot(),
+        config: () => viewersConfig(),
+        start: () => startViewersPolling(),
+        stop: () => stopViewersPolling(),
+        refresh: (opts) => refreshViewers(opts),
+        /** 假装房间已经连上了 —— 不真连直播间也能验轮询 */
+        setRoom: (room) => store.patch({ room: room || {} }),
+        setFetcher: (fn) => {
+          ensureSession() // api 是懒建的，不先初始化出来就没得替换
+          api.getOnlineViewers = fn
+        },
+        /**
+         * 「在线用户」那一路的派发口。
+         *
+         * 单独一个口是因为它**要登录**：真实环境里没登录就是 -101，
+         * 而 e2e 用的是临时 userData，永远没登录。要验「合并后的界面」
+         * 就得把这一路也换掉。
+         */
+        setOnlineFetcher: (fn) => {
+          ensureSession()
+          api.getOnlineRank = fn
+        },
+        /** 数一数真正发出去的请求次数，用来分辨「定时器没跳」和「跳了但没更新」 */
+        calls: () => viewersFetches,
       },
     }
   }

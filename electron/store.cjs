@@ -84,6 +84,13 @@ const DEFAULTS = {
     musicQueueCount: 3,
     // 弹幕堆在哪个角：tl/tr/bl/br。头像与文字对齐会跟着这一侧自动镜像
     danmakuPos: 'br',
+    /**
+     * 气泡塞不下时，最老那条往哪边滑出去并淡出。
+     *   natural = 朝离角落最远的那一侧（贴底就往上走、贴顶就往下走）
+     *   up / down = 固定方向
+     * 叠加层现在是「能塞几条留几条」，塞不下才走这条，不会再为了多塞而把气泡压扁。
+     */
+    danmakuOverflow: 'natural',
     // 界面整体大小百分比：乘在头像、间距、圆角、字号上，OBS 画布不等于 1080p 时用来整体调大小
     scale: 100,
     // 字体大小百分比：只再乘一次字号。想在不动布局的前提下把字调大就用它
@@ -100,6 +107,14 @@ const DEFAULTS = {
     voicePickPos: 'tr',
     voicePickHits: 4,
     voicePickTtlMs: 8000,
+    /**
+     * 在线观众面板：把高能榜前几名常驻在画面上。
+     * 榜单是空的（没连直播间 / 房间没人互动）时整块自动隐藏，不留空框 ——
+     * 和点歌、歌词一个规矩。
+     */
+    showViewers: true,
+    viewersPos: 'bl',
+    viewersCount: 5,
     // 自动避让：画面窄（比如把 OBS 浏览器源拖成一条竖带）时，
     // 把弹幕/点歌/歌词分到互不相交的几段里，不再压成一坨
     autoLayout: true,
@@ -113,6 +128,67 @@ const DEFAULTS = {
     sendMode: 1,
     // 弹幕列表是否自动滚到底部。存进配置，切走再回来不该被重置
     autoScroll: true,
+  },
+  /**
+   * 桌面浮窗：把弹幕功能区的每一块单独开成无边框小窗，压在别的窗口上面。
+   *
+   * 一共四块：弹幕（带输入框）/ 当前观众 / 礼物·付费留言 / 音乐控制台。
+   * 主窗口里点区域右上角的圆点「弹出为浮窗」，那块区域就收进浮窗；
+   * 浮窗里点 × 收回，内容回到主窗口 —— 两边永远只显示一份。
+   *
+   * 浮窗加载的是应用渲染层本尊（?float=<panel>），不是 OBS 叠加层 ——
+   * 样式跟弹幕功能区一模一样（同一套 M3 设计令牌）。
+   *
+   * ⚠️ 窗口一律不透明（深色底板）。透明窗要 GPU 合成，本程序为兼容
+   * 无 GPU 环境把它关了（见 main.cjs 顶部），两者一撞就一像素都画不出来。
+   */
+  float: {
+    // 全体浮窗共用的置顶。压全屏游戏要用 screen-saver 档，见 float.cjs
+    alwaysOnTop: true,
+    /** 每个面板一份。opened = 上次走的时候开着的，启动时照着带回来 */
+    panels: {
+      danmaku: {
+        opened: false,
+        // 0.2 ~ 1。渲染层把 opacity 写在内容区 CSS 上（横杠始终不透明）
+        opacity: 0.95,
+        // 「字体大小」：窗口自身 zoom 的百分比（50–200）
+        scale: 100,
+        // 弹幕浮窗是否显示头像。关掉能一眼看更多弹幕（只对弹幕浮窗生效）
+        showFaces: true,
+        // 记住上次拖到哪儿、拉成多大。x / y 为 null = 没记住过，系统自己摆。
+        // 拖动时主进程还会记一笔 sf（那块屏的缩放），恢复时跨缩放屏要折算
+        bounds: { x: null, y: null, width: 380, height: 620 },
+      },
+      viewers: {
+        opened: false,
+        opacity: 0.95,
+        scale: 100,
+        bounds: { x: null, y: null, width: 330, height: 560 },
+      },
+      gifts: {
+        opened: false,
+        opacity: 0.95,
+        scale: 100,
+        bounds: { x: null, y: null, width: 370, height: 520 },
+      },
+      music: {
+        opened: false,
+        opacity: 0.95,
+        scale: 100,
+        bounds: { x: null, y: null, width: 360, height: 460 },
+      },
+    },
+  },
+  /**
+   * 在线观众（B站高能榜）。
+   *
+   * 拿不到「完整观众名单」（平台不开放），高能榜只收**在线且有互动**的人，
+   * 所以界面上必须写清楚这一点，别让主播把榜上人数当成观看人数。
+   * intervalMs 有风控下限（10 秒），改小会被钳回去，见 electron/viewers.cjs。
+   */
+  viewers: {
+    enabled: true,
+    intervalMs: 20000,
   },
   // 已经在库里注册过的音色档案。平台名 + 音色 id（或 MiMo 的音色描述）是它的全部内容
   voiceLibrary: [],

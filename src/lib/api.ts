@@ -75,6 +75,11 @@ export interface AppConfig {
     musicPos?: string
     musicQueueCount?: number
     danmakuPos?: string
+    /**
+     * 气泡塞不下时，最老那条往哪边滑出去并淡出。
+     * natural = 朝离角落最远的那一侧（贴底往上、贴顶往下），或强制 up / down。
+     */
+    danmakuOverflow?: 'natural' | 'up' | 'down'
     customCss: string
     /** 界面整体大小百分比（50–200），乘在所有尺寸上 */
     scale?: number
@@ -95,8 +100,26 @@ export interface AppConfig {
     voicePickHits?: number
     /** 每条候选在画面上存活多久（ms）。同时来了多条就按这个时长排队依次放 */
     voicePickTtlMs?: number
+    /** 在线观众（高能榜）面板：常驻在画面上的一小块观众榜 */
+    showViewers?: boolean
+    /** 观众面板位置：tl / tr / bl / br 四个角 */
+    viewersPos?: string
+    /** 面板上最多列几个人（1–20） */
+    viewersCount?: number
     fontFamily: string
     accent: string
+  }
+  /**
+   * 桌面浮窗：弹幕功能区的每一块都能单独弹出成无边框小窗。
+   * 弹出后那块区域在主窗口里就不再显示，收回时物归原主 —— 两边永远只有一份。
+   */
+  float?: {
+    /** 全体浮窗共用的置顶 */
+    alwaysOnTop: boolean
+    /** 每个面板一份配置 */
+    panels: Partial<
+      Record<FloatPanel, { opened?: boolean; opacity?: number; scale?: number; bounds?: FloatBounds; showFaces?: boolean }>
+    >
   }
   /** 一键准备开播：按顺序拉起本机的直播软件 */
   launchpad?: {
@@ -118,7 +141,16 @@ export interface AppConfig {
     sendFontSize: number
     sendMode: number
     autoScroll?: boolean
-    showObsPreview?: boolean
+  }
+  /**
+   * 在线观众（B站高能榜）。
+   * 只有「在线且有过互动」的人会上榜，所以它不等于观看人数 ——
+   * 界面上必须说清楚，别让主播把榜上人数当成观众总数。
+   */
+  viewers?: {
+    enabled: boolean
+    /** 刷新间隔（ms）。风控下限 10 秒，改小会被主进程钳回去 */
+    intervalMs: number
   }
   voiceLibrary: VoiceProfile[]
   voiceBindings: Record<string, string>
@@ -224,6 +256,73 @@ export interface MusicAudio {
   downgraded?: boolean
 }
 
+/** 高能榜上的一个人 */
+export interface ViewerItem {
+  uid: number
+  name: string
+  face: string
+  /** 本场贡献值。榜单就是按它排的；不在榜上的人恒为 0 */
+  score: number
+  /** 0 = 没有大航海，1 总督 / 2 提督 / 3 舰长 */
+  guardLevel: number
+  guard: string
+  /** 荣誉等级（财富等级），0 表示没有 */
+  wealthLevel: number
+  medal: { name: string; level: number } | null
+  /**
+   * 是否在高能榜上。
+   *
+   * false = 只是「人在房间里」，还没有过互动，所以没有贡献值、也没有排名。
+   * 网页端「房间观众」里排名栏显示「-」的那批人就是这些。
+   */
+  onRank: boolean
+}
+
+/**
+ * 在线观众快照。主进程轮询之后推过来，界面与 OBS 叠加层读的是同一份。
+ *
+ * items 是**两份名单合起来**的：高能榜（在线且有互动）+ 在线用户（人在房间里就算）。
+ * 但仍然不等于观看人数 —— 挂着一直不动的纯潜水观众两边都不出现。
+ *
+ * 叠加层读的是同一份，加字段要三处一起改（这里 / main.cjs 的初始值 / overlay 的默认 cfg）。
+ */
+export interface ViewersState {
+  ok: boolean
+  roomId: number
+  anchorUid: number
+  /** 当前在线人数（B站给的近似值，不是「人气值」） */
+  onlineNum: number
+  items: ViewerItem[]
+  updatedAt: number
+  error: string
+  /**
+   * 「在线用户」那一路单独的失败原因。
+   *
+   * 它要登录态，高能榜不要 —— 没登录时榜还是好的，只是看不到「只看不说」的人。
+   * 分开一个字段是为了不把整张榜判死，同时又能把这件事说出来。
+   */
+  onlineError: string
+  fetching: boolean
+}
+
+/** 浮窗面板名。和 electron/float.cjs 的 FLOAT_PANELS、?float= 参数逐字一致 */
+export type FloatPanel = 'danmaku' | 'viewers' | 'gifts' | 'music'
+
+/** 浮窗记下来的位置与大小。x / y 为 null = 还没记住过；sf = 记这笔时所在屏幕的缩放 */
+export interface FloatBounds {
+  x: number | null
+  y: number | null
+  width: number
+  height: number
+  sf?: number | null
+}
+
+/** 桌面浮窗的实时状态。每个面板开了没有、两个旋钮现在是什么值 */
+export interface FloatState {
+  panels: Record<FloatPanel, { opened: boolean; opacity: number; scale: number }>
+  alwaysOnTop: boolean
+}
+
 export interface VoiceSearchHit {
   id: string
   name: string
@@ -298,6 +397,12 @@ interface Bridge {
     onPopularity: (cb: (p: { popularity: number }) => void) => () => void
     onError: (cb: (e: { message: string }) => void) => () => void
     onFace: (cb: (p: { src: string; data: string }) => void) => () => void
+  }
+  /** 在线观众（B站高能榜）。房间没连上时返回一份空状态，不是报错 */
+  viewers: {
+    state: () => Promise<ViewersState>
+    refresh: () => Promise<ViewersState>
+    onState: (cb: (s: ViewersState) => void) => () => void
   }
   tts: {
     providers: () => Promise<Record<string, any>>
@@ -438,6 +543,16 @@ interface Bridge {
       message: string
     }>
     onStatus: (cb: (s: { enabled: boolean; port: number; url?: string; clients: number; error?: string }) => void) => () => void
+  }
+  /** 桌面浮窗：弹幕/观众/礼物/音乐四块，各自弹出为独立小窗（M3 风格） */
+  float: {
+    state: () => Promise<FloatState>
+    open: (panel: FloatPanel) => Promise<{ ok: boolean; message?: string }>
+    close: (panel: FloatPanel) => Promise<{ ok: boolean }>
+    /** 浮窗里的设置弹层用：改不透明度 / 字体大小，当场生效 */
+    set: (panel: FloatPanel, patch: { opacity?: number; scale?: number }) => Promise<{ ok: boolean }>
+    /** 开关、拖拽、关窗都会推一帧，界面据此把圆点/占位摆到正确的位置 */
+    onState: (cb: (s: FloatState) => void) => () => void
   }
   app: {
     exportLog: () => Promise<{ ok: boolean; path?: string }>

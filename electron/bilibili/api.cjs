@@ -1,5 +1,6 @@
 'use strict'
 const { Session, CookieJar } = require('../lib/http.cjs')
+const { RANK_PAGE_SIZE, RANK_PAGES, mergeRankPages, translateRankError } = require('../viewers.cjs')
 
 const API = {
   nav: 'https://api.bilibili.com/x/web-interface/nav',
@@ -8,6 +9,10 @@ const API = {
   danmuInfo: 'https://api.live.bilibili.com/xlive/web-room/v1/index/getDanmuInfo',
   sendMsg: 'https://api.live.bilibili.com/msg/send',
   userCard: 'https://api.bilibili.com/x/web-interface/card',
+  // 高能榜（在线榜）。在线且**有过互动**的人，匿名可调，详见 getOnlineGoldRank
+  onlineGoldRank: 'https://api.live.bilibili.com/xlive/general-interface/v1/rank/getOnlineGoldRank',
+  // 「在线用户」：人在房间里就算，不做互动要求。**要登录**，详见 getOnlineRank
+  onlineRank: 'https://api.live.bilibili.com/xlive/general-interface/v1/rank/getOnlineRank',
 }
 
 class BilibiliAPI {
@@ -93,6 +98,75 @@ class BilibiliAPI {
       throw new Error(translateSendError(res.code, msg))
     }
     return res.data
+  }
+
+  /**
+   * 高能榜单页。`ruid` 必须是**主播 uid**（room/v1/Room/get_info 的 data.uid），
+   * 填错拿到的是空榜单还不报错，所以上面那层必须校验。
+   *
+   * 这个接口**不走 wbi 签名**，实测匿名就能调 —— 刻意保持原样，
+   * 多套一层签名只多一个失败点（wbi 挂了就连观众都看不了）。
+   */
+  async getOnlineGoldRank({ roomId, anchorUid, page = 1, pageSize = RANK_PAGE_SIZE }) {
+    if (!roomId) throw new Error('还没连上直播间，查不了在线观众')
+    if (!anchorUid) throw new Error('还不知道主播 uid，重连一次直播间试试')
+    const qs = new URLSearchParams({
+      ruid: String(anchorUid),
+      roomId: String(roomId),
+      page: String(page),
+      pageSize: String(Math.min(Number(pageSize) || RANK_PAGE_SIZE, RANK_PAGE_SIZE)),
+    })
+    const res = await this.session.getJSON(`${API.onlineGoldRank}?${qs.toString()}`)
+    if (res.code !== 0) throw new Error(translateRankError(res.code, res.message || res.msg))
+    return res.data || {}
+  }
+
+  /**
+   * 在线观众 = 高能榜前几页并起来。
+   *
+   * 翻页本身会撞风控，所以只翻 RANK_PAGES 页；后面几页实测本来就是空的。
+   * 第二页起失败不算失败 —— 第一页已经拿到就够用了，硬报错反而让一次
+   * 偶发超时把整张榜清空。
+   */
+  async getOnlineViewers({ roomId, anchorUid }) {
+    const pages = []
+    for (let page = 1; page <= RANK_PAGES; page++) {
+      try {
+        pages.push(await this.getOnlineGoldRank({ roomId, anchorUid, page }))
+      } catch (e) {
+        if (page === 1) throw e
+        break
+      }
+    }
+    return mergeRankPages(pages)
+  }
+
+  /**
+   * 「在线用户」—— 人在房间里就算，不要求互动过。
+   * 网页端「房间观众」里那些排名栏是「-」、贡献值 0 的人，就是这个接口给的。
+   *
+   * **必须登录**（未登录返回 -101），所以这里不加 wbi 签名、直接借会话里的
+   * SESSDATA。号没登录时调用方要能容忍这一路失败：高能榜那一份仍然是好的，
+   * 不该因为这份拿不到就把整张榜判死。
+   */
+  async getOnlineRank({ roomId, anchorUid, page = 1, pageSize = RANK_PAGE_SIZE }) {
+    if (!roomId) throw new Error('还没连上直播间，查不了在线观众')
+    if (!anchorUid) throw new Error('还不知道主播 uid，重连一次直播间试试')
+    const qs = new URLSearchParams({
+      ruid: String(anchorUid),
+      roomId: String(roomId),
+      page: String(page),
+      pageSize: String(Math.min(Number(pageSize) || RANK_PAGE_SIZE, RANK_PAGE_SIZE)),
+      platform: 'pc_link',
+    })
+    const res = await this.session.getJSON(`${API.onlineRank}?${qs.toString()}`)
+    if (res.code !== 0) {
+      const err = new Error(translateRankError(res.code, res.message || res.msg))
+      // code 带出去：调用方要区分「没登录」和「风控」，两者的处理不一样
+      err.code = res.code
+      throw err
+    }
+    return res.data || {}
   }
 
   /** 头像兜底查询：DANMU_MSG 不带头像时用 uid 补一次，带缓存防止被风控 */

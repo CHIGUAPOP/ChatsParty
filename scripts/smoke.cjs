@@ -340,10 +340,15 @@ function checkOverlayLayout() {
   ok('叠加层也认这个开关', /autoLayout:\s*true/.test(overlayHtml) && /cfg\.autoLayout === false/.test(overlayHtml))
 
   ok('有重排这一趟', /function layout\(\)/.test(overlayHtml) && /function scheduleLayout\(\)/.test(overlayHtml))
-  // 入场动画是 transform 位移，getBoundingClientRect 量出来会跟着飘
+  // 入场动画是 transform 位移，getBoundingClientRect 量出来会跟着飘。
+  // （弹幕容量那边量的是**高度**，位移不影响它，所以那里用 rect 没问题；
+  //   这里是「各块的占位」——左边和宽度都会被 translateX 带偏，必须走 offset。）
+  const boxBody = (overlayHtml.match(/function boxOf\(node, centered\) \{([\s\S]*?)\n      \}/) || [])[1] || ''
   ok(
-    '用 offset 尺寸而不是 rect',
-    /const width = node\.offsetWidth/.test(overlayHtml) && !/\.getBoundingClientRect\(/.test(overlayHtml),
+    '占位用 offset 尺寸而不是 rect',
+    /const width = node\.offsetWidth/.test(boxBody) &&
+      /const height = node\.offsetHeight/.test(boxBody) &&
+      !/getBoundingClientRect/.test(boxBody),
     '量占位必须用 offsetWidth/offsetHeight，rect 会被入场动画带偏',
   )
   // 居中的歌词靠 translateX(-50%) 归位，offsetLeft 还没算这一下
@@ -368,13 +373,14 @@ function checkOverlayLayout() {
   )
 
   ok('弹幕活动区按预留内缩', /app\.style\.top = topBand \+ gap/.test(overlayHtml) && /app\.style\.bottom = botBand \+ gap/.test(overlayHtml))
-  // 内缩之外还有一道保险：塞不下就从离角落最远的那条开始删。
+  // 内缩之外还有一道保险：塞不下就从离角落最远的那条（DOM 里排最前）开始请走。
   // 注意不能拿 scrollHeight 判断 —— #app 是 justify-content: flex-end，
-  // 超出去的那几条堆在上边，浏览器认为那块「滚动不可达」，根本不计数
-  ok('塞不下就裁掉最老的', /function fit\(\)/.test(overlayHtml) && /app\.removeChild\(app\.firstChild\)/.test(overlayHtml))
-  ok('裁剪按自己摞的高度判断', /function stackHeight/.test(overlayHtml), 'scrollHeight 量不到 flex-end 的上溢部分')
+  // 超出去的那几条堆在上边，浏览器认为那块「滚动不可达」，根本不计数。
+  // 详细口径（按高度、不压扁、滑出去淡出）在 [37] 那一段里守。
+  ok('塞不下就请走最老的', /function evictOverflow\(\)/.test(overlayHtml) && /beginLeave\(live\[0\], dir\)/.test(overlayHtml))
+  ok('裁剪按自己摞的高度判断', /function stackHeightOf/.test(overlayHtml), 'scrollHeight 量不到 flex-end 的上溢部分')
   ok('弹幕容器裁掉溢出', /#app \{[\s\S]*?overflow: hidden/.test(overlayHtml))
-  ok('一条弹幕进来就重排', /trim\(\)\s*\n\s*scheduleLayout\(\)/.test(overlayHtml))
+  ok('一条弹幕进来就收口再重排', /evictOverflow\(\)\s*\n\s*scheduleLayout\(\)/.test(overlayHtml))
   // 隐藏窗口里 Chromium 不派 resize 事件（视口会变、事件不来），所以这里不能等下一帧
   ok(
     '窗口变化立即重排',
@@ -776,6 +782,777 @@ async function testVoices() {
 
   console.log('\n[33] 打包与发布')
   testPackaging()
+
+  console.log('\n[34] 在线观众（高能榜 + 在线用户）')
+  testViewers()
+
+  console.log('\n[35] 礼物包（SEND_GIFT / SEND_GIFT_V2）')
+  testGiftCmd()
+
+  console.log('\n[36] 点头像开主页')
+  testUserLinks()
+
+  console.log('\n[37] 叠加层弹幕：能塞几条留几条 + 溢出淡出')
+  testDanmakuCapacity()
+
+  console.log('\n[38] 桌面浮窗（弹幕/观众/礼物/音乐，弹出为浮窗）')
+  testFloatWindow()
+}
+
+/**
+ * 叠加层弹幕的容量与溢出。
+ *
+ * 这一段守的是用户明确报过的那两个毛病：
+ * ① **气泡被压扁、文字在气泡里被裁掉** —— 根因是缺省的 flex-shrink: 1 会把气泡压到
+ *    比内容还矮（窄画面那条 overflow: hidden 按规范还会让自动最小尺寸失效，压得更狠）；
+ *    压扁之后量出来的高度永远「没超」，于是一条都删不掉，全挤成半截。
+ * ② **只按条数删**（maxItems）不看高度 —— 一句话和一段留言能差两三倍，
+ *    数条数必然要么堆到画面外被切、要么一条都留不下。
+ *
+ * 现在的要求就三条：不许压扁、按高度收口、被请走的那条滑出去并淡出（方向可配）。
+ */
+function testDanmakuCapacity() {
+  const root = path.join(__dirname, '..')
+  const read = (p) => fs.readFileSync(path.join(root, p), 'utf8')
+  const html = read('overlay/index.html')
+  const css = html.slice(0, html.indexOf('</style>'))
+  const store = read('electron/store.cjs')
+  const page = read('src/pages/OverlayPage.tsx')
+  const preview = read('src/components/DanmakuPreview.tsx')
+
+  // ---- 不许压扁 ----
+  ok('气泡不许被 flex 压扁（压扁 = 文字在气泡里被裁）', /\.cp-item \{\s*flex: 0 0 auto;\s*\}/.test(css))
+  ok(
+    '离场的气泡脱离文档流（绝对定位，剩下的同一帧就重排好）',
+    /\.cp-item\.is-leaving \{[\s\S]{0,80}?position: absolute;/.test(css),
+  )
+
+  // ---- 量的是真实高度 ----
+  const metrics = (html.match(/function stackMetrics\(\) \{([\s\S]*?)\n      \}/) || [])[1] || ''
+  ok('找得到 stackMetrics', metrics.length > 0)
+  ok('可用高度扣掉了 #app 自己的内边距', /clientHeight - pad/.test(metrics))
+  ok('行间距也从计算样式里读，不写死 8', /rowGap/.test(metrics))
+  ok(
+    '量高度用 getBoundingClientRect（offsetHeight 会把压扁后的高度算成「没超」）',
+    /h \+= list\[i\]\.getBoundingClientRect\(\)\.height/.test(html),
+  )
+  ok('离场中的那条不再占位（不算进容量）', /if \(n\.dataset && n\.dataset\.leaving\) continue/.test(html))
+
+  // ---- 收口 ----
+  const evict = (html.match(/function evictOverflow\(\) \{([\s\S]*?)\n      \}/) || [])[1] || ''
+  ok('有 evictOverflow 这个收口函数', evict.length > 0)
+  ok('超了就请最老的那条走（DOM 里排最前的）', /beginLeave\(live\[0\], dir\)/.test(evict))
+  ok('只剩一条就不再删（那是一句话比整块还高，留着自己截）', /if \(live\.length <= 1\) break/.test(evict))
+  ok('条数上限还在，只是退居兜底', /live\.length - cap/.test(evict))
+  ok('新气泡进来就同步收口，不等下一帧', /app\.appendChild\(el\)[\s\S]{0,260}?evictOverflow\(\)/.test(html))
+  // 注意别拿 \btrim\(\) 去查：`.trim()` 也满足那个词边界，会把正常的字符串处理一起毙掉
+  ok(
+    '旧的 trim / fit 已经清干净',
+    !/\bfunction (trim|fit)\(/.test(html) && !/^\s+(trim|fit)\(\)\s*$/m.test(html),
+  )
+  ok('改配置 / 画面尺寸变化都会重新收口', (html.match(/evictOverflow\(\)/g) || []).length >= 4)
+
+  // ---- 离场动画 ----
+  const leave = (html.match(/function beginLeave\(node, dir\) \{([\s\S]*?)\n      \}/) || [])[1] || ''
+  ok('有 beginLeave', leave.length > 0)
+  ok('先钉住它当前的位置再切成绝对定位', /getBoundingClientRect\(\)[\s\S]{0,500}?position = 'absolute'/.test(leave))
+  ok('切完强制一次重排，否则过渡不生效', /void node\.offsetHeight/.test(leave))
+  ok('滑出去 + 淡出', /node\.style\.opacity = '0'/.test(leave) && /node\.style\.transform = dir/.test(leave))
+  ok('进场动画没播完就被请走时要先掐掉动画', /node\.style\.animation = 'none'/.test(leave))
+  ok('淡完从 DOM 摘掉', /removeChild\(node\)/.test(leave))
+  ok('离场时长是个常量', /const LEAVE_MS = \d+/.test(html))
+
+  // ---- 方向三处一致 ----
+  const dirs = (html.match(/const OVERFLOW_DIRS = \[([^\]]+)\]/) || [])[1] || ''
+  const htmlDirs = dirs.split(',').map((s) => s.trim().replace(/['"]/g, '')).filter(Boolean)
+  ok('方向就 natural / up / down 三个', JSON.stringify(htmlDirs) === JSON.stringify(['natural', 'up', 'down']), htmlDirs)
+  // 只在 DANMAKU_OVERFLOW 那一块里找，别把 DANMAKU_POS 的四个角一起捞进来
+  const ovBlock = (preview.match(/export const DANMAKU_OVERFLOW = \[([\s\S]*?)\n\]/) || [])[1] || ''
+  const uiDirs = Array.from(ovBlock.matchAll(/value: '([a-z]+)'/g)).map((x) => x[1])
+  ok('设置页给的三项与页面认的一致', JSON.stringify(uiDirs) === JSON.stringify(htmlDirs), uiDirs)
+  ok('认不得的方向按 natural 走', /return OVERFLOW_DIRS\.indexOf\(v\) >= 0 \? v : 'natural'/.test(html))
+  ok("自然方向贴顶时往下、贴底时往上", /charAt\(0\) === 't' \? 'down' : 'up'/.test(html))
+  ok('按方向决定位移正负', /dir === 'down' \? `translateY\(\$\{dist\}px\)` : `translateY\(\$\{-dist\}px\)`/.test(html))
+
+  // ---- 配置三处一致 ----
+  ok('store 默认值里有 danmakuOverflow', /danmakuOverflow: 'natural'/.test(store))
+  ok('叠加层的默认 cfg 里也有', /danmakuOverflow: 'natural'/.test(html))
+  ok('渲染层类型里有这一项', /danmakuOverflow\?: 'natural' \| 'up' \| 'down'/.test(read('src/lib/api.ts')))
+  ok('设置页能改它', /danmakuOverflow: v/.test(page) && /塞不下时/.test(page))
+  ok('「最多保留条数」改口径为条数上限（画面塞不下以高度为准）', /label="条数上限"/.test(page))
+}
+
+/**
+ * 桌面浮窗。
+ *
+ * 它把「弹幕」单独开成一个无边框透明小窗压在别的窗口上。守这几件事：
+ * ① 窗是真的无边框 + 透明 + 不进任务栏，加载的是叠加层那一份页面（不另写一套渲染）；
+ * ② 三个旋钮（不透明度 / 置顶 / 缩放）落到窗口上，改配置要当场生效；
+ * ③ 位置要记住，但**记的位置不在任何屏幕上就不能用** —— 拔了显示器之后浮窗会「不见了」；
+ * ④ 主窗口关掉时它不能把进程吊住。
+ */
+function testFloatWindow() {
+  const root = path.join(__dirname, '..')
+  const read = (p) => fs.readFileSync(path.join(root, p), 'utf8')
+  const main = read('electron/main.cjs')
+  const store = read('electron/store.cjs')
+  const float = read('electron/float.cjs')
+  const preload = read('electron/preload.cjs')
+  const apiTs = read('src/lib/api.ts')
+  const entry = read('src/main.tsx')
+  const shell = read('src/float/FloatShell.tsx')
+  const page = read('src/pages/OverlayPage.tsx')
+  const dpage = read('src/pages/DanmakuPage.tsx')
+  const css = read('src/styles.css')
+  const ui = read('src/components/ui.tsx')
+  const vl = read('src/components/ViewersList.tsx')
+  const ph = read('src/components/PaidHistory.tsx')
+  const mc = read('src/components/MusicConsole.tsx')
+
+  // ---- 面板名：四处必须逐字一致，错一个就是「弹出了但渲染成空白页」----
+  const mFloat = float.match(/const FLOAT_PANELS = \[([^\]]+)\]/)
+  const mEntry = entry.match(/const FLOAT_PANELS: FloatPanel\[\] = \[([^\]]+)\]/)
+  const names = (s) => (s ? s.match(/'([a-z]+)'/g).map((x) => x.slice(1, -1)) : [])
+  const fp = names(mFloat && mFloat[1])
+  const ep = names(mEntry && mEntry[1])
+  ok('主进程有四个浮窗面板', JSON.stringify(fp) === JSON.stringify(['danmaku', 'viewers', 'gifts', 'music']), fp)
+  ok('渲染层入口认的名字和主进程逐字一致', JSON.stringify(ep) === JSON.stringify(fp), ep)
+  ok('浮窗加载的是渲染层本尊（?float=<panel>）', /\/\?float=\$\{panel\}/.test(main) && /query: \{ float: panel \}/.test(main))
+  ok('store 默认里四个面板各有一份', (store.match(/danmaku: \{[\s\S]*?viewers: \{[\s\S]*?gifts: \{[\s\S]*?music: \{/) || null) !== null)
+
+  // ---- 纯逻辑 ----
+  const { clampPanel, isOnScreen, FLOAT_PANELS } = require('../electron/float.cjs')
+  ok('导出夹取函数与屏幕判定', typeof clampPanel === 'function' && typeof isOnScreen === 'function')
+  const c = clampPanel('danmaku', { opacity: 5, scale: 9999, bounds: { width: 10, height: 99999 } })
+  ok('不透明度夹在 0.2~1', c.opacity === 1)
+  ok('字体大小（缩放）夹在 50~200', c.scale === 200)
+  ok('窗口尺寸有上下限', c.bounds.width >= 200 && c.bounds.height <= 4000, c.bounds)
+  ok('没配过的位置是 null（不是 0）', c.bounds.x === null && c.bounds.y === null, c.bounds)
+  // Number(null) === 0 —— 拿 Number 直接转会让浮窗每次都开在屏幕左上角
+  ok('null 不许被当成 0', clampPanel('danmaku', { bounds: { x: null, y: null } }).bounds.x === null)
+  ok('真实的 0 照样认', clampPanel('danmaku', { bounds: { x: 0, y: 0 } }).bounds.x === 0)
+  ok('不认识的面板也有兜底尺寸', clampPanel('???', {}).bounds.width > 0)
+  // 跨缩放屏：记宽高的同时要记下「那块屏的缩放」，恢复时按物理大小折算 ——
+  // 不然拖到缩放不同的屏幕再关掉，重开就比关闭前大（用户实测）
+  ok('bounds 里记着记尺寸时的屏幕缩放', clampPanel('danmaku', { bounds: { width: 380, sf: 1.5 } }).bounds.sf === 1.5)
+  ok('老配置没记过缩放也能用（不折算）', clampPanel('danmaku', { bounds: { width: 380 } }).bounds.sf === null)
+  ok('恢复时按目标屏缩放折算宽高', /getDisplayMatching/.test(float) && /scaleFactor/.test(float) && /b\.sf/.test(float) && /b\.width \* b\.sf/.test(float))
+  const fakeScreen = { getAllDisplays: () => [{ bounds: { x: 0, y: 0, width: 1920, height: 1080 } }] }
+  ok('屏幕内的位置能用', isOnScreen(100, 100, fakeScreen) === true)
+  ok('屏幕外的位置不能用（拔了显示器之后）', isOnScreen(4000, 4000, fakeScreen) === false)
+  ok('没位置信息也不能用', isOnScreen(null, null, fakeScreen) === false)
+  ok('拿不到屏幕信息时按「不能用」处理', isOnScreen(1, 1, null) === false)
+
+  // ---- 窗口本身 ----
+  /* ⚠️ 这一条是拿真机换来的：透明窗要 Chromium 走 GPU 合成，而本程序为了兼容
+     无 GPU / 受限环境，启动时 disableHardwareAcceleration + disable-gpu-compositing
+     （见 main.cjs）。两者一撞，透明窗在屏幕上**一像素都画不出来** ——
+     实测采样到的是桌面色。用户报的「点了没反应」「看不到浮窗」就是这么来的。 */
+  ok('窗口一律不透明（不许再写 transparent: true）', !/transparent: true/.test(float))
+  ok('底板色是个不带 alpha 的实色', /const PANEL_BG = '#[0-9a-fA-F]{6}'/.test(float))
+  ok('无边框', /frame: false/.test(float))
+  ok('不进任务栏', /skipTaskbar: true/.test(float))
+  ok(
+    '说明白了为什么不能用透明（不然以后又会有人改回去）',
+    /disable-gpu-compositing/.test(float) && /画不出来/.test(float),
+  )
+  ok('不聚焦时也继续跑（否则切走就定格）', /backgroundThrottling: false/.test(float))
+  ok('页面标题不被覆盖（Alt+Tab 读的是它）', /page-title-updated[\s\S]{0,200}?preventDefault/.test(float))
+  ok('每个浮窗有自己的标题（弹幕/观众/礼物/音乐）', /label\(panel\)/.test(float) && /音乐控制台浮窗/.test(float))
+
+  // ---- 旋钮 ----
+  /* 透明度**必须走窗口级 setOpacity**（DWM 层，本机禁了 GPU 合成也有效）。
+     试过让渲染层把 opacity 写在内容区 CSS 上 —— 窗口底板是不透明的深色，
+     内容淡下去只是「深底上更暗」，透不到窗后的桌面，用户看着就是「没生效」。
+     但 DWM 是整扇窗逐像素乘 alpha，文字没法单独豁免（每像素透明要 transparent 窗，
+     本机画不出来）—— 所以拖可读性曲线抬低端 + 渲染层 is-dim 补对比度。 */
+  ok(
+    '透明度走窗口级 setOpacity + 可读性曲线（100%→100%，越低抬得越多）',
+    /setOpacity\(Math\.pow\(c\.opacity, 0\.55\)\)/.test(float) && !/opacity: eff\.opacity/.test(shell),
+  )
+  ok(
+    '低不透明度时渲染层切 is-dim 补可读性（文字阴影 + 次要文字提亮）',
+    /is-dim/.test(shell) && /eff\.opacity < 0\.75/.test(shell) && /\.float-shell\.is-dim \{[\s\S]{0,200}?--md-sys-color-on-surface-variant/.test(css) && /\.float-shell\.is-dim \.float-content \{[\s\S]{0,120}?text-shadow/.test(css),
+  )
+  ok('置顶用 screen-saver 档（普通档压不住全屏游戏）', /setAlwaysOnTop\(alwaysOnTop, 'screen-saver'\)/.test(float))
+  ok('字体大小走窗口的 zoom', /setZoomFactor\(c\.scale \/ 100\)/.test(float))
+  ok('加载完再压一次缩放（换页会重置）', /did-finish-load[\s\S]{0,200}?setZoomFactor/.test(float))
+
+  // ---- 位置记忆 ----
+  ok('拖完 / 拉完都记一笔', /on\('moved'/.test(float) && /on\('resized'/.test(float))
+  // move / resize 在拖动中每帧都来；一次写盘就是一次全量加密 + 备份，不攒会拖成幻灯片
+  ok(
+    '连续事件要防抖，不能每帧写一次配置',
+    /on\('move', rememberSoon\)/.test(float) && /on\('resize', rememberSoon\)/.test(float) && /scheduleRemember\(panel\)/.test(float),
+  )
+  ok('攒够时间才落盘', /setTimeout\(\(\) => \{[\s\S]{0,180}?this\.remember\(panel\)/.test(float))
+  ok('收窗前把没落盘的都补上（拖完立刻关窗也要记住）', /close\(panel\) \{[\s\S]{0,700}?this\.remember\(panel\)/.test(float))
+  ok('记的是位置和大小', /getPosition\(\)/.test(float) && /getSize\(\)/.test(float))
+  ok('没记住过就居中（别落在看不见的角落）', /opts\.center = true/.test(float))
+
+  // ---- 生命周期 ----
+  /* 这一个是真踩过的坑：旧窗口的 closed 会**晚一步**到，那时 this.wins[panel] 已经是
+     刚建好的新窗口了。不做身份校验的话，旧窗口的这一刻会把新窗口的引用清掉、
+     还会把开关写成 false。屏幕上窗口明明还在，所以光看画面完全看不出来。 */
+  ok(
+    '旧窗口的 closed 不许算在当前窗口头上',
+    /if \(this\.wins\[panel\] !== w\) return/.test(float),
+    '重建时旧窗的 closed 晚一步到，会把新窗引用清掉、还会把开关写成 false',
+  )
+  ok(
+    '手动关窗才把开关拨回去（内容回到弹幕姬）',
+    /closed[\s\S]{0,600}?patchConfig\(\{ panels: \{ \[panel\]: \{ opened: false \} \} \}\)/.test(float),
+  )
+  ok(
+    'close() 先摘引用再关窗（好让 closed 认出这是「我们关的」）',
+    /delete this\.wins\[panel\][\s\S]{0,120}?w\.close\(\)/.test(float),
+  )
+  ok('close() 也会把没落盘的旋钮补上', /close\(panel\) \{[\s\S]{0,200}?setTimers\[panel\]/.test(float))
+  ok('sync 串行化（并发开关会互相踩）', /this\.queues\[panel\]/.test(float))
+  ok('启动时把上次开着的浮窗都带回来', /async restore\(\)/.test(float) && /ensureFloats\(\)[\s\S]{0,120}\.restore\(\)/.test(main))
+  ok('主窗口关了要连浮窗一起收掉', /win\.on\('closed'[\s\S]{0,120}?floats\.closeAll\(\)/.test(main))
+  ok('并且不被浮窗吊住进程（主窗口没了就整个退出）', /win\.on\('closed'[\s\S]{0,260}?app\.quit\(\)/.test(main))
+  /* 浮窗出了问题只能靠日志判案：它是不透明无边框窗，「开了但看不见」和「压根没开」
+     长得不一样了，但「为什么没开」「开在哪儿」仍然只有日志知道。 */
+  ok('开 / 关都留日志', /打开\$\{this\.label\(panel\)\}/.test(float) && /已打开 \$\{ww\}×\$\{hh\}/.test(float) && /已收起/.test(float))
+  /* 跨缩放屏的「首落」会被双重换算（实测 150% 副屏上请求 400×600 落成 603×902），
+     remember 把大的记回去就复利变大 —— 创建后必须量一量、不对就再摆一遍再亮出来。 */
+  ok(
+    '创建改隐藏 + 落位校准后再显示（治跨缩放屏复利变大）',
+    /new BrowserWindow\(\{ \.\.\.opts, show: false \}\)/.test(float) &&
+      /settleBounds\(w, \{ x: opts\.x, y: opts\.y, width, height \}\)/.test(float) &&
+      /settleBounds\(w, rect\) \{[\s\S]{0,700}?w\.setBounds\(rect\)/.test(float) &&
+      /w\.show\(\)/.test(float),
+  )
+  ok('打开失败要记下原因', /'\[float\] 打开失败'/.test(main))
+  ok('收到收起指令但窗没开着也留一笔', /并没有开着/.test(main))
+
+  // ---- 浮窗内调旋钮：上窗立刻生效，落盘攒 400ms（拖滑块每帧写盘会把拖动拖成幻灯片）----
+  ok('set() 当场把旋钮落到窗口上', /set\(panel, patch\) \{[\s\S]{0,300}?applyTo\(this\.wins\[panel\], c\)/.test(float))
+  ok('落盘有防抖', /setTimers\[panel\] = setTimeout/.test(float) && /this\.setTimers = \{\}/.test(float))
+
+  // ---- 配置与 IPC ----
+  ok('store 里有 float.panels 这一段', /panels: \{[\s\S]{0,1200}?alwaysOnTop/.test(store) === false || /panels: \{/.test(store))
+  ok('bounds 默认 x / y 是 null', /bounds: \{ x: null, y: null, width: 380, height: 620 \}/.test(store))
+  ok('四个 IPC 都在', /'float:state'/.test(main) && /'float:open'/.test(main) && /'float:close'/.test(main) && /'float:set'/.test(main))
+  ok('IPC 校验面板名（不认识的直接拒绝）', /FLOAT_PANELS\.includes\(panel\)/.test(main))
+  ok('改配置当场生效', /patch\.float[\s\S]{0,120}?ensureFloats\(\)[\s\S]{0,60}?syncAll\(\)/.test(main))
+  ok(
+    '预加载透下去（带面板名）',
+    /float: \{[\s\S]{0,420}?open: \(panel\) => ipcRenderer\.invoke\('float:open', panel\)/.test(preload) &&
+      /set: \(panel, patch\) => ipcRenderer\.invoke\('float:set', panel, patch\)/.test(preload),
+  )
+  ok(
+    '渲染层接口有类型',
+    /open: \(panel: FloatPanel\) => Promise<\{ ok: boolean; message\?: string \}>/.test(apiTs) &&
+      /export type FloatPanel = 'danmaku' \| 'viewers' \| 'gifts' \| 'music'/.test(apiTs),
+  )
+  ok('渲染层有 FloatState 类型（按面板一份）', /export interface FloatState \{[\s\S]{0,200}?panels: Record<FloatPanel/.test(apiTs))
+
+  // ---- 浮窗外壳（渲染层） ----
+  /* 用户明确要求：不要标题栏（标题和内容卡片名重复两次，还有条亮分割线）；
+     弹出之后右上角只有一颗设置按钮和 × —— 点 × 就收回，比横杠更直觉，
+     设置弹层里**不放**收回（用户明确要求挪走）。整条顶条是拖拽区。 */
+  ok('不再有标题栏（也不要分割线、不要脱节的顶条）', !/float-titlebar/.test(shell) && !/float-titlebar/.test(css) && !/float-chrome/.test(shell) && !/float-chrome/.test(css))
+  /* 用户点名：没字的标题栏很奇怪 —— 设置/× 两颗按钮要**直接融进 UI**：
+     观众/礼物/音乐塞进各自卡片头部（actions 插槽），弹幕浮窗贴列表右上角（胶囊）。 */
+  ok(
+    '设置/× 融进各面板自己的 UI（头部 actions 插槽 + 弹幕右上角胶囊）',
+    /actions=\{winButtons\}/.test(shell) && /float-topline/.test(shell) &&
+      /actions\?: React\.ReactNode/.test(vl) && /actions\?: React\.ReactNode/.test(ph) && /actions\?: React\.ReactNode/.test(mc) &&
+      /\{actions\}/.test(vl) && /\{actions\}/.test(ph) && /\{actions\}/.test(mc),
+  )
+  ok('拖拽靠贴顶的隐形条（卡片头部被当成标题栏用）', /\.float-dragstrip \{[\s\S]{0,200}?-webkit-app-region: drag;/.test(css) && /\.float-shell \.side-card__head \.float-tbtn \{[\s\S]{0,120}?z-index: 27/.test(css))
+  ok('浮窗按钮在拖拽区之外（不然点不到）', /\.float-tbtn \{[\s\S]{0,160}?-webkit-app-region: no-drag;/.test(css))
+  ok('顶条没有意义不明的连接点（用户点名去掉）', !/float-chrome__dot/.test(shell) && !/float-chrome__dot/.test(css))
+  ok(
+    '点 × 收回走主进程接口（收回不是设置弹层里的一个按钮）',
+    /onClick=\{closeFloat\}/.test(shell) &&
+      /api\.float\?\.close\(panel\)/.test(shell) &&
+      !/<Button[\s\S]{0,80}onClick=\{closeFloat\}/.test(shell),
+  )
+  ok('设置弹层里有不透明度和字体大小', /不透明度/.test(shell) && /字体大小/.test(shell) && /opacity: v \/ 100/.test(shell) && /scale: v/.test(shell))
+  /* 之前滑块受控于主进程回流的状态：拖完要等一次 IPC 往返才回显，
+     松手那一拍先弹回旧值再应用 —— 用户说的「不跟手、还回弹一下」。 */
+  ok(
+    '旋钮一拖就改本地并立即发主进程，不用回流盖回来（防回弹）',
+    /setKnobs\(\{ \.\.\.eff, \.\.\.p \}\)/.test(shell) && !/setTimer\.current = window\.setTimeout/.test(shell),
+    '受控于主进程回流的值 = 拖完先弹回旧值再应用',
+  )
+  /* 字体大小（zoom）会缩放整个界面 —— 跟手调的话滑块自己也跟着位移，拖不准。
+     所以不透明度跟手（onChange），字体大小松手才提交（onCommit）。 */
+  ok(
+    '字体大小松手才应用（拖动中改布局会让滑块位移）',
+    /onCommit=\{\(v\) => turn\(\{ scale: v \}\)\}/.test(shell) && /onCommit\?\./.test(ui) && /onChange=\{\(v\) => turn\(\{ opacity: v \/ 100 \}\)\}/.test(shell),
+  )
+  ok(
+    '弹幕浮窗可关头像（关掉看更多弹幕，只对浮窗生效）',
+    /显示头像/.test(shell) && /showFaces/.test(shell) && /showFace=\{showFaces\}/.test(shell) && /showFaces: true/.test(store),
+  )
+  ok('弹幕浮窗没有发送设置（那粒颜色点只是摆设，点不了）', !/composer-bar__swatch/.test(shell) && !/composer-bar__swatch/.test(css))
+  ok('音乐浮窗包在播放器 Provider 里（不然切歌逻辑没人接）', /MusicPlayerProvider/.test(shell))
+  ok('弹幕浮窗复用主窗口的 EventRow（不另写一套渲染）', /import \{ EventRow \} from '\.\.\/pages\/DanmakuPage'/.test(shell) && /export function EventRow/.test(dpage))
+  ok('弹幕浮窗有输入框，走同一个发送接口', /api\.live\.send\(msg\)/.test(shell))
+  /* 发送栏用户指定：深色矩形贴底（和弹幕区同色）、字数上限 40、发送只留一个图标 */
+  ok(
+    '发送栏是贴底的深色矩形（无圆角无留白，和弹幕区同色）',
+    /float-composer \{[\s\S]{0,300}?surface-container-lowest/.test(css) && !/composer-bar/.test(shell),
+  )
+  ok('字数上限 40', /maxLength=\{40\}/.test(shell) && /\/40/.test(shell))
+  /* 输入框要有一个比底条亮一档的深色圆角底 —— 整条同色的话看不出哪里能键入（用户截图点名） */
+  ok(
+    '输入框自带深色圆角底（能一眼看出键入区）',
+    /\.float-composer__input \{[\s\S]{0,300}?background: var\(--md-sys-color-surface-container-highest\)/.test(css) && /border-radius: 10px/.test(css),
+  )
+  ok('发送按钮只留一个图标（不再要「发送」俩字）', /title="发送"/.test(shell) && !/发送\s*<\/Button>|>\s*发送\s*<\/Button>/.test(shell))
+  ok('头像走同一套抓取管线，开窗时主进程把缓存整包补发', /onFace/.test(shell) && /setResolvedFace/.test(shell) && /faces\.cache/.test(main))
+
+  // ---- 主窗口：弹出横杠 + 收回胶囊 + 设置搬家 ----
+  ok('每个区域右上角有弹出横杠（短白色，不要图标）', /float-bar/.test(dpage) && /float-bar/.test(css) && !/float-dot/.test(dpage) && !/float-dot/.test(css))
+  ok('卡片头部右侧给横杠让位（不然「刚刚更新」/「≈ ¥」钻到横杠底下）', /\.float-region \.side-card__head \{[\s\S]{0,80}?padding-right: 40px/.test(css))
+  ok('横杠带说明（弹出为浮窗：xxx）', /弹出为浮窗/.test(dpage))
+  /* 占位**竖向**压缩（横向占满、高度一行）—— 竖着缩成一条，不是横着缩成一小坨。
+     且弹出态**不继承**区域的布局类（float-region--* 的 flex: 2 1 0 会把它竖向拉高） */
+  ok(
+    '弹出后竖向压成一条「收回」，点整条就收回',
+    /float-gone/.test(dpage) &&
+      /onClick=\{onClose\}/.test(dpage) &&
+      /className=\{`float-gone float-gone--\$\{panel\}`\}/.test(dpage) &&
+      /\.float-gone \{[\s\S]{0,120}?flex: 0 0 auto/.test(css) &&
+      /\.float-gone \{[\s\S]{0,200}?align-self: stretch/.test(css) &&
+      !/align-self: flex-start/.test(css),
+  )
+  ok('占位和区域的高低分配跟原来一致', /float-region--viewers[\s\S]{0,80}?flex: 2 1 0/.test(css) && /float-region--gifts[\s\S]{0,80}?flex: 1 1 0/.test(css))
+  ok('弹幕页订阅浮窗状态（浮窗那边关掉也要同步）', /api\.float\?\.onState\?\.\(setFloats\)/.test(dpage))
+  ok('四个面板的开关都在发送设置面板里', /FLOAT_PANELS\.map/.test(dpage) && /桌面浮窗/.test(dpage) && /浮窗置顶/.test(dpage))
+  ok('OBS 页不再有浮窗设置', !/floatState/.test(page) && !/api\.float/.test(page))
+  /* 主进程批次比渲染层旧时 api.float 整个是 undefined（改完主进程得重启应用才生效）。
+     这时候 .state() 是**同步抛**，不是 rejected promise，只有可选链 + try 才挡得住；
+     挡不住的话按钮点下去要么白屏要么一点动静没有。 */
+  ok(
+    '弹幕页和浮窗外壳都用可选链挡旧主进程的 undefined',
+    /api\.float\s*\?\.\s*state\(\)/.test(dpage) && /api\.float\s*\?\.\s*state\(\)/.test(shell),
+    '主进程批次旧时 .state() 是同步抛，不是 rejected promise，只有可选链 + try 挡得住',
+  )
+  ok(
+    '调用失败要说出声，不许静默吞',
+    /notify\(`打不开桌面浮窗：\$\{\(e as Error\)/.test(dpage) && /notify\(`打不开桌面浮窗：\$\{\(e as Error\)/.test(dpage),
+  )
+}
+
+
+/**
+ * 在线观众 = B站的「高能榜」+「在线用户」两份名单。
+ *
+ * 这一段守三件事：
+ * ① 两份名单的纯逻辑（分页合并、去重、排序、间隔钳制）—— 这些错一个，界面就会
+ *    显示重复的人、或者按错误的顺序排、或者把风控撞到封接口；
+ * ② 「在线用户」这一路**要登录**，它挂了不能把整张榜判死（榜匿名就能拿）；
+ * ③ **文案纪律**：两份名单加起来仍然**不等于观看人数** —— 挂着不动的纯潜水观众
+ *    两边都不出现。凡是把它写成「观众总数 / 观看人数」的地方都要拦下来，
+ *    主播看到榜上 80 人，会以为直播间真的只有 80 个人看。
+ */
+function testViewers() {
+  const root = path.join(__dirname, '..')
+  const read = (p) => fs.readFileSync(path.join(root, p), 'utf8')
+  const V = require('../electron/viewers.cjs')
+
+  // ---- 一条记录 -> 界面要的样子 ----
+  const one = V.normalizeRankItem({
+    uid: 123,
+    name: '观众甲',
+    face: 'https://i0.hdslb.com/x.jpg',
+    score: 640,
+    guard_level: 3,
+    wealth_level: 20,
+    medalInfo: { medalName: '囚人', level: 21 },
+  })
+  ok('昵称/头像/贡献值都取到了', one.name === '观众甲' && one.score === 640 && /hdslb/.test(one.face))
+  ok('舰长编号翻成人话', one.guard === '舰长' && one.guardLevel === 3, one.guard)
+  ok('粉丝牌带过来了', one.medal && one.medal.name === '囚人' && one.medal.level === 21)
+  ok('没有 uid 的记录直接扔掉（没法去重也没法显示）', V.normalizeRankItem({ name: '没有uid' }) === null)
+  ok('空记录不炸', V.normalizeRankItem(null) === null && V.normalizeRankItem('x') === null)
+  ok('没名字的兜底成匿名用户', V.normalizeRankItem({ uid: 9 }).name === '匿名用户')
+  ok('没有勋章时是 null 而不是空对象', V.normalizeRankItem({ uid: 9 }).medal === null)
+  ok('没大航海时 guard 是空串', V.normalizeRankItem({ uid: 9, guard_level: 0 }).guard === '')
+
+  // ---- 分页合并 ----
+  const page1 = {
+    data: {
+      onlineNum: 954,
+      OnlineRankItem: [
+        { uid: 1, name: 'A', score: 100 },
+        { uid: 2, name: 'B', score: 300 },
+      ],
+    },
+  }
+  const page2 = {
+    data: {
+      onlineNum: 957,
+      OnlineRankItem: [
+        // 第 2 页和第 1 页会重叠：翻页期间榜单在动，同一个人可能两头都在
+        { uid: 2, name: 'B', score: 350 },
+        { uid: 3, name: 'C', score: 200 },
+      ],
+    },
+  }
+  const merged = V.mergeRankPages([page1, page2])
+  ok('同一个人只留一条', merged.items.length === 3, merged.items.map((x) => x.uid))
+  ok('重叠时留贡献值高的那条', merged.items.find((x) => x.uid === 2).score === 350)
+  ok('按贡献值从高到低排', merged.items.map((x) => x.uid).join(',') === '2,3,1', merged.items.map((x) => x.score))
+  // 在线人数只小幅波动，取最大更接近真实值，也避免最后一页恰好是 0
+  ok('在线人数取各页最大值', merged.onlineNum === 957, merged.onlineNum)
+  ok('limit 截得住', V.mergeRankPages([page1, page2], 2).items.length === 2)
+  ok('空响应不炸', V.mergeRankPages([]).items.length === 0 && V.mergeRankPages(null).onlineNum === 0)
+  ok('缺 OnlineRankItem 的脏页不炸', V.mergeRankPages([{ data: { onlineNum: 5 } }]).items.length === 0)
+  // 裸 data 也要认（不要求外面包着 {data:...}）
+  ok('直接给 data 也认', V.mergeRankPages([page1.data]).items.length === 2)
+
+  // ---- 刷新间隔：这个接口有风控，手滑调太小会被钳回来 ----
+  ok('间隔太小抬到 10 秒（风控底线）', V.clampInterval(1) === 10000 && V.clampInterval(3000) === 10000)
+  ok('间隔太大压到 10 分钟', V.clampInterval(99999999) === 600000)
+  ok('正常值原样保留', V.clampInterval(30000) === 30000)
+  ok('没填 / 填了垃圾用默认 20 秒', V.clampInterval(undefined) === 20000 && V.clampInterval('abc') === 20000)
+  ok('钳制区间本身是自洽的', V.MIN_INTERVAL_MS === 10000 && V.DEFAULT_INTERVAL_MS >= V.MIN_INTERVAL_MS)
+
+  // ---- 错误文案 ----
+  const e352 = V.translateRankError(-352, '')
+  // 撞风控时如果只说「失败」，用户会一遍遍点刷新，把风控拖得更长
+  ok('-352 说清楚是风控、并给出办法', /风控/.test(e352) && /间隔|等/.test(e352), e352)
+  ok('其它错误码把人话原样带出来', V.translateRankError(-1, '房间不存在') === '房间不存在')
+
+  // ---- 接口层 ----
+  const api = read('electron/bilibili/api.cjs')
+  ok('高能榜接口地址在表里', /onlineGoldRank: 'https:\/\/api\.live\.bilibili\.com/.test(api))
+  ok('单页查询存在', /async getOnlineGoldRank\(/.test(api))
+  ok('一次翻几页并合并的那层存在', /async getOnlineViewers\(/.test(api))
+  ok('pageSize 会被夹到 50（给多了也只回 50）', /RANK_PAGE_SIZE\)\)/.test(api))
+  // 这个接口匿名就能调，套上 wbi 只多一个失败点
+  ok('没给高能榜套 wbi 签名', !/wbi\.url\(API\.onlineGoldRank/.test(api))
+  ok('缺主播 uid 时明确报错，而不是拿空榜单糊弄', /还不知道主播 uid/.test(api))
+
+  // ---- 主进程：轮询 + 推帧 ----
+  const main = read('electron/main.cjs')
+  ok('有拉一次的函数', /async function refreshViewers\(/.test(main))
+  ok('有轮询开关', /function startViewersPolling\(/.test(main) && /function stopViewersPolling\(/.test(main))
+  // 没连房间就不该有定时器：一路空转只会撞风控
+  ok('断线时把轮询停掉', /function stopLive\(\)[\s\S]{0,200}?stopViewersPolling\(\)/.test(main))
+  ok('连上直播间后开始轮询', /await live\.start\(\)[\s\S]{0,200}?startViewersPolling\(\)/.test(main))
+  ok('间隔走钳制函数（配置里填多小都不至于撞风控）', /clampInterval\(v\.intervalMs\)/.test(main))
+  ok('同一时刻只请求一次', /if \(viewersBusy\) return viewersState/.test(main))
+  ok('界面和 OBS 收的是同一份', /send\('viewers:state', viewersState\)/.test(main) && /broadcast\('viewers', viewersState\)/.test(main))
+  ok('两个 IPC 都在', /ipcMain\.handle\('viewers:state'/.test(main) && /ipcMain\.handle\('viewers:refresh'/.test(main))
+  ok('OBS 中途连上补发当前名单', /overlay\.viewersProvider = /.test(main))
+  // 头像有防盗链，只能主进程带 Referer 抓回来；复用弹幕那条管线，别另起一套。
+  // 认的是「合并后的最终名单」而不是某一份 —— 两份名单都要抓头像
+  ok('榜单头像走既有的抓取管线', /for \(const it of items\) if \(it\.face\) ensureFace\(/.test(main))
+  ok('改了开关/间隔会重开定时器', /if \(patch && patch\.viewers\) \{/.test(main))
+
+  // ---- 「名单不动」这一类毛病（用户报过一次，界面和数据长得一模一样）----
+  // 拉失败时旧名单是留着的（清空会闪一下变空），于是一份卡住的旧数据和一个安静的
+  // 直播间在屏幕上分不出来。下面这几条守的就是「不许再出现分不出来的情况」。
+  ok(
+    '推帧在 try 里面（在外面的话它一抛，viewersBusy 会永远卡在 true）',
+    /viewersBusy = true[\s\S]{0,400}?try \{[\s\S]{0,900}?pushViewersState\(\)[\s\S]{0,200}?await api\.getOnlineViewers/.test(
+      main,
+    ),
+  )
+  ok('放锁和推帧都在 finally 里', /finally \{\s*viewersBusy = false[\s\S]{0,160}?pushViewersState\(\)/.test(main))
+  ok('数了真正发出去的请求次数（分辨「定时器没跳」和「榜单没变」）', /let viewersFetches = 0/.test(main) && /viewersFetches\+\+/.test(main))
+  ok(
+    '定时器里的 promise 自己收掉（不然 reject 会按 unhandledRejection 把主进程带走）',
+    /setInterval\(\s*\(\) => refreshViewers\(\)\.catch\(/.test(main),
+  )
+  ok('开轮询会记一笔日志（间隔多少），不然出问题只能靠猜', /\[viewers\] 开始轮询高能榜，间隔/.test(main))
+  ok('关着自动刷新时也说明一句', /\[viewers\] 自动刷新是关的/.test(main))
+  ok('失败时保留旧名单', /\/\/ 拉失败时\*\*保留上一份名单\*\*|保留上一份名单/.test(main))
+  ok('error 会随状态一起留给界面', /ok: false, fetching: false, error: e\.message \|\| String\(e\), updatedAt: Date\.now\(\)/.test(main))
+
+  // 界面上必须能看出「这份名单是旧的」
+  const vl = read('src/components/ViewersList.tsx')
+  ok('卡片标出「多久之前更新的」', /秒前更新/.test(vl) && /分钟前更新/.test(vl))
+  ok('失败时挂一条「没更新上」的提示，不装作没事', /side-card__warn/.test(vl) && /没更新上/.test(vl))
+  ok('提示带上了具体原因', /没更新上：\{s\.error\}/.test(vl))
+  ok('顺带说明榜单本身有延迟（不然「刚发弹幕没上榜」会被当成坏了）', /刚互动的人要过一会儿才上榜/.test(vl))
+  ok('这条提示的样式在', /\.side-card__warn \{/.test(read('src/styles.css')))
+  ok('「多少秒前」不许自己算死（要跟着时间走字）', /setInterval\(\(\) => setNow\(Date\.now\(\)\)/.test(vl))
+
+  // ---- 轮询的端到端回归 ----
+  // smoke 只能证明「代码里写着 setInterval」，证不了「定时器真的在跳、跳了之后界面真的换」。
+  // 这正是「拉了一次就再也不刷新」的漏网之处，所以另有一个真起主进程的脚本兜着。
+  const pkg = JSON.parse(read('package.json'))
+  ok('有 e2e:viewers 脚本', pkg.scripts['e2e:viewers'] === 'electron scripts/e2e-viewers.cjs', pkg.scripts['e2e:viewers'])
+  const ev = read('scripts/e2e-viewers.cjs')
+  ok('它真开轮询、真等间隔', /V\.start\(\)/.test(ev) && /oneTick/.test(ev))
+  ok('它数请求次数，而不是只看结果变没变', /V\.calls\(\)/.test(ev))
+  ok('它验界面真的换了名单', /side-card--viewers \.vlist__row/.test(ev))
+  ok('它验断开之后不再发请求', /停了之后一次都不再发/.test(ev))
+  ok('它验并发只跑一次', /并发调用只发一次请求/.test(ev))
+  ok('测试钩子里有 viewers 派发口', /viewers: \{\s*\n\s*snapshot:/.test(main) && /setFetcher:/.test(main))
+  ok('setFetcher 会先把 api 建出来（api 是懒建的）', /ensureSession\(\) \/\/ api 是懒建的/.test(main))
+
+  // ---- 收到哪些 cmd 要留痕 ----
+  // 「礼物不显示」这类问题，第一个要回答的是「包到底发过来没有」。
+  // 不记这一笔，就只能靠猜是没收到、没认出来、还是没画出来。
+  ok('接了 raw 事件', /live\.on\('raw', logLiveCmd\)/.test(main))
+  ok('每个 cmd 只记一次', /const seenLiveCmds = new Set\(\)/.test(main) && /seenLiveCmds\.has\(cmd\)/.test(main))
+  ok('记的是 cmd 名', /log\?\.info\('\[live\] 收到 cmd', cmd\)/.test(main))
+
+  // ---- 预加载 / 类型 ----
+  ok('预加载透过去', /viewers: \{[\s\S]{0,220}?ipcRenderer\.invoke\('viewers:state'/.test(read('electron/preload.cjs')))
+  const apiTs = read('src/lib/api.ts')
+  ok('渲染层有类型', /export interface ViewerItem/.test(apiTs) && /export interface ViewersState/.test(apiTs))
+  ok('渲染层接口齐', /state: \(\) => Promise<ViewersState>/.test(apiTs) && /refresh: \(\) => Promise<ViewersState>/.test(apiTs))
+
+  // ---- 配置默认值 ----
+  const store = read('electron/store.cjs')
+  ok('配置里有 viewers 段', /viewers: \{\s*\n\s*enabled: true,\s*\n\s*intervalMs: 20000/.test(store))
+  ok(
+    '叠加层有观众面板的三个键',
+    /showViewers: true,/.test(store) && /viewersPos: 'bl',/.test(store) && /viewersCount: 5,/.test(store),
+  )
+
+  // ---- 叠加层面板 ----
+  const html = read('overlay/index.html')
+  ok('页面里有观众这块元素', /id="cp-viewers"/.test(html))
+  ok('有渲染函数', /function renderViewers\(\)/.test(html))
+  ok('配置一变就重画', /renderPick\(\)\s*\n\s*renderViewers\(\)/.test(html))
+  ok('认 views 那一帧', /msg\.type === 'viewers'/.test(html))
+  ok('四个角的位置表在', /const VIEWERS_POS = \['tl', 'tr', 'bl', 'br'\]/.test(html))
+  ok('位置能回落到左下', /function viewersPos\(\)/.test(html))
+  ok('人数有上限（1~20）', /function viewersCount\(\)/.test(html) && /Math\.min\(Math\.floor\(v\), 20\)/.test(html))
+  // 榜单是空的就整块收起来 —— 不能在画面上留一个空框
+  ok('榜单为空时整块隐藏', /cfg\.showViewers !== false && list\.length > 0/.test(html))
+  ok('和别的块一样参与自动避让', /blocks\.push\(\{ el: viewersEl/.test(html))
+  ok('高度变化会触发重排', /ro\.observe\(viewersEl\)/.test(html))
+  // 观众榜在 #app 外面，头像回填若只搜 #app 会永远补不上
+  ok('头像回填搜整个文档（观众榜不在 #app 里）', /document\.querySelectorAll\('img\[data-face="'/.test(html))
+
+  // ---- 设置页 ----
+  const page = read('src/pages/OverlayPage.tsx')
+  ok('设置页有观众卡片', /title="在线观众（在线榜）"/.test(page))
+  ok('位置/人数可调', /VIEWERS_POS/.test(page) && /VIEWERS_COUNT_OPTIONS/.test(page))
+  ok('刷新开关与间隔也在这一块', /config\.viewers\?\.enabled !== false/.test(page) && /viewers: \{ intervalMs: v \* 1000 \}/.test(page))
+  ok('预览组件在', /<ViewersPreview pos=\{o\.viewersPos\} count=\{o\.viewersCount\} \/>/.test(page))
+  // 文案纪律：说清楚「哪些人不在里面」，否则主播会把它当在线人数用
+  ok('卡片里写明「纯潜水观众两边都不出现」', /纯潜水观众两边都不出现/.test(page))
+  ok('卡片里讲清了两份名单的来源', /高能榜/.test(page) && /在线用户/.test(page))
+  ok('观众列表那条也写了不等于观看人数', /不等于观看人数/.test(read('src/components/ViewersList.tsx')))
+
+  // ---- 弹幕页右侧栏 ----
+  const dp = read('src/pages/DanmakuPage.tsx')
+  ok('弹幕页右侧挂了三块', /<ViewersList \/>/.test(dp) && /<PaidHistory events=\{events\} \/>/.test(dp) && /<MusicConsole/.test(dp))
+  // OBS 画面预览是「调完就没用」的东西，被右侧栏取代了。
+  // 认的是标记本身而不是「OBS 画面预览」这几个字 —— 说明它为什么被拿掉的注释里当然会提到它
+  ok('OBS 画面预览已经拿掉', !/obs-preview/.test(dp) && !/<MusicWidget/.test(dp))
+  ok('不再有那个开关', !/showObsPreview/.test(dp) && !/showObsPreview/.test(apiTs))
+  const css = read('src/styles.css')
+  ok('左右两栏的样式在', /\.danmaku-main \{/.test(css) && /\.danmaku-side \{/.test(css))
+  ok('右侧卡片/礼物历史/控制台的样式都在', /\.side-card \{/.test(css) && /\.plist__row \{/.test(css) && /\.mconsole__ctrl \{/.test(css))
+  // 右侧栏要能并排、窄了不能被压成一条缝
+  ok('右侧栏宽度固定、左栏自动伸缩', /flex: 0 0 320px;/.test(css) && /\.danmaku-main \{[\s\S]{0,120}?flex: 1 1 auto;/.test(css))
+  // 三块的高度不是均分的：观众榜要一直扫，拿两份；付费历史拿一份
+  ok(
+    '观众榜比付费历史高一档',
+    /\.danmaku-side > \.side-card--viewers \{/.test(css) &&
+      /\.danmaku-side > \.side-card--paid \{/.test(css) &&
+      /\.side-card--viewers \{[\s\S]{0,60}?flex: 2 1 0;/.test(css) &&
+      /\.side-card--paid \{[\s\S]{0,60}?flex: 1 1 0;/.test(css),
+  )
+  // 下限不是随手写个好看的数：表头约 37px + 内边距 8px + 一行 46px，
+  // 两行就是 137px。低于这个数第二条会被裁掉半截 —— 那比只显示一条还难看。
+  {
+    const m = /\.side-card--paid \{[\s\S]{0,120}?min-height: (\d+)px;/.exec(css)
+    ok('付费卡高度容得下整两行（不算出 137 就看不全第二条）', m && Number(m[1]) >= 137, m && m[1])
+  }
+
+  // ---- 礼物/付费留言历史 ----
+  const ph = read('src/components/PaidHistory.tsx')
+  ok('付费历史只看这三类事件', /\[['"]gift['"], ['"]superchat['"], ['"]guard['"]\]/.test(ph))
+  ok('倒序（最新的一条在最上面）', /\.slice\(-MAX_ROWS\)\.reverse\(\)/.test(ph))
+  ok('条数有上限，不会一直涨', /const MAX_ROWS = 100/.test(ph))
+
+  // ---- 音乐控制台 ----
+  const mc = read('src/components/MusicConsole.tsx')
+  // 播放器本体必须常驻，控制台只是遥控器；住在这里的话切页面就会断
+  ok('控制台只是遥控器，用常驻的播放引擎', /useMusicPlayer\(\)/.test(mc))
+  ok('三个键：播放/暂停、下一首、清空', /onClick=\{toggle\}/.test(mc) && /api\.music\.next\(\)/.test(mc) && /api\.music\.clear\(\)/.test(mc))
+  ok('音量也在这儿能调', /Slider value=\{volume\}/.test(mc))
+  // 右侧栏的高度是「三块抢一栏」，每多一条待播就少一行观众榜。
+  // 这条钉住的是取舍本身，不是在数括号 —— 改成 2 之前先想清楚拿谁换。
+  ok('只预告「下一首」，不预告两首', /state\.items\.slice\(0, 1\)/.test(mc))
+
+  // ---- 「在线用户」：人在房间里就算，不要求互动过 ----
+  // 用户报的原话是「网页端可以看到没有互动也显示的观看用户」。
+  // 网页端「房间观众」那一列 = 高能榜 + 在线用户两份名单，少一份就少一批人。
+  ok('纯逻辑里有「在线用户」这一路', typeof V.normalizeOnlineItem === 'function' && typeof V.mergeOnlineRank === 'function')
+
+  const onItem = V.normalizeOnlineItem({ uid: 42, name: '只看不说', face: 'f.jpg' })
+  ok('在线用户没有贡献值，也不在榜上', Boolean(onItem) && onItem.score === 0 && onItem.onRank === false)
+  ok('榜上那条标了 onRank（界面靠它决定画名次还是画「-」）', one && one.onRank === true)
+  ok('没有 uid 的在线记录丢掉（去重和开主页都靠它）', V.normalizeOnlineItem({ name: 'x' }) === null)
+
+  // 数组键名不写死：它在 B站 各个版本里叫过不同的名字，
+  // 靠「唯一一个装着带 uid 对象的数组」来认
+  ok('认得出 OnlineRankItem', V.pickOnlineList({ onlineNum: 1, OnlineRankItem: [{ uid: 1 }] }).length === 1)
+  ok('键名换掉也照样认得出', V.pickOnlineList({ onlineNum: 1, onlineUserList: [{ uid: 7, name: 'a' }] }).length === 1)
+  ok('旁边那些对象（onlineNum / ownInfo）不会被当成名单', V.pickOnlineList({ onlineNum: 3, ownInfo: { uid: 9 } }).length === 0)
+
+  const onlineMerged = V.mergeOnlineRank({ data: { onlineNum: 5, OnlineRankItem: [{ uid: 1, name: 'a' }] } })
+  ok('在线人数也取得到', onlineMerged.onlineNum === 5 && onlineMerged.items.length === 1)
+
+  // 合并：榜上的在前（有贡献值和名次），只看不说的接在后面
+  const combined = V.combineViewers(
+    [{ uid: 1, name: '榜上', score: 9, onRank: true }],
+    [
+      { uid: 1, name: '榜上', score: 0, onRank: false },
+      { uid: 2, name: '潜水', score: 0, onRank: false },
+    ],
+  )
+  ok(
+    '同一个人两份都在时留榜上那条（信息更多）',
+    combined.length === 2 && combined[0].uid === 1 && combined[0].onRank === true,
+  )
+  ok('只看不说的排在榜后面', combined[1].uid === 2 && combined[1].onRank === false)
+
+  // ---- 接口层 ----
+  ok('走的是 getOnlineRank（不是高能榜那个）', /rank\/getOnlineRank'/.test(api))
+  ok('带上 platform=pc_link（网页端就是这么调的）', /platform: 'pc_link'/.test(api))
+  ok('失败时把 code 带出去（「没登录」和「风控」的处理不一样）', /err\.code = res\.code/.test(api))
+
+  // ---- 主进程：在线名单挂了不能把整张榜判死 ----
+  // 高能榜匿名就能调，在线名单**要登录**。没登录时榜上几十人还是好的，
+  // 只是少一批「只看不说」的 —— 两个都判死等于把能用的那份也丢了。
+  ok('在线名单自己 try/catch，不连累榜上的人', /VW\.mergeOnlineRank\(await api\.getOnlineRank\(/.test(main))
+  ok('单独留一个 onlineError，不塞进总的 error', /onlineError/.test(main))
+  ok('在线人数优先用在线用户那份（更接近网页端右上角）', /onlineNum: online\.onlineNum \|\| merged\.onlineNum/.test(main))
+
+  // ---- 类型与界面 ----
+  ok('ViewerItem 标了在不在榜上', /onRank: boolean/.test(apiTs))
+  ok('ViewersState 有 onlineError', /onlineError: string/.test(apiTs))
+  ok('没上榜的人排名栏画「-」，不是行号', /v\.onRank \? i \+ 1 : '-'/.test(vl))
+  ok('没上榜的人不画贡献值（0 看着像真投喂了 0 元）', /v\.onRank && <span className="vlist__score">/.test(vl))
+  ok('在线名单掉了要说出来，不能装作没这回事', /在线名单没拿到/.test(vl))
+  ok('文案纪律仍然是「不等于观看人数」', /不等于观看人数/.test(vl))
+  ok('「-」那一栏有单独的样式', /\.vlist__no\.is-dim \{/.test(css))
+
+  // ---- 叠加层 ----
+  ok('叠加层同样画「-」', /v\.onRank === false \? '-' : String\(i \+ 1\)/.test(html))
+  ok('叠加层不画 0 贡献值', /if \(v\.onRank !== false\) row\.appendChild\(el\('span', 'cp-vrow__score'/.test(html))
+  ok('标题改成「在线榜」（并进只看不说的人之后就不只是高能榜了）', /'在线榜'/.test(html))
+  ok('重绘 key 带上 onRank（否则名次从有到无不会重画）', /v\.onRank === false \? 'o' : 'r'/.test(html))
+  ok('「-」那一栏在叠加层里也压暗一档', /\.cp-vrow__no\.is-dim \{/.test(html))
+}
+
+/**
+ * 礼物包。
+ *
+ * 「送了礼物但历史和播报都没有」查出来的根因是两层的：
+ * ① cmd 从 `SEND_GIFT` 变成了 **`SEND_GIFT_V2`**；
+ * ② 而且 V2 的 data 里**只有 `{ dmscore, pb }`** —— 礼物名、数量、金额、送礼人
+ *    全在那段 base64 protobuf 里，扁平字段一个都不存在。
+ * 所以「把 case 加上」是不够的，必须真解 pb。这一段钉三件事：
+ * ① 两个包名都认，老的 JSON 包行为不变；
+ * ② **拿真实抓到的包**验字段号 —— 手写的 protobuf 解码器最容易「看起来对」，
+ *    只有真包跑得通才算数（下面那段 base64 是从一个真实直播间原样抓下来的）；
+ * ③ 钱相关的 cmd 要**连 payload 一起记进日志**，下次 B站 再改一次名字，
+ *    别再靠猜和来回问用户。
+ */
+function testGiftCmd() {
+  const root = path.join(__dirname, '..')
+  const read = (p) => fs.readFileSync(path.join(root, p), 'utf8')
+  const liveSrc = read('electron/bilibili/live.cjs')
+  const mainSrc = read('electron/main.cjs')
+  const { normalizeEvent, decodeSendGiftV2 } = require('../electron/bilibili/live.cjs')
+
+  ok('老的 SEND_GIFT 还认', /case 'SEND_GIFT':/.test(liveSrc))
+  ok('新的 SEND_GIFT_V2 也认（就是它导致礼物不显示）', /case 'SEND_GIFT_V2':/.test(liveSrc))
+  ok('V2 走的是 pb 解码这条路', /const pb = decodeSendGiftV2\(d\.pb\)/.test(liveSrc))
+  ok('没有 pb 时退回扁平字段（总好过整条消失）', /return pb \? giftFromPb|return normalizeGift\(d\)/.test(liveSrc))
+
+  // ---- 真实抓包回归：房间 6154037，送礼人 wowow_233，礼物「人气票」×1 ----
+  const REAL_PB =
+    'CKiRgKOwsqYGEgl3b3dvd18yMzMaSmh0dHBzOi8vaTAuaGRzbGIuY29tL2Jmcy9mYWNlL2JkZGE1MzFhNjQ2YzY3YTMxNzRkNjM5MWMyM2QyZTk2YWYwOWM3NTkuanBnQiQI2bDeXCgdMgVBU0FLSTjVkLQBQNWQtAFI/7f2BFDVkLQBWAFStwUIxIkCEgnkurrmsJTnpagYASABKGQwZDhkQgRnb2xkShM0ODI1MzI1NTUxNzgwNzEwNDAwUMzvmdYGWAFiRGJhdGNoOmdpZnQ6Y29tYm9faWQ6MzU0NjU1NjQzMzE3MjY0ODoxOTQ0ODQzMTM6MzM5ODg6MTc5MTM5MTY5Mi44MDI3aApwZHgFhQEAAIA/iAEBkgEG5oqV5ZaCwAGnzPvHAuoBEgoLQXNha2nlpKfkuroQ2bDeXIoCjgII2bDeXBKGAgoLQXNha2nlpKfkuroSSmh0dHBzOi8vaTEuaGRzbGIuY29tL2Jmcy9mYWNlLzg0YTg2MWZhY2ZhMDQxYjQ2ZjdhMzA4OTdlOWVkM2YyZTA1ZTA1MTkuanBnMlkKC0FzYWtp5aSn5Lq6EkpodHRwczovL2kxLmhkc2xiLmNvbS9iZnMvZmFjZS84NGE4NjFmYWNmYTA0MWI0NmY3YTMwODk3ZTllZDNmMmUwNWUwNTE5LmpwZzpQCAESTDIwMjTnm7Tmkq3lubTluqbkurrmsJTlpZZVUOS4u+OAgSAyMDI05bm05bqm5piO5pif5Li75pKt44CB55+l5ZCN5ri45oiPVVDkuL2SAgCaAuUBCkpodHRwczovL2kwLmhkc2xiLmNvbS9iZnMvbGl2ZS83YmFkZWI1N2Q0OThhYTYwMzk4MjQ5NDVjMjIzOGMxNzAxOWRhMjU5LnBuZxJLaHR0cHM6Ly9pMC5oZHNsYi5jb20vYmZzL2xpdmUvNzMzZjMwYWJlZjBiNzFkZDkwN2NlOTNhZWI5OTUzOGQwNWNlMDk4OS53ZWJwKkpodHRwczovL2kwLmhkc2xiLmNvbS9iZnMvbGl2ZS9kNjBhYmU0YjI1NjY5NTMwNDNjM2ZkNDZlNTUzNzkyNTE4MTEwMDA5LmdpZqoCAFgBagIIH3qsAgiokYCjsLKmBhK9AQoJd293b3dfMjMzEkpodHRwczovL2kwLmhkc2xiLmNvbS9iZnMvZmFjZS9iZGRhNTMxYTY0NmM2N2EzMTc0ZDYzOTFjMjNkMmU5NmFmMDljNzU5LmpwZzJXCgl3b3dvd18yMzMSSmh0dHBzOi8vaTAuaGRzbGIuY29tL2Jmcy9mYWNlL2JkZGE1MzFhNjQ2YzY3YTMxNzRkNjM5MWMyM2QyZTk2YWYwOWM3NTkuanBnOgsg////////////ARphCgVBU0FLSRAdGNWQtAEg/7f2BCjVkLQBMNWQtAFIAVDZsN5cYNS4AXoJIzNGQjRGNjk5ggEJIzNGQjRGNjk5igEJIzNGQjRGNjk5kgEHI0ZGRkZGRpoBCSMzRkI0RjZFNg=='
+  const real = decodeSendGiftV2(REAL_PB)
+  ok('真包解得出来（不是 null）', Boolean(real))
+  ok('真包的送礼人对得上', real && real.uname === 'wowow_233' && real.uid === 3546556433172648)
+  ok('真包的礼物名对得上', real && real.giftName === '人气票')
+  ok('真包的数量对得上', real && real.num === 1)
+  ok('真包的粉丝牌对得上（牌子所属主播 uid 也在）', real && real.medal && real.medal.name === 'ASAKI' && real.medal.anchorUid === 194484313)
+  ok('真包的头像是个 URL', real && /^https:\/\/i\d\.hdslb\.com\/bfs\/face\//.test(real.face))
+
+  const ev = normalizeEvent({ cmd: 'SEND_GIFT_V2', data: { dmscore: 560, pb: REAL_PB } })
+  ok('V2 能变成礼物事件', Boolean(ev) && ev.type === 'gift')
+  ok('礼物事件带上了名字和数量', ev.giftName === '人气票' && ev.num === 1 && ev.username === 'wowow_233')
+  ok('文案是人话', ev.content === '投喂 人气票 ×1')
+
+  // 脏输入不能把主进程带崩（B站 偶尔会发空的/截断的 pb）
+  ok('空 pb 不会抛，返回 null', decodeSendGiftV2('') === null && decodeSendGiftV2(null) === null)
+  ok('乱码 base64 也返回 null 而不是炸', decodeSendGiftV2('!!!!') === null)
+  ok('半截包（截掉尾巴）不会抛', (() => {
+    try {
+      decodeSendGiftV2(REAL_PB.slice(0, 200))
+      return true
+    } catch {
+      return false
+    }
+  })())
+
+  // ---- 老的 JSON 包行为不能因为这次改动而变 ----
+  const legacy = normalizeEvent({
+    cmd: 'SEND_GIFT',
+    data: { uid: 1, uname: '乙', giftName: '小花花', num: 1, total_coin: 100 },
+  })
+  ok('老的 SEND_GIFT 结果不变', legacy.type === 'gift' && legacy.price === 0.1 && legacy.content === '投喂 小花花 ×1')
+
+  // 连击礼包有时候只在 batch_combo_send 里放名字和数量
+  const combo = normalizeEvent({
+    cmd: 'SEND_GIFT',
+    data: { uid: 9, batch_combo_send: { gift_name: '小心心', gift_num: 5, uname: '甲' } },
+  })
+  ok('扁平包的 batch_combo_send 兜底还在', combo.giftName === '小心心' && combo.num === 5 && combo.username === '甲')
+
+  ok('别的 cmd 不会被误认成礼物', normalizeEvent({ cmd: 'COMBO_END', data: {} }) === null)
+
+  // ---- 日志：钱相关的包要连 payload 一起记 ----
+  ok('钱相关的 cmd 单独列出来', /const MONEY_CMD = \/GIFT\|GUARD\|SUPER_CHAT\|TOAST\|COMBO\//.test(mainSrc))
+  ok('这类 cmd 的 payload 会进日志', /JSON\.stringify\(raw\?\.data \?\? null\)\.slice\(0, 900\)/.test(mainSrc))
+  ok('其余 cmd 只记名字（弹幕一秒十条，全存会把日志刷爆）', /log\?\.info\('\[live\] 收到 cmd', cmd\)\n\}/.test(mainSrc))
+}
+
+/**
+ * 点头像用默认浏览器打开这个人的主页。
+ *
+ * 走的是主进程既有的 `app:openExternal`（那边只放行 http(s)），
+ * 渲染层不能自己开窗口。**uid 为 0 的不给按钮** —— 匿名包、被风控抹掉
+ * uid 的包都没有主页可去，做成按钮就是「点了没反应」。
+ */
+function testUserLinks() {
+  const root = path.join(__dirname, '..')
+  const read = (p) => fs.readFileSync(path.join(root, p), 'utf8')
+  const links = read('src/lib/links.ts')
+  const ui = read('src/components/ui.tsx')
+  const css = read('src/styles.css')
+
+  ok('链接是按 uid 拼的', /https:\/\/space\.bilibili\.com\/\$\{Math\.floor\(n\)\}/.test(links))
+  ok('uid 不合法就不给链接（否则会跳到不相干的人）', /n <= 0\) return null/.test(links))
+  ok('打开走的是主进程那套白名单', /api\.app\.openExternal\(url\)/.test(links))
+
+  ok('有 UserAvatar 这个组件', /export function UserAvatar\(/.test(ui))
+  ok('uid 为 0 时退回纯展示的头像', /if \(!userSpaceUrl\(uid\)\) return <Avatar /.test(ui))
+  ok('用 button 而不是 div（键盘能 Tab、回车能开）', /className="avatar-btn"/.test(ui) && /aria-label=\{`用浏览器打开/.test(ui))
+
+  // 三处列表都要能点
+  const dp = read('src/pages/DanmakuPage.tsx')
+  const vl = read('src/components/ViewersList.tsx')
+  const ph = read('src/components/PaidHistory.tsx')
+  ok('弹幕列表的头像能点', /<UserAvatar src=\{ev\.face\} name=\{name\} uid=\{ev\.uid\} \/>/.test(dp))
+  ok('观众榜的头像能点', /<UserAvatar src=\{v\.face\} name=\{v\.name\} size=\{30\} uid=\{v\.uid\} \/>/.test(vl))
+  ok('付费历史的头像也能点', /<UserAvatar src=\{e\.face\} name=\{e\.username\} size=\{24\} uid=\{e\.uid\} \/>/.test(ph))
+
+  ok('按钮自己不占尺寸（.avatar 的 flex-basis 曾经就是这么把头像压扁的）', /\.avatar-btn \{[\s\S]{0,120}?flex: 0 0 auto;/.test(css))
+  ok('悬停不位移（弹幕一秒十条，头像跳来跳去比没反馈更烦）', /\.avatar-btn:hover \{[\s\S]{0,80}?box-shadow/.test(css))
+  ok('键盘焦点看得见', /\.avatar-btn:focus-visible \{/.test(css))
 }
 
 /**
@@ -865,12 +1642,12 @@ function testOverlayPanels() {
   const root = path.join(__dirname, '..')
   const read = (p) => fs.readFileSync(path.join(root, p), 'utf8')
   const { OVERLAY_PANELS, panelFromPath } = require('../electron/overlay.cjs')
-  const WANT = ['all', 'danmaku', 'lyric', 'music', 'voicepick']
+  const WANT = ['all', 'danmaku', 'lyric', 'music', 'voicepick', 'viewers']
 
   // ---- 路由表 ----
   ok('路由表里有「全部」这一项', OVERLAY_PANELS[0] === 'all', OVERLAY_PANELS)
-  ok('歌词/弹幕/点歌/音色都能单独开', WANT.every((p) => OVERLAY_PANELS.includes(p)), OVERLAY_PANELS)
-  ok('就这五个，没有多余的名字', OVERLAY_PANELS.length === WANT.length, OVERLAY_PANELS)
+  ok('歌词/弹幕/点歌/音色/观众都能单独开', WANT.every((p) => OVERLAY_PANELS.includes(p)), OVERLAY_PANELS)
+  ok('就这六个，没有多余的名字', OVERLAY_PANELS.length === WANT.length, OVERLAY_PANELS)
 
   // ---- 地址 -> 认成哪一块 ----
   ok('/overlay/lyric 认成歌词', panelFromPath('/overlay/lyric') === 'lyric')
@@ -905,6 +1682,7 @@ function testOverlayPanels() {
   ok('点歌面板只在点歌源里画', /if \(!shows\('music'\)\)/.test(html))
   ok('歌词只在歌词源里画', /if \(!shows\('lyric'\)\)/.test(html))
   ok('音色面板只在音色源里画', /if \(!shows\('voicepick'\)\)/.test(html))
+  ok('观众榜只在观众源里画', /if \(!shows\('viewers'\)\)/.test(html))
   // 少画的那几块要顺手把 is-show 摘掉，不然切地址时会留着上一轮的内容
   ok('不画的那块会收起 is-show', (html.match(/classList\.remove\('is-show'\)/g) || []).length >= 3)
 
@@ -921,7 +1699,8 @@ function testOverlayPanels() {
   // ---- 单面板的尺寸规则 ----
   ok(
     '放开三分画布时定的百分比上限',
-    /html\.is-panel \.cp-lyric \{/.test(html) && /html\.is-panel \.cp-music,\s*\n\s*html\.is-panel \.cp-pick \{/.test(html),
+    /html\.is-panel \.cp-lyric \{/.test(html) &&
+      /html\.is-panel \.cp-music,\s*\n\s*html\.is-panel \.cp-pick,\s*\n\s*html\.is-panel \.cp-viewers \{/.test(html),
   )
   ok('歌词源里字幕占满整个源', /html\.is-panel \.cp-lyric \{[\s\S]{0,120}?width: 100%;/.test(html))
   // 两边选择器权重一样（html.is-panel .cp-lyric 对 html.is-narrow .cp-lyric），
@@ -931,7 +1710,7 @@ function testOverlayPanels() {
   // ---- 设置页给出的地址 ----
   const page = read('src/pages/OverlayPage.tsx')
   const ids = Array.from(page.matchAll(/\{ id: '([a-z]+)', name:/g)).map((x) => x[1])
-  ok('设置页列出的四块与服务端一致', JSON.stringify(ids) === JSON.stringify(WANT.filter((p) => p !== 'all')), ids)
+  ok('设置页列出的几块与服务端一致', JSON.stringify(ids) === JSON.stringify(WANT.filter((p) => p !== 'all')), ids)
   ok('地址按面板名拼出来', /\$\{origin\}\/overlay\/\$\{id\}/.test(page))
   ok('那一行还能单独打开', /api\.overlay\.open\(p\.id\)/.test(page))
   ok('旧的「全部」地址仍然给出来', /id === 'all' \? `\$\{origin\}\/overlay`/.test(page))

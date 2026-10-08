@@ -27,6 +27,12 @@ const api = {
     onError: (cb) => on('live:error', cb),
     onFace: (cb) => on('live:face', cb),
   },
+  // 在线观众（B站高能榜）。榜单只在房间连上之后才有内容
+  viewers: {
+    state: () => ipcRenderer.invoke('viewers:state'),
+    refresh: () => ipcRenderer.invoke('viewers:refresh'),
+    onState: (cb) => on('viewers:state', cb),
+  },
   tts: {
     providers: () => ipcRenderer.invoke('tts:providers'),
     voices: (provider, force) => ipcRenderer.invoke('tts:voices', provider, force),
@@ -90,6 +96,16 @@ const api = {
     test: () => ipcRenderer.invoke('overlay:test'),
     selfcheck: () => ipcRenderer.invoke('overlay:selfcheck'),
     onStatus: (cb) => on('overlay:status', cb),
+  },
+  // 桌面浮窗：弹幕 / 当前观众 / 礼物 / 音乐控制台四块，各自弹出为独立小窗。
+  // panel 取值：'danmaku' | 'viewers' | 'gifts' | 'music'，和渲染层 ?float= 一致
+  float: {
+    state: () => ipcRenderer.invoke('float:state'),
+    open: (panel) => ipcRenderer.invoke('float:open', panel),
+    close: (panel) => ipcRenderer.invoke('float:close', panel),
+    /** 浮窗里的设置弹层用：改不透明度 / 字体大小，当场生效 */
+    set: (panel, patch) => ipcRenderer.invoke('float:set', panel, patch),
+    onState: (cb) => on('float:state', cb),
   },
   // 一键准备开播：扫本机的直播软件、按顺序拉起来、可选连上直播间
   launchpad: {

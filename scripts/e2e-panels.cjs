@@ -16,9 +16,9 @@
  *
  * 四节：
  *   [A] 地址路由：/overlay/xxx 都回那份页面，认不得的回落「全部」
- *   [B] 各画各的：五个源同时开着，推同一批帧，验每块只出现自己那一份
+ *   [B] 各画各的：六个源同时开着，推同一批帧，验每块只出现自己那一份
  *   [C] 窄源：单块能吃满整个源（压过「三块同挤画布」时定的百分比上限）
- *   [D] 老地址与兜底：/overlay 仍是「三块齐全」
+ *   [D] 老地址与兜底：/overlay 仍是「几块齐全」
  */
 const path = require('node:path')
 const fs = require('node:fs')
@@ -93,6 +93,7 @@ const READ = `(() => {
   const lyric = document.querySelector('.cp-lyric')
   const music = document.querySelector('.cp-music')
   const pick = document.querySelector('.cp-pick')
+  const viewers = document.querySelector('.cp-viewers')
   const status = document.getElementById('cp-status')
   const vis = (n) => Boolean(n) && getComputedStyle(n).display !== 'none'
   const cap = (n) => (n ? getComputedStyle(n).maxHeight : '')
@@ -116,7 +117,10 @@ const READ = `(() => {
     musicText: music ? music.textContent : '',
     pickShown: vis(pick),
     pickText: pick ? pick.textContent : '',
-    caps: { lyric: cap(lyric), music: cap(music), pick: cap(pick) },
+    viewersShown: vis(viewers),
+    viewersText: viewers ? viewers.textContent : '',
+    viewersPos: viewers ? viewers.getAttribute('data-pos') : '',
+    caps: { lyric: cap(lyric), music: cap(music), pick: cap(pick), viewers: cap(viewers) },
     statusShown: status ? status.classList.contains('is-show') : false,
     statusBad: status ? status.classList.contains('is-bad') : false,
     statusText: status ? status.textContent : '',
@@ -124,7 +128,7 @@ const READ = `(() => {
 })()`
 const read = (w) => w.webContents.executeJavaScript(READ)
 
-/** 推四种帧各一条 —— 每块都有自己的事要画，才验得出「串没串」 */
+/** 推五种帧各一条 —— 每块都有自己的事要画，才验得出「串没串」 */
 function pushAll(server) {
   server.broadcast('event', {
     id: 'e-1',
@@ -157,6 +161,29 @@ function pushAll(server) {
       ttlMs: 8000,
     },
     waiting: 0,
+  })
+  server.broadcast('viewers', {
+    ok: true,
+    roomId: 1,
+    anchorUid: 2,
+    onlineNum: 954,
+    items: [
+      // 甲走大航海标签（同一行放不下两个，舰长优先于牌子），乙走粉丝牌 —— 两条路都要画到
+      {
+        uid: 11,
+        name: '观众甲',
+        face: '',
+        score: 13017,
+        guardLevel: 3,
+        guard: '舰长',
+        wealthLevel: 30,
+        medal: { name: '囚人', level: 21 },
+      },
+      { uid: 12, name: '观众乙', face: '', score: 640, guardLevel: 0, guard: '', wealthLevel: 5, medal: { name: '老观众', level: 12 } },
+    ],
+    updatedAt: Date.now(),
+    error: '',
+    fetching: false,
   })
 }
 
@@ -203,20 +230,21 @@ async function main() {
     }
 
     /* ------------------------- [B] 各画各的 ------------------------- */
-    console.log('\n[B] 各画各的：五个源同时开着，推同一批帧')
+    console.log('\n[B] 各画各的：六个源同时开着，推同一批帧')
     const PANELS = [
       { key: 'all', url: '/overlay' },
       { key: 'danmaku', url: '/overlay/danmaku' },
       { key: 'lyric', url: '/overlay/lyric' },
       { key: 'music', url: '/overlay/music' },
       { key: 'voicepick', url: '/overlay/voicepick' },
+      { key: 'viewers', url: '/overlay/viewers' },
     ]
     const views = {}
     for (const p of PANELS) views[p.key] = await openSource(port, p.url)
     wins.push(...Object.values(views))
 
     await waitFor(() => server.clientCount >= PANELS.length, 6000)
-    ok(`B1 五个源都连上了（实际 ${server.clientCount}）`, server.clientCount >= PANELS.length, server.clientCount)
+    ok(`B1 六个源都连上了（实际 ${server.clientCount}）`, server.clientCount >= PANELS.length, server.clientCount)
 
     pushAll(server)
     await wait(500)
@@ -226,7 +254,7 @@ async function main() {
     for (const p of PANELS) {
       const v = got[p.key]
       console.log(
-        `        ${p.key.padEnd(9)} 弹幕${v.danmakuCount} 歌词${v.lyricShown ? '有' : '无'} 点歌${v.musicShown ? '有' : '无'} 音色${v.pickShown ? '有' : '无'}`,
+        `        ${p.key.padEnd(9)} 弹幕${v.danmakuCount} 歌词${v.lyricShown ? '有' : '无'} 点歌${v.musicShown ? '有' : '无'} 音色${v.pickShown ? '有' : '无'} 观众${v.viewersShown ? '有' : '无'}`,
       )
     }
 
@@ -303,7 +331,7 @@ async function main() {
     )
 
     const back = await waitFor(() => server.clientCount >= PANELS.length, 10000)
-    ok('B27 断开之后五个源都自己连回来了', dropped && back, { dropped, back, clients: server.clientCount })
+    ok('B27 断开之后六个源都自己连回来了', dropped && back, { dropped, back, clients: server.clientCount })
     // 服务端一 accept 就把计数加上去了，页面那边的 onopen 要等握手回来才跑，
     // 差的就是这几毫秒 —— 给足 400ms，离提示自己收掉的 3 秒还远着
     await wait(400)
@@ -322,6 +350,47 @@ async function main() {
     const after = await read(views.all)
     ok('B30 提示到点自己收掉', !after.statusShown, after.statusShown)
     ok('B31 「全部」那个源没有被当成单块源', !after.isPanel && after.panel === null, after.panel)
+
+    // ---- 观众源（高能榜）----
+    ok(
+      'B32 观众源：名单画出来了',
+      got.viewers.viewersShown && got.viewers.viewersText.includes('观众甲') && got.viewers.viewersText.includes('观众乙'),
+      got.viewers.viewersText.slice(0, 60),
+    )
+    // 榜上人数和在线人数是两回事，两个都要画出来
+    ok('B33 观众源：在线人数也标出来了', got.viewers.viewersText.includes('954'), got.viewers.viewersText.slice(0, 60))
+    ok(
+      'B34 观众源：大航海优先，没大航海的显示粉丝牌',
+      got.viewers.viewersText.includes('舰长') && got.viewers.viewersText.includes('老观众'),
+      got.viewers.viewersText.slice(0, 60),
+    )
+    ok('B35 观众源：默认摆左下', got.viewers.viewersPos === 'bl', got.viewers.viewersPos)
+    // 和别块一样，观众源里也不许冒出别人的东西
+    ok(
+      'B36 观众源：一条弹幕/歌词/点歌/音色都没有',
+      got.viewers.danmakuCount === 0 &&
+        !got.viewers.lyricShown &&
+        !got.viewers.musicShown &&
+        !got.viewers.pickShown,
+      {
+        danmaku: got.viewers.danmakuCount,
+        lyric: got.viewers.lyricShown,
+        music: got.viewers.musicShown,
+        pick: got.viewers.pickShown,
+      },
+    )
+    // 反过来也得成立：另外四个源里一个观众榜都不该出现
+    // （「全部」那个源除外 —— 它本来就是几块齐全）
+    ok(
+      'B37 别的源里不出现观众榜',
+      !got.danmaku.viewersShown && !got.lyric.viewersShown && !got.music.viewersShown && !got.voicepick.viewersShown,
+      {
+        danmaku: got.danmaku.viewersShown,
+        lyric: got.lyric.viewersShown,
+        music: got.music.viewersShown,
+        voicepick: got.voicepick.viewersShown,
+      },
+    )
 
     /* ------------------------- [C] 窄源 ------------------------- */
     console.log('\n[C] 窄源：单块能吃满整个源')
@@ -369,45 +438,75 @@ async function main() {
       ok('C8 全部模式下那两个上限都还在', narrowAll.caps.music === '46%' && narrowAll.caps.pick === '42%', narrowAll.caps)
       ok('C9 窄源里点歌面板照样画出来', nm.musicShown, nm.musicText.slice(0, 30))
       ok('C10 窄源里音色候选照样画出来', np.pickShown, np.pickText.slice(0, 30))
+
+      // 观众源也是同一个道理：42% 那条上限是为了「几块同挤一个画布」定的，
+      // 单块源里整源都是它的，必须放开。选择器权重一样，靠 is-panel 排在后面赢
+      const wView = await openSource(port, '/overlay/viewers', { width: 420, height: 320 })
+      wins.push(wView)
+      await waitFor(() => server.clientCount >= PANELS.length + 5, 6000)
+      pushAll(server)
+      await wait(600)
+      const nv2 = await read(wView)
+      ok('C11 单独的观众源放开了 42% 上限', nv2.caps.viewers === '100%', nv2.caps)
+      ok('C12 全部模式下观众榜那个上限还在（没误伤）', narrowAll.caps.viewers === '42%', narrowAll.caps)
+      ok('C13 窄源里观众榜照样画出来', nv2.viewersShown, nv2.viewersText.slice(0, 40))
+
       // 单块源里也不该冒出别的块
-      ok('C11 窄源里依然不串', nm.danmakuCount === 0 && !nm.lyricShown && np.danmakuCount === 0 && !np.musicShown)
+      ok(
+        'C14 窄源里依然不串',
+        nm.danmakuCount === 0 && !nm.lyricShown && np.danmakuCount === 0 && !np.musicShown && nv2.danmakuCount === 0 && !nv2.musicShown,
+      )
     }
 
     /* ------------------------- [D] 老地址与兜底 ------------------------- */
     console.log('\n[D] 老地址与兜底')
     {
       const all = got.all
-      ok('D1 /overlay 还是三块齐全', all.danmakuCount === 1 && all.lyricShown && all.musicShown && all.pickShown, {
-        danmaku: all.danmakuCount,
-        lyric: all.lyricShown,
-        music: all.musicShown,
-        pick: all.pickShown,
-      })
+      // 「齐全」现在是五块 —— 观众榜也是常驻的一块
+      ok(
+        'D1 /overlay 还是几块齐全',
+        all.danmakuCount === 1 && all.lyricShown && all.musicShown && all.pickShown && all.viewersShown,
+        {
+          danmaku: all.danmakuCount,
+          lyric: all.lyricShown,
+          music: all.musicShown,
+          pick: all.pickShown,
+          viewers: all.viewersShown,
+        },
+      )
       ok('D2 /overlay 上没有 is-panel 标记（样式不该被单块那套影响）', !all.isPanel && all.panel === null, all.panel)
 
       // ?panel=lyric 这种手敲的写法也认
       const q = await openSource(port, '/overlay?panel=lyric')
       wins.push(q)
-      await waitFor(() => server.clientCount >= PANELS.length + 5, 6000)
+      await waitFor(() => server.clientCount >= PANELS.length + 6, 6000)
       await wait(300)
       const qv = await read(q)
       ok('D3 ?panel=lyric 也认', qv.panel === 'lyric' && qv.isPanel, qv.panel)
-      ok('D4 这么写的歌词源同样只有歌词', qv.danmakuCount === 0, qv.danmakuCount)
+      ok('D4 这么写的歌词源同样只有歌词', qv.danmakuCount === 0 && !qv.viewersShown, {
+        danmaku: qv.danmakuCount,
+        viewers: qv.viewersShown,
+      })
 
       // 乱写的名字回落到「全部」：宁可多画一块，也不能给一片空白
       const nope = await openSource(port, '/overlay/nope')
       wins.push(nope)
-      await waitFor(() => server.clientCount >= PANELS.length + 6, 6000)
+      await waitFor(() => server.clientCount >= PANELS.length + 7, 6000)
       pushAll(server)
       await wait(600)
       const nv = await read(nope)
       ok('D5 乱写的名字按「全部」渲染', !nv.isPanel && nv.panel === null, nv.panel)
-      ok('D6 于是三块都会画出来', nv.danmakuCount === 1 && nv.lyricShown && nv.musicShown && nv.pickShown, {
-        danmaku: nv.danmakuCount,
-        lyric: nv.lyricShown,
-        music: nv.musicShown,
-        pick: nv.pickShown,
-      })
+      ok(
+        'D6 于是几块都会画出来',
+        nv.danmakuCount === 1 && nv.lyricShown && nv.musicShown && nv.pickShown && nv.viewersShown,
+        {
+          danmaku: nv.danmakuCount,
+          lyric: nv.lyricShown,
+          music: nv.musicShown,
+          pick: nv.pickShown,
+          viewers: nv.viewersShown,
+        },
+      )
     }
 
     console.log(`\n结果：${pass} 通过 / ${fail} 失败`)

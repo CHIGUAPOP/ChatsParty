@@ -405,6 +405,33 @@ async function main() {
     store.patch({ room: { anchorUid: 0 }, voicePolicy: { requireMedal: false } })
   }
 
+  console.log('\n[13] 礼物包：B站 现在推的是 SEND_GIFT_V2，信息全在 base64 protobuf 里')
+  {
+    // 这条链是用户报回来的：送完礼物，弹幕列表、右侧「礼物·付费留言」、播报全都没有。
+    // 根因是 cmd 从 SEND_GIFT 变成了 SEND_GIFT_V2，而且 data 里**只有 { dmscore, pb }** ——
+    // 礼物名/数量/金额/送礼人全在那段 pb 里，扁平字段一个都不存在。
+    const { normalizeEvent } = require(path.join(__dirname, '..', 'electron', 'bilibili', 'live.cjs'))
+    // 真实抓包（房间 6154037）：送礼人 wowow_233，礼物「人气票」×1
+    const REAL_PB =
+      'CKiRgKOwsqYGEgl3b3dvd18yMzMaSmh0dHBzOi8vaTAuaGRzbGIuY29tL2Jmcy9mYWNlL2JkZGE1MzFhNjQ2YzY3YTMxNzRkNjM5MWMyM2QyZTk2YWYwOWM3NTkuanBnQiQI2bDeXCgdMgVBU0FLSTjVkLQBQNWQtAFI/7f2BFDVkLQBWAFStwUIxIkCEgnkurrmsJTnpagYASABKGQwZDhkQgRnb2xkShM0ODI1MzI1NTUxNzgwNzEwNDAwUMzvmdYGWAFiRGJhdGNoOmdpZnQ6Y29tYm9faWQ6MzU0NjU1NjQzMzE3MjY0ODoxOTQ0ODQzMTM6MzM5ODg6MTc5MTM5MTY5Mi44MDI3aApwZHgFhQEAAIA/iAEBkgEG5oqV5ZaCwAGnzPvHAuoBEgoLQXNha2nlpKfkuroQ2bDeXIoCjgII2bDeXBKGAgoLQXNha2nlpKfkuroSSmh0dHBzOi8vaTEuaGRzbGIuY29tL2Jmcy9mYWNlLzg0YTg2MWZhY2ZhMDQxYjQ2ZjdhMzA4OTdlOWVkM2YyZTA1ZTA1MTkuanBnMlkKC0FzYWtp5aSn5Lq6EkpodHRwczovL2kxLmhkc2xiLmNvbS9iZnMvZmFjZS84NGE4NjFmYWNmYTA0MWI0NmY3YTMwODk3ZTllZDNmMmUwNWUwNTE5LmpwZzpQCAESTDIwMjTnm7Tmkq3lubTluqbkurrmsJTlpZZVUOS4u+OAgSAyMDI05bm05bqm5piO5pif5Li75pKt44CB55+l5ZCN5ri45oiPVVDkuL2SAgCaAuUBCkpodHRwczovL2kwLmhkc2xiLmNvbS9iZnMvbGl2ZS83YmFkZWI1N2Q0OThhYTYwMzk4MjQ5NDVjMjIzOGMxNzAxOWRhMjU5LnBuZxJLaHR0cHM6Ly9pMC5oZHNsYi5jb20vYmZzL2xpdmUvNzMzZjMwYWJlZjBiNzFkZDkwN2NlOTNhZWI5OTUzOGQwNWNlMDk4OS53ZWJwKkpodHRwczovL2kwLmhkc2xiLmNvbS9iZnMvbGl2ZS9kNjBhYmU0YjI1NjY5NTMwNDNjM2ZkNDZlNTUzNzkyNTE4MTEwMDA5LmdpZqoCAFgBagIIH3qsAgiokYCjsLKmBhK9AQoJd293b3dfMjMzEkpodHRwczovL2kwLmhkc2xiLmNvbS9iZnMvZmFjZS9iZGRhNTMxYTY0NmM2N2EzMTc0ZDYzOTFjMjNkMmU5NmFmMDljNzU5LmpwZzJXCgl3b3dvd18yMzMSSmh0dHBzOi8vaTAuaGRzbGIuY29tL2Jmcy9mYWNlL2JkZGE1MzFhNjQ2YzY3YTMxNzRkNjM5MWMyM2QyZTk2YWYwOWM3NTkuanBnOgsg////////////ARphCgVBU0FLSRAdGNWQtAEg/7f2BCjVkLQBMNWQtAFIAVDZsN5cYNS4AXoJIzNGQjRGNjk5ggEJIzNGQjRGNjk5igEJIzNGQjRGNjk5kgEHI0ZGRkZGRpoBCSMzRkI0RjZFNg=='
+    const giftEv = normalizeEvent({ cmd: 'SEND_GIFT_V2', data: { dmscore: 560, pb: REAL_PB } })
+    ok('13a 真包解析成礼物事件（不是 null）', Boolean(giftEv) && giftEv.type === 'gift', giftEv)
+    ok('13b 送礼人和礼物名都在', giftEv.username === 'wowow_233' && giftEv.giftName === '人气票', giftEv)
+
+    speech.setBusy(true)
+    const beforeGift = speech.queue.length
+    dispatchEvent(giftEv)
+    const spoken = speech.queue.slice(beforeGift)
+    speech.setBusy(false)
+    speech.queue.length = 0
+    ok('13c 礼物进了播报队列（以前这一步就断了）', spoken.length === 1, spoken.length)
+    ok(
+      '13d 念的文案里有送礼人和礼物名',
+      /wowow_233/.test(spoken[0]?.text || '') && /人气票/.test(spoken[0]?.text || ''),
+      spoken[0]?.text,
+    )
+  }
+
   console.log(`\n结果：${pass} 通过 / ${fail} 失败`)
 }
 

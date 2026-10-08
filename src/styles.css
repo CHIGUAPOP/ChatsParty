@@ -872,8 +872,16 @@ body {
   inset: 0;
   padding: 8px 24px 20px;
   display: flex;
+  flex-direction: row;
+  gap: 16px;
+}
+
+/* 左半边：弹幕流水 + 底部发送区。拆出来是为了让右侧栏能和它并排 */
+.danmaku-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
   flex-direction: column;
-  gap: 0;
 }
 
 .danmaku-list {
@@ -901,10 +909,13 @@ body {
   margin-top: 2px;
 }
 
+/* flex 主轴上的尺寸由 flex-basis 说了算，**flex-basis 会压过 width**。
+   这里写死 36px 就会让 <Avatar size={30} /> 渲染成 36×30 的扁椭圆 ——
+   所以必须用 `flex: 0 0 auto`（basis: auto 才认 width）。 */
 .avatar {
   width: 36px;
   height: 36px;
-  flex: 0 0 36px;
+  flex: 0 0 auto;
   border-radius: 50%;
   background: var(--md-sys-color-surface-container-highest);
   object-fit: cover;
@@ -916,6 +927,30 @@ body {
   font-size: 13px;
   color: var(--md-sys-color-on-surface-variant);
   font-weight: 500;
+}
+
+/* 可点开的头像（点了用浏览器打开这个人的主页）。
+   按钮自己不占尺寸，靠里面的 .avatar 把盒子撑开 —— 否则 size 改一次要同步两处，
+   而 .avatar 的 flex-basis 曾经就是这么把头像压扁的。 */
+.avatar-btn {
+  flex: 0 0 auto;
+  display: inline-flex;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: none;
+  cursor: pointer;
+  transition: box-shadow var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-short);
+}
+
+/* 悬停不位移：弹幕一秒十条，头像跳来跳去比没有反馈更烦 */
+.avatar-btn:hover {
+  box-shadow: 0 0 0 2px var(--md-sys-color-outline);
+}
+
+.avatar-btn:focus-visible {
+  outline: 2px solid var(--md-sys-color-primary);
+  outline-offset: 2px;
 }
 
 .danmaku-body {
@@ -1301,6 +1336,9 @@ body {
   place-items: center;
   width: 40px;
   height: 40px;
+  /* 同 .float-tbtn：不清掉 button 默认左右 padding，溢出内容区的图标会被
+     Chromium 按起点摆而不是居中 —— 圆形高亮里看就是歪的 */
+  padding: 0;
   border-radius: 50%;
   border: none;
   background: transparent;
@@ -2244,6 +2282,502 @@ body {
   background: var(--md-sys-color-primary, #d0bcff);
 }
 
+/* ==========================================================================
+   在线观众（高能榜）预览
+   class 名与 overlay/index.html 的 #cp-viewers 一致，只把尺寸缩到预览台放得下的量级。
+   ========================================================================== */
+
+.viewers-stage {
+  position: relative;
+  height: 210px;
+}
+
+.viewers-stage .cp-viewers {
+  position: absolute;
+}
+
+.viewers-stage .cp-viewers[data-pos='tl'],
+.viewers-stage .cp-viewers[data-pos='bl'] {
+  left: 12px;
+}
+.viewers-stage .cp-viewers[data-pos='tr'],
+.viewers-stage .cp-viewers[data-pos='br'] {
+  right: 12px;
+}
+.viewers-stage .cp-viewers[data-pos='tl'],
+.viewers-stage .cp-viewers[data-pos='tr'] {
+  top: 12px;
+}
+.viewers-stage .cp-viewers[data-pos='bl'],
+.viewers-stage .cp-viewers[data-pos='br'] {
+  bottom: 12px;
+}
+
+.cp-viewers {
+  display: none;
+  flex-direction: column;
+  width: 250px;
+  pointer-events: none;
+}
+
+.cp-viewers.is-show {
+  display: flex;
+}
+
+.cp-viewers__card {
+  padding: 9px 12px 10px;
+  border-radius: 12px;
+  background: rgba(18, 18, 22, 0.72);
+  color: #f4f2f6;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.28);
+}
+
+.cp-viewers__head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 12px;
+  opacity: 0.72;
+}
+
+.cp-viewers__num {
+  margin-left: auto;
+  color: var(--md-sys-color-primary, #d0bcff);
+  opacity: 1;
+}
+
+.cp-vrow {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 5px;
+  font-size: 13px;
+}
+
+.cp-vrow__no {
+  flex: 0 0 auto;
+  min-width: 12px;
+  text-align: right;
+  font-size: 11px;
+  opacity: 0.5;
+}
+
+.cp-vrow__face {
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  object-fit: cover;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.cp-vrow__name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cp-vrow__guard {
+  flex: 0 0 auto;
+  padding: 0 5px;
+  border-radius: 4px;
+  font-size: 11px;
+  background: var(--md-sys-color-primary, #d0bcff);
+  color: #1b1b1f;
+}
+
+/* 大航海三档各给一个颜色，一眼能分出总督/提督/舰长 */
+.cp-vrow__guard.is-g1 {
+  background: #ff8f7a;
+}
+.cp-vrow__guard.is-g2 {
+  background: #b98cff;
+}
+.cp-vrow__guard.is-g3 {
+  background: #6fb4ff;
+}
+
+.cp-vrow__score {
+  flex: 0 0 auto;
+  font-size: 12px;
+  opacity: 0.72;
+}
+
+/* -------------------------- 在线观众（观众页） --------------------------
+   榜单本身是一张表，行数由榜单决定（最多 100），所以整块滚动而不是撑开页面 */
+
+/* -------------------------- 弹幕页右侧栏 --------------------------
+   三块常驻：当前观众（高能榜）/ 礼物·付费留言历史 / 音乐控制台。
+
+   这里原来是「OBS 画面预览」—— 那是调叠加层时看一眼的东西，调完就没用了；
+   而这三样是开播期间要一直盯着的：谁在、有没有人花钱、歌在放什么。 */
+
+.danmaku-side {
+  flex: 0 0 320px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  /* 窗口太矮时三块摞不下，整个右栏滚，而不是各自被压成一条缝 */
+  overflow-y: auto;
+}
+
+.side-card {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--md-sys-color-surface-container-low);
+  border-radius: var(--md-sys-shape-corner-medium);
+  overflow: hidden;
+}
+
+/* 三块谁该高一点不是随意的：观众榜是要一直扫的，给 2 份；付费历史一条能看很久，
+   给 1 份就够。控制台内容固定，不参与分配。
+
+   下限不是拍脑袋的：每张卡 = 表头(约 38px) + 内边距(8px) + 若干行。
+   观众榜一行 44px，付一行 46px —— 所以 140 保证付费历史**整两行**看得见，
+   而观众榜能保住 3 行。再往下压就会出现「第二条被裁一半」那种半吊子状态。 */
+.danmaku-side > .side-card--viewers {
+  flex: 2 1 0;
+  min-height: 140px;
+}
+
+.danmaku-side > .side-card--paid {
+  flex: 1 1 0;
+  min-height: 140px;
+}
+
+.side-card--console {
+  flex: 0 0 auto;
+}
+
+.side-card__head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 6px 6px 12px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--md-sys-color-on-surface);
+  border-bottom: 1px solid var(--md-sys-color-outline-variant);
+}
+
+.side-card__badge {
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 400;
+  background: var(--md-sys-color-primary);
+  color: var(--md-sys-color-on-primary);
+}
+
+.side-card__meta {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--md-sys-color-on-surface-variant);
+}
+
+.side-card__spacer {
+  flex: 1 1 auto;
+}
+
+.side-card__body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 4px;
+}
+
+.side-card__empty {
+  padding: 18px 12px;
+  font-size: 12px;
+  line-height: 1.6;
+  text-align: center;
+  color: var(--md-sys-color-on-surface-variant);
+}
+
+.side-card__foot {
+  flex: 0 0 auto;
+  padding: 4px 12px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--md-sys-color-on-surface-variant);
+  border-top: 1px solid var(--md-sys-color-outline-variant);
+}
+
+/* 拉失败但还留着旧名单时的那条带子。
+   它挤在表头和列表之间 —— 内容出问题时本来就该把列表往下压一点，
+   总好过让用户对着一份卡住的旧数据以为「这功能坏了」。 */
+.side-card__warn {
+  flex: 0 0 auto;
+  padding: 5px 12px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--md-sys-color-error);
+  background: color-mix(in srgb, var(--md-sys-color-error) 14%, transparent);
+  border-bottom: 1px solid var(--md-sys-color-outline-variant);
+}
+
+/* 局部失灵（比如没登录拿不到「在线用户」）—— 不是红的，
+   因为名单本身还是好的，红条会让人以为整块坏了 */
+.side-card__note {
+  flex: 0 0 auto;
+  padding: 5px 12px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--md-sys-color-on-surface-variant);
+  background: var(--md-sys-color-surface-container-high);
+  border-bottom: 1px solid var(--md-sys-color-outline-variant);
+}
+
+.icon-btn--sm {
+  width: 28px;
+  height: 28px;
+}
+
+/* ---- 礼物 / 付费留言历史 ---- */
+
+.plist {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.plist__row {
+  display: flex;
+  gap: 8px;
+  padding: 4px 6px;
+  border-radius: var(--md-sys-shape-corner-small, 8px);
+}
+
+.plist__row:hover {
+  background: var(--md-sys-color-surface-container);
+}
+
+.plist__main {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.plist__head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.plist__name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+/* 一行放下「谁 + 标签 + 内容」：付费事件内容通常很短，
+   拆成两行的话一屏只看得到一条 —— 而这一栏本来就不高 */
+.plist__text {
+  margin-top: 1px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--md-sys-color-on-surface-variant);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---- 音乐控制台 ---- */
+
+.mconsole__now {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px;
+}
+
+.mconsole__cover {
+  flex: 0 0 auto;
+  width: 44px;
+  height: 44px;
+  border-radius: var(--md-sys-shape-corner-small, 8px);
+  background: var(--md-sys-color-surface-container-high);
+  color: var(--md-sys-color-on-surface-variant);
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+}
+
+.mconsole__cover img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.mconsole__main {
+  min-width: 0;
+}
+
+.mconsole__title {
+  font-size: 13px;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mconsole__sub {
+  font-size: 12px;
+  color: var(--md-sys-color-on-surface-variant);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mconsole__time {
+  display: flex;
+  justify-content: space-between;
+  padding: 0 10px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--md-sys-color-on-surface-variant);
+}
+
+.mconsole__ctrl {
+  display: flex;
+  gap: 6px;
+  padding: 8px;
+}
+
+.mconsole__vol {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px 6px;
+  color: var(--md-sys-color-on-surface-variant);
+}
+
+.mconsole__queue {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 0 10px 8px;
+}
+
+.mconsole__qrow {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.mconsole__qno {
+  flex: 0 0 auto;
+  width: 14px;
+  text-align: right;
+  opacity: 0.6;
+}
+
+.mconsole__qname {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mconsole__qmeta {
+  flex: 0 0 auto;
+  max-width: 45%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--md-sys-color-on-surface-variant);
+}
+
+.mconsole__more {
+  padding-top: 4px;
+  font-size: 11px;
+  color: var(--md-sys-color-on-surface-variant);
+}
+
+.vlist {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 4px;
+}
+
+.vlist__row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 8px;
+  border-radius: var(--md-sys-shape-corner-small, 8px);
+}
+
+.vlist__row:hover {
+  background: var(--md-sys-color-surface-container-low);
+}
+
+.vlist__no {
+  flex: 0 0 auto;
+  width: 26px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: var(--md-sys-color-on-surface-variant);
+}
+
+/* 没上榜的人（人在房间、还没互动）没有名次，那一栏画「-」。
+   压暗一档，一眼能看出这和上面的数字不是一回事 */
+.vlist__no.is-dim {
+  color: var(--md-sys-color-outline);
+}
+
+.vlist__name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vlist__tag {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border-radius: 6px;
+  font-size: 12px;
+  background: var(--md-sys-color-surface-container-high);
+  color: var(--md-sys-color-on-surface-variant);
+}
+
+.vlist__tag.is-g1 {
+  background: #ff8f7a;
+  color: #1d0f0b;
+}
+.vlist__tag.is-g2 {
+  background: #b98cff;
+  color: #150f1f;
+}
+.vlist__tag.is-g3 {
+  background: #6fb4ff;
+  color: #10131a;
+}
+
+.vlist__score {
+  flex: 0 0 auto;
+  font-variant-numeric: tabular-nums;
+  color: var(--md-sys-color-on-surface-variant);
+}
+
 /* -------------------------- 开播准备（连接页） -------------------------- */
 /* 程序清单是现扫出来的，条目数不固定，所以整块走竖向 flex，不写死高度 */
 
@@ -2448,4 +2982,321 @@ body {
   .panel-src__url {
     grid-column: 1 / -1;
   }
+}
+
+/* ===================== 桌面浮窗（弹出为浮窗） ===================== */
+
+/* 浮窗外壳：无边框小窗，窗口底色是主进程给的深色实色底板 */
+.float-shell {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--md-sys-color-surface);
+  overflow: hidden;
+}
+
+/* 低不透明度下的可读性补偿（is-dim，< 75% 时挂上）：
+   窗口级透明是 DWM 把整扇窗逐像素乘 alpha，文字没法单独豁免 ——
+   能做的是让「被乘之前」的像素更抗淡：文字加深色阴影（衬在亮桌面上也看得清）、
+   次要文字 / 描边整体提亮一档，高亮内容的底色对比不减。 */
+.float-shell.is-dim {
+  --md-sys-color-on-surface-variant: #eae4f0;
+  --md-sys-color-outline: #beb9c8;
+}
+.float-shell.is-dim .float-content {
+  text-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.85),
+    0 0 6px rgba(0, 0, 0, 0.45);
+}
+.float-shell.is-dim .danmaku-item,
+.float-shell.is-dim .vlist__name,
+.float-shell.is-dim .plist__name,
+.float-shell.is-dim .plist__text {
+  font-weight: 500;
+}
+
+/* 拖拽区：贴着窗口顶边的**隐形**横条 —— 各面板的卡片头部（「当前观众」那行）
+   就是它的标题栏，抓头部任意空位都能拖。没有独立顶条（用户点名去掉：
+   一条没字的标题栏悬在内容上面很奇怪）。 */
+.float-dragstrip {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 36px;
+  z-index: 26;
+  -webkit-app-region: drag;
+}
+
+/* 通过 actions 塞进卡片头部的设置/× 要盖过拖拽条，不然点不到 */
+.float-shell .side-card__head .float-tbtn {
+  position: relative;
+  z-index: 27;
+}
+
+/* 弹幕浮窗没有卡片头部：两颗按钮融成一颗半透明胶囊，贴在列表右上角。
+   底色给足（弹幕气泡会从它底下滚过去），按钮本身照旧在拖拽区之外 */
+.float-topline {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 27;
+  display: flex;
+  gap: 2px;
+  padding: 3px;
+  border-radius: 999px;
+  background: rgba(54, 52, 59, 0.88);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+}
+
+.float-tbtn {
+  -webkit-app-region: no-drag;
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  /* 浏览器给 button 的默认左右 padding 会把内容区挤到 20px，
+     24px 的图标一溢出，Chromium 就不再居中而是按起点摆 —— 图标在高亮圆里整体偏右。
+     必须显式清掉（实测偏移 2px），下面这行是这次偏移的根 */
+  padding: 0;
+  border-radius: 50%;
+  border: none;
+  display: grid;
+  place-items: center;
+  background: transparent;
+  color: var(--md-sys-color-on-surface-variant);
+  cursor: pointer;
+  transition: background var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-short);
+}
+/* .nav-rail__icon 会把图标强制成 24px —— 在 32px 的圆钮里占 3/4，挤得难看；
+   浮窗顶条按钮按设计意图收到 18px */
+.float-tbtn .nav-rail__icon {
+  width: 18px;
+  height: 18px;
+}
+.float-tbtn:hover {
+  background: var(--md-sys-color-surface-container-highest);
+}
+.float-tbtn.is-active {
+  background: var(--md-sys-color-secondary-container);
+  color: var(--md-sys-color-on-secondary-container);
+}
+
+/* 内容区：透明度旋钮只作用于这一层（顶条永远不透明） */
+.float-content {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 设置弹层：不透明度 + 字体大小（+ 弹幕浮窗的显示头像）。M3 卡片样式，钉在右上 */
+.float-pop {
+  position: absolute;
+  top: 46px;
+  right: 8px;
+  z-index: 30;
+  width: 240px;
+  padding: 14px 16px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border-radius: var(--md-sys-shape-corner-large);
+  background: var(--md-sys-color-surface-container-high);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+}
+.float-pop__row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  font-size: 13px;
+  color: var(--md-sys-color-on-surface-variant);
+}
+.float-pop__val {
+  color: var(--md-sys-color-on-surface);
+  font-variant-numeric: tabular-nums;
+}
+.float-pop__hint {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--md-sys-color-outline);
+}
+
+/* 浮窗身体：按面板微调。
+   弹幕浮窗**不留内边距、不画圆角** —— 内容要一直贴到窗口四边，
+   窗口自身的圆角由系统裁，卡片式的留白只会让四角露出一圈底板色。 */
+.float-body {
+  flex: 1;
+  min-height: 0;
+}
+.float-body--danmaku {
+  display: flex;
+  flex-direction: column;
+}
+.float-body--danmaku .danmaku-list {
+  border-radius: 0;
+  padding: 8px 8px 4px;
+}
+/* 弹幕浮窗发送条：一条和弹幕区同色的深色矩形，贴满窗口底边（无圆角无留白）。
+   输入框本体是透明的，整条看起来就是一块完整的输入区 */
+.float-composer {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px 8px;
+  background: var(--md-sys-color-surface-container-lowest);
+}
+/* 输入框自带一个深色圆角底（比底条亮一档）—— 不然整条发送栏一个颜色，
+   看不出哪里能键入文字（用户截图点名）。聚焦时底线上一条主色 */
+.float-composer__input {
+  flex: 1;
+  min-width: 0;
+  font-family: inherit;
+  font-size: 14px;
+  color: var(--md-sys-color-on-surface);
+  background: var(--md-sys-color-surface-container-highest);
+  border: none;
+  outline: none;
+  border-radius: 10px;
+  padding: 8px 12px;
+}
+.float-composer__input::placeholder {
+  color: var(--md-sys-color-on-surface-variant);
+  opacity: 0.75;
+}
+.float-composer__input:focus {
+  box-shadow: inset 0 -2px 0 0 var(--md-sys-color-primary);
+}
+.float-composer__count {
+  flex: 0 0 auto;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--md-sys-color-on-surface-variant);
+}
+.float-body--card,
+.float-body--music {
+  display: flex;
+  flex-direction: column;
+  padding: 8px;
+}
+.float-body--card > .side-card,
+.float-body--music > .side-card {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.float-body--music {
+  overflow-y: auto;
+}
+
+/* 浮窗发送条上不再放弹幕颜色点 —— 看着像能点的设置入口，实际点不了；
+   颜色在弹幕姬的发送设置里改 */
+
+/* 主窗口里「弹出为浮窗」的白横杠：贴在区域右上角，hover 才亮。
+   不要图标 —— 一条短横杠，弹出了之后浮窗右上角的那个位置就是 × */
+.float-region {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.float-region > .side-card {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+/* 横杠钉在区域右上角（top:10 / right:10，加宽度占到 36px），卡片头部的
+   右对齐文字（观众卡「刚刚更新」、礼物卡「≈ ¥」）会钻到它底下 —— 头部右侧让出这条宽度 */
+.float-region .side-card__head {
+  padding-right: 40px;
+}
+.float-bar {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 20;
+  width: 26px;
+  height: 16px;
+  border: none;
+  padding: 0;
+  background: transparent;
+  cursor: pointer;
+  opacity: 0.45;
+  transition:
+    opacity var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-short);
+}
+.float-bar::after {
+  content: '';
+  position: absolute;
+  left: 2px;
+  right: 2px;
+  top: 6px;
+  height: 4px;
+  border-radius: 2px;
+  background: #ffffff;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.25);
+}
+.float-region:hover .float-bar,
+.float-bar:focus-visible {
+  opacity: 1;
+}
+
+/* 弹出之后主窗口里的占位：竖向压成一条「收回」—— 横向占满、高度只留一行，
+   点整条就收回。不许横向缩成一小坨，也不许竖向拉高占块 */
+.float-gone {
+  flex: 0 0 auto;
+  align-self: stretch;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  margin: 2px 0;
+  padding: 5px 16px;
+  border: 1px dashed var(--md-sys-color-outline-variant);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--md-sys-color-outline);
+  font-size: 13px;
+  cursor: pointer;
+  transition:
+    color var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-short),
+    background var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-short);
+}
+.float-gone:hover {
+  color: var(--md-sys-color-on-surface);
+  border-color: var(--md-sys-color-outline);
+  background: var(--md-sys-color-surface-container);
+}
+
+/* 右侧栏三块的高低分配（套上 .float-region 之后照旧；弹出了就不占高低） */
+.danmaku-side > .float-region--viewers {
+  flex: 2 1 0;
+  min-height: 140px;
+}
+.danmaku-side > .float-region--gifts {
+  flex: 1 1 0;
+  min-height: 140px;
+}
+.danmaku-side > .float-region--music {
+  flex: 0 0 auto;
+}
+
+/* 发送设置面板里「桌面浮窗」那一小节的标题 */
+.composer-panel__divider {
+  margin-top: 6px;
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  color: var(--md-sys-color-outline);
+}
+
+/* 弹幕列表包了一层 FloatRegion 后，占位的那份 flex 得自己给 */
+.danmaku-main__list {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* 发送设置面板里的说明小字 */
+.composer-panel__hint {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--md-sys-color-outline);
 }

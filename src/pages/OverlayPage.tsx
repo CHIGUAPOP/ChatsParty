@@ -2,9 +2,10 @@ import React from 'react'
 import { api, AppConfig, MusicState } from '../lib/api'
 import { Button, Card, Row, SectionTitle, Slider, Switch, TextField, TextArea, Select } from '../components/ui'
 import MusicWidget, { MUSIC_POS } from '../components/MusicWidget'
-import DanmakuPreview, { DANMAKU_POS } from '../components/DanmakuPreview'
+import DanmakuPreview, { DANMAKU_OVERFLOW, DANMAKU_POS } from '../components/DanmakuPreview'
 import LyricPreview, { LYRIC_POS, LYRIC_LINE_OPTIONS } from '../components/LyricPreview'
 import VoicePickPreview, { PICK_POS, PICK_HIT_OPTIONS } from '../components/VoicePickPreview'
+import ViewersPreview, { VIEWERS_POS, VIEWERS_COUNT_OPTIONS } from '../components/ViewersPreview'
 
 interface Props {
   config: AppConfig
@@ -32,6 +33,7 @@ const PANEL_SOURCES = [
   { id: 'lyric', name: '歌词', hint: '当前唱到的那句高亮' },
   { id: 'music', name: '点歌', hint: '正在播放 + 队列' },
   { id: 'voicepick', name: '音色面板', hint: '观众搜音色时弹的候选' },
+  { id: 'viewers', name: '在线观众', hint: '在线榜前几名' },
 ]
 
 export default function OverlayPage({ config, patch, notify }: Props) {
@@ -58,6 +60,8 @@ export default function OverlayPage({ config, patch, notify }: Props) {
   }, [])
 
   React.useEffect(() => api.overlay.onStatus(setStatus), [])
+
+  // 桌面浮窗的设置搬去了弹幕页（浮窗弹的就是弹幕功能区里的东西，设置放那儿才找得到）
 
   const commitPort = () => {
     const v = Number(portDraft)
@@ -164,7 +168,9 @@ export default function OverlayPage({ config, patch, notify }: Props) {
           </span>
           <span className="status-pill">
             <span className="status-dot" style={{ background: live ? '#4caf50' : undefined }} />
-            OBS 连接 {status.clients} 个
+            {/* 浮窗连的也是这个服务，所以这里数的是「画面数」——
+                只写 OBS 的话，主播开着浮窗会以为 OBS 那边多连了一个 */}
+            画面连接 {status.clients} 个
           </span>
           <div className="field is-floating" style={{ maxWidth: 140 }}>
             <input
@@ -301,6 +307,20 @@ export default function OverlayPage({ config, patch, notify }: Props) {
           </div>
         </Row>
 
+        <Row
+          label="塞不下时"
+          hint="现在是「能塞几条留几条」，一屏塞满之后新到的气泡会把最老的挤走。这一项决定被挤走的那条朝哪边滑出去并淡出"
+        >
+          <div style={{ width: 260 }}>
+            <Select
+              label="塞不下时"
+              value={o.danmakuOverflow || 'natural'}
+              onChange={(v) => patch({ overlay: { danmakuOverflow: v } })}
+              options={DANMAKU_OVERFLOW}
+            />
+          </div>
+        </Row>
+
         <div className="obs-preview" style={{ marginTop: 4 }}>
           <span className="obs-preview__tag">效果预览</span>
           <DanmakuPreview pos={o.danmakuPos} />
@@ -318,7 +338,7 @@ export default function OverlayPage({ config, patch, notify }: Props) {
         <Row label="显示醒目留言">
           <Switch value={o.showSuperchat} onChange={(v) => patch({ overlay: { showSuperchat: v } })} />
         </Row>
-        <Row label="最多保留条数">
+        <Row label="条数上限" hint="只是兜底 —— 画面塞不下时以「能塞几条」为准，不会为了凑满这个数把气泡压扁或切掉半条">
           <div style={{ width: 220 }}>
             <Slider value={o.maxItems} min={5} max={120} step={5} onChange={(v) => patch({ overlay: { maxItems: v } })} suffix=" 条" />
           </div>
@@ -452,6 +472,62 @@ export default function OverlayPage({ config, patch, notify }: Props) {
         <div className="tip" style={{ marginTop: 8 }}>
           一次只显示一个人。后面还排着队时面板底下会写「还有 N 位在等」，倒计时条走完就换下一位。
           关掉它，主播端的一切照旧，只是不往画面上推了。
+        </div>
+      </Card>
+
+      <Card
+        title="在线观众（在线榜）"
+        desc="把观众榜常驻到画面上。榜单是两份合起来的：高能榜（在线且有过互动，有贡献值和名次）和在线用户（人在房间里就算，排名栏显示「-」）。合成之后仍然不等于观看人数 —— 挂着一直不动的纯潜水观众两边都不出现，榜上人数比实际观看人数少得多，别把它当在线人数用。"
+      >
+        <Row label="显示观众面板">
+          <Switch value={o.showViewers !== false} onChange={(v) => patch({ overlay: { showViewers: v } })} />
+        </Row>
+        <Row label="位置" hint="挑一个不和弹幕、歌词打架的角">
+          <div style={{ width: 150 }}>
+            <Select
+              label="位置"
+              value={o.viewersPos || 'bl'}
+              onChange={(v) => patch({ overlay: { viewersPos: v } })}
+              options={VIEWERS_POS}
+            />
+          </div>
+        </Row>
+        <Row label="列几个人" hint="榜单最多能翻到 100 人，画面上一屏放不下就少列几个">
+          <div style={{ width: 150 }}>
+            <Select
+              label="列几个人"
+              value={String(o.viewersCount ?? 5)}
+              onChange={(v) => patch({ overlay: { viewersCount: Number(v) } })}
+              options={VIEWERS_COUNT_OPTIONS}
+            />
+          </div>
+        </Row>
+        <Row label="自动刷新" hint="连上直播间之后按下面的间隔去拉一次榜">
+          <Switch
+            value={config.viewers?.enabled !== false}
+            onChange={(v) => patch({ viewers: { enabled: v } })}
+          />
+        </Row>
+        <Row label="刷新间隔" hint="接口有风控（-352），短于 10 秒会被自动抬回来">
+          <div style={{ width: 220 }}>
+            <Slider
+              value={Math.round((config.viewers?.intervalMs ?? 20000) / 1000)}
+              min={10}
+              max={300}
+              step={10}
+              onChange={(v) => patch({ viewers: { intervalMs: v * 1000 } })}
+              suffix=" 秒"
+            />
+          </div>
+        </Row>
+
+        <div className="obs-preview" style={{ marginTop: 12 }}>
+          <span className="obs-preview__tag">效果预览</span>
+          <ViewersPreview pos={o.viewersPos} count={o.viewersCount} />
+        </div>
+        <div className="tip" style={{ marginTop: 8 }}>
+          榜上没人（没连直播间、或者房间还没人互动）时整块自动隐藏，不会在画面上留空框。
+          弹幕页右侧也能随时看到同一份名单。
         </div>
       </Card>
 

@@ -14,7 +14,7 @@ const OVERLAY_DIR = path.join(__dirname, '..', 'overlay')
  * 所以这里只多一条路由，不用多出四个 HTML 文件来各自维护一遍。
  *  'all' 就是老行为：一个源里三块齐全 + 自动避让。
  */
-const OVERLAY_PANELS = ['all', 'danmaku', 'lyric', 'music', 'voicepick']
+const OVERLAY_PANELS = ['all', 'danmaku', 'lyric', 'music', 'voicepick', 'viewers']
 
 /** /overlay/<名字> 认成哪一块。认不得的一律回 'all'，别把 OBS 挂成一个空白页 */
 function panelFromPath(urlPath) {
@@ -53,6 +53,8 @@ class OverlayServer {
     this.lyricProvider = null
     // 音色选择面板：中途连上时补发当前那一条，不然要等下一个观众搜才出现
     this.voicePickProvider = null
+    // 在线观众（高能榜）：中途连上时补发当前名单，不然要等下一次轮询
+    this.viewersProvider = null
     // 有客户端连上/断开时回调，主进程据此把「几个连接」推给界面
     this.onClientsChange = null
     this.requestedPort = port
@@ -145,6 +147,9 @@ class OverlayServer {
           const pick = this.voicePickProvider ? this.voicePickProvider() : null
           // 同上：「现在没人在选音色」也要说一声，否则重连上来的页面会一直挂着断开前那张面板
           if (pick) ws.send(JSON.stringify({ type: 'voicepick', payload: pick }))
+          const viewers = this.viewersProvider ? this.viewersProvider() : null
+          // 在线观众同理：补一帧，否则中途接上的 OBS 要空着等下一次轮询
+          if (viewers) ws.send(JSON.stringify({ type: 'viewers', payload: viewers }))
         } catch {
           /* noop */
         }

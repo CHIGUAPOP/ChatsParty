@@ -16,6 +16,20 @@ export function normalizeDanmakuPos(v: unknown): string {
   return typeof v === 'string' && DANMAKU_POS.some((p) => p.value === v) ? v : 'br'
 }
 
+/**
+ * 气泡塞不下时最老那条往哪边走。
+ * 取值与 store 默认值、overlay/index.html 的 OVERFLOW_DIRS 三处必须一致。
+ */
+export const DANMAKU_OVERFLOW = [
+  { value: 'natural', label: '顺着弹幕方向（贴底往上、贴顶往下）' },
+  { value: 'up', label: '往上滑出' },
+  { value: 'down', label: '往下滑出' },
+]
+
+export function normalizeDanmakuOverflow(v: unknown): string {
+  return typeof v === 'string' && DANMAKU_OVERFLOW.some((p) => p.value === v) ? v : 'natural'
+}
+
 /*
  * 三条示例，顺序刻意按「旧 → 新」排列，与真实叠加层里 appendChild 的顺序一致：
  * DOM 末尾那条就是最新到的。底下 CSS 会用 column / column-reverse 决定它显示在

@@ -1,5 +1,6 @@
 import React from 'react'
 import { resolveFace } from '../lib/faces'
+import { openUserSpace, userSpaceUrl } from '../lib/links'
 
 /* --------------------------------- 图标 --------------------------------- */
 
@@ -40,6 +41,14 @@ const PATHS: Record<string, string> = {
   power: 'M13 3h-2v10h2V3Zm4.83 2.17-1.42 1.42A6.92 6.92 0 0 1 19 12c0 3.87-3.13 7-7 7s-7-3.13-7-7c0-2.21 1.03-4.17 2.62-5.44L6.2 5.15A8.93 8.93 0 0 0 3 12a9 9 0 0 0 18 0c0-2.76-1.24-5.22-3.17-6.83Z',
   // 显示器：代表「本机上装着的一个程序」
   desktop: 'M3 4h18v11H3V4Zm2 2v7h14V6H5Zm4 11h6v2h3v2H6v-2h3v-2Z',
+  // 两个人：观众榜。只画头和肩，24px 下别塞细节
+  users:
+    'M16 11c1.66 0 3-1.34 3-3s-1.34-3-3-3-3 1.34-3 3 1.34 3 3 3Zm-8 0c1.66 0 3-1.34 3-3S9.66 5 8 5 5 6.34 5 8s1.34 3 3 3Zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5C15 14.17 10.33 13 8 13Zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5Z',
+  // 礼物盒：盒身 + 盒盖 + 蝴蝶结，用来标礼物/付费留言
+  gift:
+    'M20 6h-2.18c.11-.31.18-.65.18-1a3 3 0 0 0-5.5-1.65l-.5.67-.5-.68A3 3 0 0 0 9 2 3 3 0 0 0 6 5c0 .35.07.69.18 1H4a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2Zm-5-2a1 1 0 1 1 0 2 1 1 0 0 1 0-2ZM9 4a1 1 0 1 1 0 2 1 1 0 0 1 0-2Zm11 15H4v-2h16v2Zm0-5H4V8h5.08L7 10.83 8.62 12 11 8.76l1-1.36 1 1.36L15.38 12 17 10.83 14.92 8H20v6Z',
+  // 关闭：一条 45° 的叉。浮窗标题栏收回按钮用
+  close: 'M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12 19 6.41Z',
 }
 
 export function Icon({ name, size = 24 }: { name: keyof typeof PATHS | string; size?: number }) {
@@ -399,13 +408,17 @@ export function Select({
 export function Slider({
   value,
   onChange,
+  onCommit,
   min,
   max,
   step = 1,
   suffix,
 }: {
   value: number
-  onChange: (v: number) => void
+  /** 拖动中每次变动都触发 —— 要「跟手」的旋钮用这个 */
+  onChange?: (v: number) => void
+  /** 松手/失焦才提交 —— 会改布局的旋钮用这个（拖动中界面不动，滑块不会位移） */
+  onCommit?: (v: number) => void
   min: number
   max: number
   step?: number
@@ -415,11 +428,16 @@ export function Slider({
   // 滑块弹回旧位置，手感发涩。松手/键盘操作才真正提交
   const [local, setLocal] = React.useState(value)
   const dragging = React.useRef(false)
+  const latest = React.useRef(value)
 
   React.useEffect(() => {
     if (!dragging.current) setLocal(value)
   }, [value])
 
+  const commit = () => {
+    dragging.current = false
+    onCommit?.(latest.current)
+  }
   const shown = dragging.current ? local : value
   const pct = ((shown - min) / (max - min)) * 100
   return (
@@ -434,17 +452,20 @@ export function Slider({
         style={{ ['--slider-pct' as any]: `${pct}%` }}
         onChange={(e) => {
           const v = Number(e.target.value)
+          latest.current = v
           setLocal(v)
-          onChange(v)
+          onChange?.(v)
         }}
         onPointerDown={() => {
           dragging.current = true
         }}
-        onPointerUp={() => {
-          dragging.current = false
+        onPointerUp={commit}
+        onKeyUp={() => {
+          // 键盘方向键不设 dragging，调完直接提交
+          if (!dragging.current) commit()
         }}
         onBlur={() => {
-          dragging.current = false
+          if (dragging.current) commit()
         }}
       />
       <span style={{ minWidth: 64, textAlign: 'right', fontSize: 13, color: 'var(--md-sys-color-on-surface-variant)' }}>
@@ -481,6 +502,41 @@ export function Avatar({ src, name, size }: { src?: string; name?: string; size?
     )
   }
   return <img className="avatar" style={style} src={resolved} alt="" onError={() => setBroken(true)} />
+}
+
+/**
+ * 可点开的头像 —— 点了用系统默认浏览器打开这个人的 B站主页。
+ *
+ * 有 uid 才做成按钮：匿名包、被风控抹掉 uid 的包（uid=0）点了也没地方去，
+ * 这时候就该是个纯展示的头像，而不是一个点了没反应的按钮。
+ *
+ * 用 `<button>` 而不是 `<div onClick>` 是为了键盘能 Tab 到、回车能打开，
+ * 也不用自己补 role/tabIndex。
+ */
+export function UserAvatar({
+  src,
+  name,
+  size,
+  uid,
+}: {
+  src?: string
+  name?: string
+  size?: number
+  uid?: number | string
+}) {
+  const label = name || '这位观众'
+  if (!userSpaceUrl(uid)) return <Avatar src={src} name={name} size={size} />
+  return (
+    <button
+      type="button"
+      className="avatar-btn"
+      title={`用浏览器打开「${label}」的主页`}
+      aria-label={`用浏览器打开「${label}」的主页`}
+      onClick={() => void openUserSpace(uid)}
+    >
+      <Avatar src={src} name={name} size={size} />
+    </button>
+  )
 }
 
 /* --------------------------------- 徽章 --------------------------------- */

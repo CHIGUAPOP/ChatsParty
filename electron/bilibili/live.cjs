@@ -146,6 +146,146 @@ function identitiesToRole(list) {
   return { isAdmin: arr.includes(1), isAnchor: arr.includes(2) }
 }
 
+/* ------------------------- SEND_GIFT_V2 的 pb ------------------------- */
+
+/**
+ * `SEND_GIFT_V2`（B站现在推的礼物消息）整包只有两个字段：
+ *
+ *   { "dmscore": 560, "pb": "<base64 protobuf>" }
+ *
+ * 礼物名、数量、金额、送礼人**全在那段 base64 里** —— 这就是
+ * 「送了礼物但历史/播报都没有」的真正原因：不是包没到，是扁平字段一个都不存在。
+ * 老的 `SEND_GIFT` 是 JSON，新的是 pb，两套都得认。
+ *
+ * 这里手写一个最小 protobuf 读取器。不引 protobufjs 是因为：
+ * ① 打包体积白涨；② B站 的包会加字段，按 .proto 严格解反而更容易炸。
+ */
+
+/**
+ * 解一层消息，得到 `字段号 -> 值[]`。
+ * 值是 BigInt（varint）或 Buffer（length-delimited）。
+ * 碰到不认识的 wire type 直接停 —— 把后面的字节硬啃成字段只会解出垃圾。
+ */
+function readFields(buf) {
+  const out = new Map()
+  const push = (f, v) => {
+    const a = out.get(f)
+    if (a) a.push(v)
+    else out.set(f, [v])
+  }
+  let i = 0
+  while (i < buf.length) {
+    const key = readVarint(buf, i)
+    if (!key) break
+    i = key.next
+    const field = Number(key.value >> 3n)
+    const wire = Number(key.value & 7n)
+    if (!field) break
+    if (wire === 0) {
+      const v = readVarint(buf, i)
+      if (!v) break
+      i = v.next
+      push(field, v.value)
+    } else if (wire === 2) {
+      const len = readVarint(buf, i)
+      if (!len) break
+      i = len.next
+      const end = i + Number(len.value)
+      if (end > buf.length) break
+      push(field, buf.subarray(i, end))
+      i = end
+    } else if (wire === 5) {
+      i += 4
+    } else if (wire === 1) {
+      i += 8
+    } else {
+      break
+    }
+  }
+  return out
+}
+
+/** 取最后一个 varint（repeated 字段里最后那个才是有效值） */
+function fNum(m, f) {
+  const a = m.get(f)
+  if (!a || !a.length) return 0
+  const v = a[a.length - 1]
+  return typeof v === 'bigint' ? Number(v) : 0
+}
+
+/** 取最后一个字符串字段 */
+function fStr(m, f) {
+  const a = m.get(f)
+  if (!a || !a.length) return ''
+  const v = a[a.length - 1]
+  return Buffer.isBuffer(v) ? v.toString('utf8').trim() : ''
+}
+
+/** 取最后一个子消息 */
+function fBuf(m, f) {
+  const a = m.get(f)
+  if (!a || !a.length) return null
+  const v = a[a.length - 1]
+  return Buffer.isBuffer(v) ? v : null
+}
+
+/**
+ * 解 SEND_GIFT_V2 的 pb。字段号是照着真实包对出来的（见 smoke 里钉住的那个样本）：
+ *
+ * 顶层： 1 uid / 2 uname / 3 face / 8 粉丝牌 / 10 礼物本体
+ * 礼物本体（10）： 1 giftId / 2 giftName / 3 数量 / 5 单价 / 6 折后单价 /
+ *                  8 coin_type / 10 时间戳(秒) / 14 总价 / 18 动作
+ * 粉丝牌（8）：   1 牌子所属主播 uid / 5 等级 / 6 牌子名
+ *
+ * 单价和总价分开取：连击送 10 个的时候 `num=10`、`总价 = 单价×10`，
+ * 只认其中一个都会把「¥1」和「¥10」搞混。
+ */
+function decodeSendGiftV2(base64) {
+  if (typeof base64 !== 'string' || !base64) return null
+  let buf
+  try {
+    buf = Buffer.from(base64, 'base64')
+  } catch {
+    return null
+  }
+  if (!buf || buf.length === 0) return null
+
+  const top = readFields(buf)
+  const uid = fNum(top, 1)
+  const uname = fStr(top, 2)
+  if (!uid && !uname) return null
+
+  const gift = fBuf(top, 10) ? readFields(fBuf(top, 10)) : new Map()
+  const medalRaw = fBuf(top, 8) ? readFields(fBuf(top, 8)) : new Map()
+
+  const num = Math.max(1, fNum(gift, 3) || 1)
+  const unit = fNum(gift, 6) || fNum(gift, 5)
+  const medalName = fStr(medalRaw, 6)
+
+  return {
+    uid,
+    uname,
+    face: fStr(top, 3),
+    giftId: fNum(gift, 1),
+    giftName: fStr(gift, 2),
+    num,
+    /**
+     * 总价（金瓜子）。
+     *
+     * 字段 14 是总价，6/5 是折后价/原价（单价）。**实测抓到的样本全是 ×1**，
+     * 两种解释算出来一样，没法靠样本把两者彻底区分开 —— 所以这里
+     * 「14 优先、单价×数量兜底」，两种解释下结果都一致，不会算出两个数。
+     */
+    totalCoin: fNum(gift, 14) || unit * num,
+    coinType: fStr(gift, 8) || 'silver',
+    action: fStr(gift, 18) || '投喂',
+    timestamp: fNum(gift, 10) * 1000 || Date.now(),
+    medal: medalName
+      ? { name: medalName, level: fNum(medalRaw, 5), anchorUid: fNum(medalRaw, 1) }
+      : null,
+  }
+}
+
 function pickExtra(info0) {
   // 旧格式：info[0] 是数组，第 15 项是 { extra: "<json>" }
   if (Array.isArray(info0)) {
@@ -217,6 +357,36 @@ function normalizeDanmaku(raw) {
   }
 }
 
+/**
+ * 礼物包。
+ *
+ * **老包是 `SEND_GIFT`，B站 现在推的是 `SEND_GIFT_V2`** ——
+ * 这是「送了礼物但历史/播报都没有」的根因：包一直有到，只是没人接。
+ *
+ * 两者字段基本一致（`uid / uname / face / giftName / num / total_coin / coin_type`），
+ * 所以共用一套解析。每个字段都留了从 `batch_combo_send` / `combo_send` 取的兜底 ——
+ * 连击礼包有时候只在那边放名字和数量，读漏了就会显示成「投喂 ×0」。
+ */
+function normalizeGift(d) {
+  const combo = d.batch_combo_send || d.combo_send || {}
+  const giftName = String(d.giftName || d.gift_name || combo.gift_name || '').trim()
+  const count = Math.max(1, Number(d.num ?? d.gift_num ?? combo.gift_num) || 1)
+  // total_coin 的单位是金瓜子，1000 = 1 元
+  const coin = Number(d.total_coin ?? d.combo_total_coin ?? 0) || 0
+  return {
+    type: 'gift',
+    uid: Number(d.uid ?? combo.uid) || 0,
+    username: String(d.uname || combo.uname || ''),
+    face: String(d.face || ''),
+    content: `${d.action || combo.action || '投喂'} ${giftName} ×${count}`,
+    giftName,
+    num: count,
+    price: coin / 1000,
+    coinType: String(d.coin_type || 'silver'),
+    timestamp: Date.now(),
+  }
+}
+
 function normalizeEvent(raw) {
   const cmd = raw.cmd
   const d = raw.data || {}
@@ -225,19 +395,35 @@ function normalizeEvent(raw) {
     case 'DANMU_MSG':
       return normalizeDanmaku(raw)
 
-    case 'SEND_GIFT':
-      return {
-        type: 'gift',
-        uid: d.uid || 0,
-        username: d.uname || '',
-        face: d.face || '',
-        content: `${d.action || '投喂'} ${d.giftName || ''} ×${d.num || 1}`,
-        giftName: d.giftName || '',
-        num: d.num || 1,
-        price: (d.total_coin || 0) / 1000,
-        coinType: d.coin_type || 'silver',
-        timestamp: Date.now(),
+    // B站 现在推的是 SEND_GIFT_V2 —— 气泡里**只有** { dmscore, pb }，
+    // 礼物名/数量/金额/送礼人全在那段 base64 protobuf 里（见 decodeSendGiftV2）。
+    // 「送了礼物什么都没显示」的根因就是这里：扁平字段一个都不存在，
+    // 不是包没到，是没人解。
+    case 'SEND_GIFT_V2': {
+      const pb = decodeSendGiftV2(d.pb)
+      if (pb) {
+        return {
+          type: 'gift',
+          uid: pb.uid,
+          username: pb.uname,
+          face: pb.face,
+          content: `${pb.action} ${pb.giftName} ×${pb.num}`,
+          giftName: pb.giftName,
+          num: pb.num,
+          price: pb.totalCoin / 1000,
+          coinType: pb.coinType,
+          medal: pb.medal,
+          timestamp: pb.timestamp,
+        }
       }
+      // 没有 pb（老连接、回放、字段又变了）时退回扁平字段那条路 ——
+      // 显示得糙一点，总好过整条消失
+      return normalizeGift(d)
+    }
+
+    // 老的 JSON 包，留着兼容
+    case 'SEND_GIFT':
+      return normalizeGift(d)
 
     case 'GUARD_BUY':
       return {
@@ -508,4 +694,5 @@ module.exports = {
   normalizeEvent,
   normalizeDanmaku,
   decodeInteractWordV2,
+  decodeSendGiftV2,
 }

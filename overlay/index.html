@@ -50,7 +50,7 @@
         新消息是 appendChild 进去的（DOM 末尾），我们希望它永远紧贴所选的那个角，
         所以下半区用 column（末尾在底），上半区用 column-reverse（末尾在顶）。
         注意 column-reverse 会把主轴倒过来，贴顶反而要写 flex-end。
-        这样 trim() 删 firstChild 时，消失的永远是离角落最远、最老的那条。
+        这样淘汰 firstChild 时，消失的永远是离角落最远、最老的那条。
       */
       #app[data-pos='tl'],
       #app[data-pos='tr'] {
@@ -207,6 +207,171 @@
       #app[data-pos='tl'] .cp-item,
       #app[data-pos='bl'] .cp-item {
         animation-name: cp-in-left;
+      }
+
+      /*
+        flex 主轴上「不许压扁」。
+        缺省 flex-shrink 是 1，气泡一多就会被压到比内容还矮；窄画面里那条
+        overflow: hidden 还会让 flex 项的自动最小尺寸失效（规范就是这么定的），
+        压起来更狠。压扁之后 offsetHeight 也跟着变小，于是「量出来没超」→
+        一条都删不掉 → 全挤成半截，文字在气泡里被裁掉。这就是用户看到的那副样子。
+      */
+      .cp-item {
+        flex: 0 0 auto;
+      }
+
+      /* ---------- 溢出：塞不下就请走最老的那条 ----------
+         离场的气泡立刻切成 absolute（脱离文档流），剩下那些同一帧就重排好了，
+         新到的那条不会先露出半截再被挤回去。动画在它原来那一处播完再删。 */
+      .cp-item.is-leaving {
+        position: absolute;
+        pointer-events: none;
+        z-index: 0;
+      }
+
+      /* ---------- 桌面浮窗 ----------
+         程序自己开的一个无边框小窗，不是 OBS 的浏览器源。
+         整块做成一条大拖拽区最省事：哪儿都能拖着走。 */
+      html.is-float #app {
+        -webkit-app-region: drag;
+      }
+      html.is-float #cp-status {
+        -webkit-app-region: no-drag;
+      }
+
+      /* 浮窗专属的「我在这里」条。
+         它同时解决三件事：看得见浮窗在哪、有东西可抓着拖、有个地方能关掉它。 */
+      #cp-floatbar {
+        display: none;
+      }
+
+      html.is-float #cp-floatbar {
+        display: flex;
+        align-items: center;
+        gap: calc(8 * var(--cp-u));
+        position: fixed;
+        left: calc(10 * var(--cp-u));
+        top: calc(10 * var(--cp-u));
+        z-index: 99;
+        padding: calc(5 * var(--cp-u)) calc(10 * var(--cp-u));
+        border-radius: calc(999 * var(--cp-u));
+        font-family: var(--cp-font);
+        font-size: calc(13 * var(--cp-fs));
+        color: #f4f2f6;
+        background: rgba(18, 18, 22, 0.72);
+        /* 平时半隐身，别挡画面；鼠标一进窗就完全亮出来 */
+        opacity: 0.28;
+        transition: opacity 200ms ease;
+        -webkit-app-region: drag;
+        cursor: grab;
+        user-select: none;
+      }
+
+      /* 纯透明模式：只有鼠标移进来（或刚打开那一会儿）才整个亮出来 */
+      html.is-float-ghost body:hover #cp-floatbar,
+      html.is-float-ghost #cp-floatbar.is-show {
+        opacity: 1;
+      }
+
+      html.is-float #cp-floatbar.is-hide {
+        opacity: 0;
+        pointer-events: none;
+      }
+
+      /* ---------- 有底板的浮窗（默认形态）----------
+         窗口本身是不透明的深色，这里负责把「标题栏 + 内容区」的层次画出来，
+         让它看起来是一个正常的小窗，而不是一块色块。
+         注意这条必须写在上面那条 opacity: 0.28 之后：两边选择器权重一样，
+         靠顺序取胜（panel 一定要看得见，不能等鼠标移入）。 */
+      html.is-float-panel #cp-floatbar {
+        left: 0;
+        right: 0;
+        top: 0;
+        gap: calc(8 * var(--cp-u));
+        padding: calc(8 * var(--cp-u)) calc(12 * var(--cp-u));
+        border-radius: 0;
+        background: rgba(255, 255, 255, 0.055);
+        border-bottom: 1px solid rgba(255, 255, 255, 0.075);
+        font-size: calc(12.5 * var(--cp-fs));
+        opacity: 1;
+        cursor: default;
+      }
+
+      /* 标题栏常驻，就不吃「鼠标移入才亮」那一套了 */
+      html.is-float-panel #cp-floatbar.is-hide {
+        opacity: 1;
+        pointer-events: auto;
+      }
+
+      /* 内容区给标题栏让出位置，气泡别贴到边上 */
+      html.is-float-panel #app {
+        padding: calc(12 * var(--cp-u));
+        padding-top: calc(46 * var(--cp-u));
+      }
+
+      /* 状态提示本来贴左下角，跟随内容区的内缩对齐一下 */
+      html.is-float-panel #cp-status {
+        left: calc(16 * var(--cp-u));
+        bottom: calc(16 * var(--cp-u));
+      }
+
+      /* 空态提示同理，别压在标题栏下面 */
+      html.is-float-panel #cp-floathint {
+        bottom: calc(16 * var(--cp-u));
+      }
+
+      .cp-floatbar__dot {
+        width: calc(8 * var(--cp-u));
+        height: calc(8 * var(--cp-u));
+        border-radius: 50%;
+        background: #7bd88f;
+        flex: 0 0 auto;
+      }
+
+      .cp-floatbar__close {
+        -webkit-app-region: no-drag;
+        flex: 0 0 auto;
+        width: calc(20 * var(--cp-u));
+        height: calc(20 * var(--cp-u));
+        padding: 0;
+        border: 0;
+        border-radius: 50%;
+        background: rgba(255, 255, 255, 0.14);
+        color: inherit;
+        font-size: calc(14 * var(--cp-fs));
+        line-height: 1;
+        cursor: pointer;
+      }
+
+      .cp-floatbar__close:hover {
+        background: rgba(200, 40, 40, 0.85);
+      }
+
+      /* 空态：一条弹幕都还没有的时候，浮窗不能是纯透明的一片 */
+      #cp-floathint {
+        display: none;
+      }
+
+      html.is-float #cp-floathint {
+        /* 必须显式写回 block：上面那条 display: none 是给 OBS 源用的，
+           它权重一样、又写在前面，不覆盖掉的话浮窗里永远看不见这句提示 */
+        display: block;
+        position: fixed;
+        left: 0;
+        right: 0;
+        bottom: calc(24 * var(--cp-u));
+        text-align: center;
+        font-family: var(--cp-font);
+        font-size: calc(14 * var(--cp-fs));
+        color: rgba(244, 242, 246, 0.6);
+        text-shadow: 0 1px 3px rgba(0, 0, 0, 0.8);
+        opacity: 0;
+        transition: opacity 300ms ease;
+        pointer-events: none;
+      }
+
+      html.is-float #cp-floathint.is-show {
+        opacity: 1;
       }
 
       /* ---------- 点歌面板 ----------
@@ -621,6 +786,133 @@
         }
       }
 
+      /* ---------- 在线观众（高能榜）----------
+         常驻的一块，内容是一份快照，不会自己变，所以没有进场动画。
+         注意它画的是「在线且有过互动」的人，不是完整观众名单 ——
+         名字写「高能榜」，别写成「观众」，否则主播会把它当观看人数。
+         这套 class 名与 src/components/ViewersPreview.tsx 是同一份，改样式两边一起改。 */
+      .cp-viewers {
+        position: fixed;
+        display: none;
+        flex-direction: column;
+        width: calc(300 * var(--cp-u));
+        max-width: 42vw;
+        font-family: var(--cp-font);
+        pointer-events: none;
+      }
+
+      .cp-viewers.is-show {
+        display: flex;
+      }
+
+      .cp-viewers[data-pos='tl'] {
+        left: calc(24 * var(--cp-u));
+        top: calc(24 * var(--cp-u));
+      }
+      .cp-viewers[data-pos='tr'] {
+        right: calc(24 * var(--cp-u));
+        top: calc(24 * var(--cp-u));
+      }
+      .cp-viewers[data-pos='bl'] {
+        left: calc(24 * var(--cp-u));
+        bottom: calc(24 * var(--cp-u));
+      }
+      .cp-viewers[data-pos='br'] {
+        right: calc(24 * var(--cp-u));
+        bottom: calc(24 * var(--cp-u));
+      }
+
+      .cp-viewers__card {
+        padding: calc(10 * var(--cp-u)) calc(14 * var(--cp-u));
+        border-radius: calc(14 * var(--cp-u));
+        background: rgba(18, 18, 22, 0.62);
+        backdrop-filter: blur(calc(6 * var(--cp-u)));
+        color: #f4f2f6;
+      }
+
+      .cp-viewers__head {
+        display: flex;
+        align-items: baseline;
+        gap: calc(6 * var(--cp-u));
+        font-size: calc(12 * var(--cp-fs));
+        opacity: 0.72;
+      }
+
+      .cp-viewers__num {
+        margin-left: auto;
+        color: var(--cp-accent);
+        opacity: 1;
+      }
+
+      .cp-vrow {
+        display: flex;
+        align-items: center;
+        gap: calc(8 * var(--cp-u));
+        margin-top: calc(6 * var(--cp-u));
+        font-size: calc(13 * var(--cp-fs));
+      }
+
+      .cp-vrow__no {
+        flex: 0 0 auto;
+        min-width: calc(14 * var(--cp-u));
+        text-align: right;
+        font-size: calc(11 * var(--cp-fs));
+        opacity: 0.5;
+      }
+
+      /* 没上榜的人（人在房间、还没互动）没有名次，那一栏画「-」并再压暗一档 */
+      .cp-vrow__no.is-dim {
+        opacity: 0.25;
+      }
+
+      .cp-vrow__face {
+        flex: 0 0 auto;
+        width: calc(20 * var(--cp-u));
+        height: calc(20 * var(--cp-u));
+        border-radius: 50%;
+        object-fit: cover;
+        overflow: hidden;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: calc(11 * var(--cp-fs));
+        background: rgba(255, 255, 255, 0.12);
+      }
+
+      .cp-vrow__name {
+        flex: 1 1 auto;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .cp-vrow__guard {
+        flex: 0 0 auto;
+        padding: 0 calc(5 * var(--cp-u));
+        border-radius: calc(4 * var(--cp-u));
+        font-size: calc(11 * var(--cp-fs));
+        background: var(--cp-accent);
+        color: #1b1b1f;
+      }
+
+      /* 大航海三档各给一个颜色，一眼能分出总督/提督/舰长 */
+      .cp-vrow__guard.is-g1 {
+        background: #ff8f7a;
+      }
+      .cp-vrow__guard.is-g2 {
+        background: #b98cff;
+      }
+      .cp-vrow__guard.is-g3 {
+        background: #6fb4ff;
+      }
+
+      .cp-vrow__score {
+        flex: 0 0 auto;
+        font-size: calc(12 * var(--cp-fs));
+        opacity: 0.72;
+      }
+
       /* ---------- 窄画面 ----------
          比如把 OBS 浏览器源拖成一条竖带。三块谁站哪一段由脚本里的 layout() 算，
          这里只负责把宽度放开：上面那套尺寸是按 1080p 画布定的，窄条上会顶出画面。 */
@@ -652,6 +944,14 @@
         max-width: calc(100% - 48 * var(--cp-u));
         /* 候选多 + 字号大时把面板本身截住，别把弹幕那一段挤没。
            截掉的是后面的候选，序号小的永远看得到 */
+        max-height: 42%;
+        overflow: hidden;
+      }
+
+      html.is-narrow .cp-viewers {
+        max-width: calc(100% - 48 * var(--cp-u));
+        /* 上榜的人多时把面板截住，别把弹幕那一段挤没。
+           截掉的是名次靠后的，榜首永远看得到 */
         max-height: 42%;
         overflow: hidden;
       }
@@ -698,7 +998,8 @@
       }
 
       html.is-panel .cp-music,
-      html.is-panel .cp-pick {
+      html.is-panel .cp-pick,
+      html.is-panel .cp-viewers {
         /* 宽度保留各自的原生尺寸（卡片拉满整屏很难看），只把上限放开，
            免得源一窄就被 42vw 卡住 */
         max-width: 100%;
@@ -712,7 +1013,17 @@
     <div id="cp-music" class="cp-music" data-pos="tl"></div>
     <div id="cp-lyric" class="cp-lyric" data-pos="bc"></div>
     <div id="cp-pick" class="cp-pick" data-pos="tr"></div>
+    <div id="cp-viewers" class="cp-viewers" data-pos="bl"></div>
     <div id="cp-status"></div>
+    <!-- 只有浮窗用：一条能看见、能拖、能关的把手 -->
+    <div id="cp-floatbar">
+      <span class="cp-floatbar__dot"></span>
+      <span>弹幕浮窗</span>
+      <button type="button" class="cp-floatbar__close" title="收起这个浮窗" aria-label="收起这个浮窗">
+        ×
+      </button>
+    </div>
+    <div id="cp-floathint">弹幕会显示在这里</div>
     <style id="cp-custom-style"></style>
 
     <script>
@@ -723,9 +1034,10 @@
            /overlay/lyric      只画歌词
            /overlay/music      只画点歌面板
            /overlay/voicepick  只画音色选择面板
+           /overlay/viewers    只画在线观众（高能榜）
          ?panel=lyric 这种写法也认，方便手敲。认不得的一律按「全部」走 ——
          宁可多画一块，也不能因为写错一个字母给主播一个纯透明页。 */
-      const PANELS = ['all', 'danmaku', 'lyric', 'music', 'voicepick']
+      const PANELS = ['all', 'danmaku', 'lyric', 'music', 'voicepick', 'viewers']
       const PANEL = (function () {
         const m = location.pathname.match(/\/overlay\/([A-Za-z]+)/)
         const q = new URLSearchParams(location.search).get('panel')
@@ -755,6 +1067,13 @@
         musicPos: 'tl',
         musicQueueCount: 3,
         danmakuPos: 'br',
+        /**
+         * 气泡塞不下时，最老的那条往哪边滑出去：
+         *   natural = 朝「离角落最远」的一侧（贴底就往上走，贴顶就往下走）
+         *   up / down = 强制方向
+         * 三个都要配着淡出，不留半截气泡在画面边缘。
+         */
+        danmakuOverflow: 'natural',
         // 界面整体大小 / 字体大小百分比。100 就是原始尺寸
         scale: 100,
         fontSize: 100,
@@ -766,6 +1085,10 @@
         voicePickPos: 'tr',
         voicePickHits: 4,
         voicePickTtlMs: 8000,
+        // 在线观众（高能榜）。榜单是空的就整块不画
+        showViewers: true,
+        viewersPos: 'bl',
+        viewersCount: 5,
         // 画面一窄就把三块分到互不相交的几段里，别压在彼此身上
         autoLayout: true,
         customCss: '',
@@ -779,6 +1102,8 @@
       const LYRIC_POS = ['tc', 'bc', 'tl', 'tr', 'bl', 'br']
       // 音色选择面板是个列表，居中不好看，只给四个角
       const PICK_POS = ['tl', 'tr', 'bl', 'br']
+      // 观众榜也是列表，同样只给四个角
+      const VIEWERS_POS = ['tl', 'tr', 'bl', 'br']
 
       function danmakuPos() {
         return DANMAKU_POS.indexOf(cfg.danmakuPos) >= 0 ? cfg.danmakuPos : 'br'
@@ -790,6 +1115,82 @@
 
       function pickPos() {
         return PICK_POS.indexOf(cfg.voicePickPos) >= 0 ? cfg.voicePickPos : 'tr'
+      }
+
+      function viewersPos() {
+        return VIEWERS_POS.indexOf(cfg.viewersPos) >= 0 ? cfg.viewersPos : 'bl'
+      }
+
+      /**
+       * 程序自己开的那个桌面浮窗（?float=1）也是这一页，但它不是 OBS 的浏览器源：
+       * 整块要做成能拖着走的，也没有别的块要避让。
+       *
+       * theme：panel = 窗口有深色底板（默认，看得见）；ghost = 窗口纯透明。
+       * 页面靠它决定给不给标题栏、内容留不留边距。认不得的一律按 panel 走 ——
+       * 万一参数丢了，宁可多画一条标题栏，也别变成一块什么都看不见的透明区域。
+       */
+      const FLOAT_Q = new URLSearchParams(location.search)
+      const FLOAT = FLOAT_Q.get('float') === '1'
+      const GHOST = FLOAT && FLOAT_Q.get('theme') === 'ghost'
+      if (FLOAT) document.documentElement.classList.add(GHOST ? 'is-float-ghost' : 'is-float-panel')
+      if (FLOAT) document.documentElement.classList.add('is-float')
+
+      /* ---------------------------- 浮窗的把手与空态 ----------------------------
+         一条弹幕都没有的时候，浮窗上不该什么抓手都没有。
+         两种形态的处理不一样：
+           panel —— 窗口有不透明底板，把手就当作标题栏常驻，随时能拖、能关；
+           ghost —— 窗口是透明的，把手平时半隐身（鼠标移入才亮），免得挡画面。 */
+
+      const floatBar = document.getElementById('cp-floatbar')
+      const floatHint = document.getElementById('cp-floathint')
+
+      if (FLOAT) {
+        if (GHOST) {
+          floatBar.classList.add('is-show')
+          setTimeout(() => floatBar.classList.remove('is-show'), 4000)
+        }
+        // preload 只在程序自己开的浮窗里有；OBS 的浏览器源没有，点了也不该报错
+        floatBar.querySelector('.cp-floatbar__close')?.addEventListener('click', (e) => {
+          e.stopPropagation()
+          const api = window.chatsparty
+          if (api && api.float && typeof api.float.close === 'function') api.float.close()
+        })
+      }
+
+      /** 一条弹幕都没有才挂提示；有了就撤掉，别跟气泡抢地方 */
+      function syncFloatHint() {
+        if (!FLOAT) return
+        // 正在淡出的那条不算数：它已经不是在显示的内容了
+        let live = 0
+        for (const n of app.children) if (n.dataset.leaving !== '1') live++
+        floatHint.classList.toggle('is-show', live === 0)
+      }
+      // 开出来就得先挂上：连上直播间之前的那一会儿，浮窗不能是一块全透明
+      syncFloatHint()
+
+      /** 溢出方向的三种取值。认不得的按 natural 走 */
+      const OVERFLOW_DIRS = ['natural', 'up', 'down']
+
+      function overflowMode() {
+        const v = String(cfg.danmakuOverflow || 'natural').toLowerCase()
+        return OVERFLOW_DIRS.indexOf(v) >= 0 ? v : 'natural'
+      }
+
+      /**
+       * 最老那条往哪边滑走。
+       * 贴底时新消息从下面进、最老的在上面 —— 自然方向是往上；贴顶时反过来。
+       */
+      function overflowDir() {
+        const m = overflowMode()
+        if (m !== 'natural') return m
+        return danmakuPos().charAt(0) === 't' ? 'down' : 'up'
+      }
+
+      /** 观众榜最多列几个人。1~20，配错了就退回 5 */
+      function viewersCount() {
+        const v = Number(cfg.viewersCount)
+        if (!isFinite(v) || v < 1) return 5
+        return Math.min(Math.floor(v), 20)
       }
 
       /** 百分比 -> 倍率。留 0.5~2 的余量：再小看不见，再大出画 */
@@ -823,9 +1224,11 @@
         renderMusic()
         renderLyric()
         renderPick()
+        renderViewers()
         // 配置一改位置就可能变，直接同步重排一次，别等下一帧（改完马上要看到效果）
         layout()
-        fit()
+        // 缩放 / 字号 / 位置都刚变过，气泡高矮和能塞下的条数也跟着变，重新收口
+        evictOverflow()
       }
 
       /* ---------------------------- 点歌面板 ---------------------------- */
@@ -1025,6 +1428,103 @@
         scheduleLayout()
       }
 
+      /* ---------------------------- 在线观众（高能榜） ----------------------------
+         名单由主进程轮询后推过来（谁在线、谁有互动、怎么排序都在那边算），这里只管画。
+
+         一条纪律：标题必须写「高能榜」。
+         B站没有任何接口能给「此刻房间里都有谁」，只有这张「在线 + 有过互动」的榜。
+         标成「观众」，主播就会拿它当观看人数 —— 那是错的，榜上常常只有几十人。 */
+
+      const viewersEl = document.getElementById('cp-viewers')
+      let viewersState = { ok: false, onlineNum: 0, items: [], error: '' }
+      /** 上次画的是哪一帧。榜单每次轮询都会重来，但多数时候只是贡献值动几点，
+          按内容判等能省掉一次 DOM 重建（重建会让头像重新加载，白闪一下） */
+      let viewersDrawn = ''
+
+      function renderViewers() {
+        // 这个源不负责观众就整块不画（哪怕配置里开着）
+        if (!shows('viewers')) {
+          viewersEl.classList.remove('is-show')
+          viewersEl.textContent = ''
+          viewersDrawn = ''
+          return
+        }
+        viewersEl.setAttribute('data-pos', viewersPos())
+
+        const list = (viewersState.items || []).slice(0, viewersCount())
+        const show = cfg.showViewers !== false && list.length > 0
+        viewersEl.classList.toggle('is-show', Boolean(show))
+        if (!show) {
+          viewersEl.textContent = ''
+          viewersDrawn = ''
+          scheduleLayout()
+          return
+        }
+
+        const key =
+          list.map((v) => v.uid + ':' + v.score + ':' + (v.onRank === false ? 'o' : 'r') + ':' + v.name).join(',') +
+          '|' + cfg.showFace + '|' + cfg.showMedal + '|' + viewersCount()
+        if (key === viewersDrawn) {
+          scheduleLayout()
+          return
+        }
+        viewersDrawn = key
+
+        viewersEl.textContent = ''
+        const card = el('div', 'cp-viewers__card')
+
+        const head = el('div', 'cp-viewers__head')
+        // 标题写「在线榜」而不是「高能榜」：这份名单已经把「人在房间但没互动」
+        // 的人并进来了，还叫高能榜就名不副实（那批人没有贡献值，也排不上名）
+        head.appendChild(el('span', null, '在线榜'))
+        // 在线人数是 B站给的近似值，和榜单名次是两回事，分开写
+        if (viewersState.onlineNum > 0) {
+          head.appendChild(el('span', 'cp-viewers__num', viewersState.onlineNum + ' 人在线'))
+        }
+        card.appendChild(head)
+
+        list.forEach((v, i) => {
+          const row = el('div', 'cp-vrow')
+          // 不在榜上的人没有名次，画「-」而不是行号 —— 不然「第 7 名 0 贡献」
+          // 看起来像是他真排第七
+          const no = el('span', 'cp-vrow__no', v.onRank === false ? '-' : String(i + 1))
+          if (v.onRank === false) no.classList.add('is-dim')
+          row.appendChild(no)
+
+          if (cfg.showFace !== false) {
+            if (v.face) {
+              const img = document.createElement('img')
+              img.className = 'cp-vrow__face'
+              // 先记原 URL 便于回填（头像要主进程带 Referer 抓），没到位就占位
+              img.setAttribute('data-face', v.face)
+              const ready = faceSrc(v.face)
+              if (ready) img.src = ready
+              else img.classList.add('cp-face--none')
+              img.onerror = () => img.classList.add('cp-face--none')
+              row.appendChild(img)
+            } else {
+              row.appendChild(el('div', 'cp-vrow__face', (v.name || '?').slice(0, 1)))
+            }
+          }
+
+          row.appendChild(el('span', 'cp-vrow__name', v.name || '匿名用户'))
+          // 大航海优先于粉丝牌 —— 同一行放不下两个标签，舰长比牌子更该被看见
+          if (v.guard) {
+            const tag = el('span', 'cp-vrow__guard', v.guard)
+            if (v.guardLevel >= 1 && v.guardLevel <= 3) tag.classList.add('is-g' + v.guardLevel)
+            row.appendChild(tag)
+          } else if (cfg.showMedal !== false && v.medal && v.medal.name) {
+            row.appendChild(el('span', 'cp-vrow__guard', v.medal.name + ' ' + v.medal.level))
+          }
+          // 没上榜的人贡献值恒为 0，画出来只会让人以为他真投喂了 0 元
+          if (v.onRank !== false) row.appendChild(el('span', 'cp-vrow__score', String(v.score)))
+          card.appendChild(row)
+        })
+
+        viewersEl.appendChild(card)
+        scheduleLayout()
+      }
+
       /* ---------------------------- 自动避让 ----------------------------
          三块（弹幕 / 点歌 / 歌词）各自 fixed 在自己的角上。窗口一窄 ——
          比如把 OBS 浏览器源拖成一条竖带 —— 它们就会压成一坨：弹幕糊在
@@ -1075,12 +1575,17 @@
         lyricEl.style.bottom = ''
         pickEl.style.top = ''
         pickEl.style.bottom = ''
+        viewersEl.style.top = ''
+        viewersEl.style.bottom = ''
       }
 
       /** 贴在画布上半区的四个位置。tc/bc 是歌词专有的，不算 */
       const TOP_SIDE = ['tl', 'tr']
 
       function layout() {
+        // 空态提示跟着条数走。放在重排里而不是只放在 addItem 里 ——
+        // 任何增删最后都会落到一次重排上，这样不会有哪条路径漏掉
+        syncFloatHint()
         clearOffsets()
         // 挂在 <html> 上：CSS 里那几条 .is-narrow 规则要连点歌面板、歌词一起管。
         // 除了「窄」，矮也算 —— 1920×400 这种横条一样会挤。
@@ -1103,6 +1608,9 @@
         if (l) blocks.push({ el: lyricEl, box: l, top: isTopSide(lpos, ['tc', 'tl', 'tr']), rank: 0 })
         const k = boxOf(pickEl, false)
         if (k) blocks.push({ el: pickEl, box: k, top: isTopSide(pickPos(), TOP_SIDE), rank: 1 })
+        // 观众榜排在最后让位：它是最不紧急的一块，同一侧真挤上了就让别人先贴边
+        const vw = boxOf(viewersEl, false)
+        if (vw) blocks.push({ el: viewersEl, box: vw, top: isTopSide(viewersPos(), TOP_SIDE), rank: 3 })
 
         // 每侧算两件事：每条竖带里各块摞起来的位置，以及这一侧总共要预留多高。
         // 预留高度 = 该侧最高的那条竖带（#app 自己带 24u 内边距，所以要从这里再让出去）
@@ -1142,35 +1650,14 @@
         if (botBand > 0) app.style.bottom = botBand + gap + 'px'
       }
 
-      /**
-       * 现有气泡摞起来有多高（含行间距）。
-       * 不能用 scrollHeight —— #app 是 justify-content: flex-end，超出去的那几条堆在
-       * flex-start 这一头，浏览器认为那是「滚动不可达」的部分，scrollHeight 根本不计。
-       */
-      function stackHeight() {
-        const n = app.children.length
-        if (!n) return 0
-        let h = 0
-        for (let i = 0; i < n; i++) h += app.children[i].offsetHeight
-        return h + 8 * uiScale * (n - 1)
-      }
-
-      /** 弹幕还是塞不下就别硬挤：从离角落最远的那条（DOM 里排最前）开始删 */
-      function fit() {
-        let guard = 0
-        const inner = app.clientHeight
-        while (app.children.length > 1 && stackHeight() > inner + 1 && guard++ < 200) {
-          app.removeChild(app.firstChild)
-        }
-      }
-
       /** 合并到下一帧再量：一条弹幕进来就同步量一次布局，弹幕快了会拖帧 */
       function scheduleLayout() {
         if (layoutRaf) return
         layoutRaf = requestAnimationFrame(() => {
           layoutRaf = 0
           layout()
-          fit()
+          // 画面尺寸、缩放、字号都可能刚变过，再按新高度收一次口
+          evictOverflow()
         })
       }
 
@@ -1178,7 +1665,7 @@
         // 这里不走 rAF：OBS 里把源先藏起来时 rAF 是不跑的，
         // 拖完窗口再显示出来会停在旧尺寸上。resize 本来就不密集，同步做掉最省心
         layout()
-        fit()
+        evictOverflow()
       })
       if (window.ResizeObserver) {
         // 换歌、换行数都会改这两块的高矮，光靠 resize 逮不到
@@ -1186,6 +1673,7 @@
         ro.observe(musicEl)
         ro.observe(lyricEl)
         ro.observe(pickEl)
+        ro.observe(viewersEl)
       }
 
       /**
@@ -1203,7 +1691,8 @@
       function applyFacePatch(src, data) {
         if (!src || !data) return
         faceCache[src] = data
-        const nodes = app.querySelectorAll('img[data-face="' + cssEscape(src) + '"]')
+        // 搜整个文档而不是 #app —— 观众榜是独立的一块，不在 #app 里
+        const nodes = document.querySelectorAll('img[data-face="' + cssEscape(src) + '"]')
         for (let i = 0; i < nodes.length; i++) {
           nodes[i].src = data
           nodes[i].classList.remove('cp-face--none')
@@ -1214,8 +1703,107 @@
         return String(s).replace(/["\\]/g, '\\$&')
       }
 
-      function trim() {
-        while (app.children.length > cfg.maxItems) app.removeChild(app.firstChild)
+      /* ---------------------- 弹幕容量（能塞几条留几条） ---------------------- */
+
+      /** 一次离场动画的时长。改它要连下面那条 transition 一起改 */
+      const LEAVE_MS = 320
+
+      /** 条数上限只是兜底：DOM 不能无限长（气泡再矮，几百条也拖垮渲染） */
+      function maxItems() {
+        const v = Number(cfg.maxItems)
+        if (!isFinite(v) || v < 1) return 40
+        return Math.min(Math.floor(v), 500)
+      }
+
+      /** 还在位上的气泡（正在离场的已经脱离文档流了，不算） */
+      function liveItems() {
+        const out = []
+        for (let i = 0; i < app.children.length; i++) {
+          const n = app.children[i]
+          if (n.dataset && n.dataset.leaving) continue
+          out.push(n)
+        }
+        return out
+      }
+
+      /**
+       * 留给气泡的那一段有多高（扣掉 #app 自己的内边距），以及气泡之间隔多远。
+       * 两个都从计算样式里读，别写死 24 / 8 —— 自定义 CSS 会改它们。
+       */
+      function stackMetrics() {
+        const cs = getComputedStyle(app)
+        const pad = (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0)
+        const gap = parseFloat(cs.rowGap || cs.gap) || 0
+        return { inner: Math.max(0, app.clientHeight - pad), gap }
+      }
+
+      function stackHeightOf(list, gap) {
+        const n = list.length
+        if (!n) return 0
+        let h = 0
+        for (let i = 0; i < n; i++) h += list[i].getBoundingClientRect().height
+        return h + gap * (n - 1)
+      }
+
+      /**
+       * 请一条气泡离场。
+       *
+       * 关键是**立刻把它切成 absolute**：它一旦脱离文档流，剩下的气泡在同一帧里
+       * 就重排到位了，新到的那条永远不会被挤出去半截再慢慢缩回来。
+       * 动画在它当前这一处播（位置先钉死），淡完再从 DOM 里摘掉。
+       */
+      function beginLeave(node, dir) {
+        if (!node || node.dataset.leaving) return
+        node.dataset.leaving = '1'
+        // 先把进场动画掐掉再量位置：那条动画是 translateX 位移，
+        // 带着它量出来的 rect 会偏最多 24u，气泡就会「横着跳一下再淡出」
+        node.style.animation = 'none'
+        void node.offsetHeight
+        const appRect = app.getBoundingClientRect()
+        const r = node.getBoundingClientRect()
+        // 绝对定位的包含块是 #app 的 padding box；#app 没有边框，取它的 rect 即可
+        node.style.position = 'absolute'
+        node.style.left = r.left - appRect.left + 'px'
+        node.style.top = r.top - appRect.top + 'px'
+        node.style.width = r.width + 'px'
+        node.style.margin = '0'
+        node.style.pointerEvents = 'none'
+        node.classList.add('is-leaving')
+        // 强制一次重排，让上面的「静止状态」先生效，再改 transform/opacity 才有过渡
+        void node.offsetHeight
+        const dist = 20 * uiScale
+        node.style.transition = `opacity ${LEAVE_MS}ms ease-out, transform ${LEAVE_MS}ms cubic-bezier(0.4, 0, 1, 1)`
+        node.style.transform = dir === 'down' ? `translateY(${dist}px)` : `translateY(${-dist}px)`
+        node.style.opacity = '0'
+        // 摘掉之前先算一次：淡出这会儿它已经不算「在显示」了
+        syncFloatHint()
+        setTimeout(() => {
+          if (node.parentNode) node.parentNode.removeChild(node)
+          syncFloatHint()
+        }, LEAVE_MS + 80)
+      }
+
+      /**
+       * 按容量收口：能塞下几条就留几条，塞不下的从最老那条（DOM 里排最前）开始请走。
+       *
+       * 以前只按 maxItems 数条数，而气泡高矮差得远（一句话和一段留言能差两三倍），
+       * 于是要么堆到画面外被 overflow: hidden 切掉半条，要么被 flex 压扁、文字在气泡里
+       * 被裁掉（压扁后量出来的高度永远「没超」，所以一条都删不掉）。现在改成量高度。
+       */
+      function evictOverflow() {
+        const dir = overflowDir()
+        let guard = 0
+        const m = stackMetrics()
+        // 只剩一条时还塞不下就没辙了 —— 那是一句话比整块还高，留着让它自己截
+        while (guard++ < 400) {
+          const live = liveItems()
+          if (live.length <= 1) break
+          if (stackHeightOf(live, m.gap) <= m.inner + 1) break
+          beginLeave(live[0], dir)
+        }
+        const live = liveItems()
+        const cap = maxItems()
+        for (let i = 0; i < live.length - cap; i++) beginLeave(live[i], dir)
       }
 
       function renderEmots(text, emots) {
@@ -1315,8 +1903,11 @@
         body.appendChild(text)
         el.appendChild(body)
         app.appendChild(el)
-        trim()
+        // 同步收口：新气泡刚进来就量，塞不下的立刻请走 ——
+        // 放到下一帧的话，这一帧里它会先被挤到画面外、露出半截被切掉
+        evictOverflow()
         scheduleLayout()
+        syncFloatHint()
       }
 
       let ws
@@ -1390,11 +1981,22 @@
               }
               renderPick()
             }
+            else if (msg.type === 'viewers') {
+              // 逐字段取值：items 为空就是「现在榜上没人」，得把面板收掉
+              const p = msg.payload || {}
+              viewersState = {
+                ok: Boolean(p.ok),
+                onlineNum: Number(p.onlineNum) || 0,
+                items: Array.isArray(p.items) ? p.items : [],
+                error: String(p.error || ''),
+              }
+              renderViewers()
+            }
             else if (msg.type === 'faces') {
               // 迟到的客户端补发：先把映射灌进表，再回填已经渲染出来的那些
               const list = msg.payload || []
               for (let i = 0; i < list.length; i++) faceCache[list[i].src] = list[i].data
-              const imgs = app.querySelectorAll('img[data-face]')
+              const imgs = document.querySelectorAll('img[data-face]')
               for (let i = 0; i < imgs.length; i++) {
                 const ready = faceSrc(imgs[i].getAttribute('data-face'))
                 if (ready) {
