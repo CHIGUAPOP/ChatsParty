@@ -135,6 +135,23 @@ export default function AppearancePage({ config, patch, notify }: Props) {
         </Row>
       </Card>
 
+      <SectionTitle>窗口</SectionTitle>
+      <Card
+        title="关闭主界面时"
+        desc="弹幕姬要一直挂着收弹幕、念弹幕、放点歌 —— 点×只是把窗口收起来，程序继续在后台跑，托盘区会留一个图标（点它恢复界面，右键里有「退出」）。关掉这项的话，点×就是真的退出。"
+      >
+        <Row label="缩到托盘，后台继续运行">
+          <Switch
+            value={config.general?.closeToTray !== false}
+            onChange={(v) => patch({ general: { closeToTray: v } })}
+          />
+        </Row>
+        <div className="divider" />
+        <div className="row__hint">
+          当前：{config.general?.closeToTray !== false ? '点×缩到托盘' : '点×直接退出'}
+        </div>
+      </Card>
+
       <SectionTitle>预览</SectionTitle>
       <Card title="组件配色预览" desc="按钮、卡片、开关都会跟随上面选的种子色变化。">
         <div className="row" style={{ flexWrap: 'wrap' }}>

@@ -5,7 +5,7 @@ import { openUserSpace, userSpaceUrl } from '../lib/links'
 /* --------------------------------- 图标 --------------------------------- */
 
 /** 内部有挖空区域的图标：外框实心 → 内圈挖空 → 内部小块再实心，靠 evenodd 逐层切换 */
-const EVEN_ODD = new Set(['settings', 'chat'])
+const EVEN_ODD = new Set(['settings', 'chat', 'video'])
 
 const PATHS: Record<string, string> = {
   // 插头：两枚插脚 + 圆头本体 + 底部一截电线，整体上下各留 1px
@@ -49,6 +49,11 @@ const PATHS: Record<string, string> = {
     'M20 6h-2.18c.11-.31.18-.65.18-1a3 3 0 0 0-5.5-1.65l-.5.67-.5-.68A3 3 0 0 0 9 2 3 3 0 0 0 6 5c0 .35.07.69.18 1H4a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2Zm-5-2a1 1 0 1 1 0 2 1 1 0 0 1 0-2ZM9 4a1 1 0 1 1 0 2 1 1 0 0 1 0-2Zm11 15H4v-2h16v2Zm0-5H4V8h5.08L7 10.83 8.62 12 11 8.76l1-1.36 1 1.36L15.38 12 17 10.83 14.92 8H20v6Z',
   // 关闭：一条 45° 的叉。浮窗标题栏收回按钮用
   close: 'M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12 19 6.41Z',
+  // 视频：屏幕外框挖空 + 里面一个播放三角（evenodd 三层切换，见 EVEN_ODD）
+  video: 'M3 5h18v14H3V5ZM5 7h14v10H5V7Zm5 2.5 5.5 2.5L10 14.5V9.5Z',
+  // 喇叭：宽的一头在左、窄口朝右，右边两段声波。音量旋钮用；静音时换成下面那条
+  vol: 'M4 9h3l4-3v12l-4-3H4V9Zm10.5 1.5a2 2 0 0 1 0 3.4l1 1.7a4 4 0 0 0 0-6.8l-1 1.7Zm2.6-3.4a6 6 0 0 1 0 9.8l1 1.7a8 8 0 0 0 0-13.2l-1 1.7Z',
+  volMute: 'M4 9h3l4-3v12l-4-3H4V9Zm10.6 1.4L16 9l2 2 2-2 1.4 1.4L19.4 12.4l2 2L20 15.8l-2-2-2 2-1.4-1.4 2-2-2-2Z',
 }
 
 export function Icon({ name, size = 24 }: { name: keyof typeof PATHS | string; size?: number }) {
@@ -356,12 +361,15 @@ export function TextArea({
   onChange,
   onBlur,
   rows = 3,
+  placeholder,
 }: {
   label: string
   value: string
   onChange: (v: string) => void
   onBlur?: () => void
   rows?: number
+  /** 空着的时候给个格式示例。标签是浮动的，所以占位文字只在没内容时出现 */
+  placeholder?: string
 }) {
   const draft = useDraftInput(value, onChange)
   return (
@@ -369,6 +377,7 @@ export function TextArea({
       <textarea
         className="field__textarea"
         rows={rows}
+        placeholder={placeholder}
         onChange={draft.onChange}
         onCompositionStart={draft.onCompositionStart}
         onCompositionEnd={draft.onCompositionEnd}
@@ -476,8 +485,69 @@ export function Slider({
   )
 }
 
-/* -------------------------------- 提示条 -------------------------------- */
+/**
+ * 视频控件条上用的细音量条。
+ *
+ * 和上面的 Slider 不同点只有两个，但都必要：
+ *  1. **没有数字**。滚动条所在的控件条宽度是抢来的（时间、进度条、三颗按钮都要位置），
+ *     再挂一个「80」的读数会把它挤没。
+ *  2. 轨道细、滑块小。它飘在视频画面上，不该有表单控件那种体量。
+ * 手感跟 Slider 一样：拖动中用本地值（受控值要绕一趟 IPC 才回显，中间那一拍会弹回去）。
+ */
+export function SliderFit({
+  value,
+  onChange,
+  min = 0,
+  max = 1,
+  step = 0.05,
+  title,
+  ariaLabel,
+}: {
+  value: number
+  onChange: (v: number) => void
+  min?: number
+  max?: number
+  step?: number
+  title?: string
+  ariaLabel?: string
+}) {
+  const [local, setLocal] = React.useState(value)
+  const dragging = React.useRef(false)
+  React.useEffect(() => {
+    if (!dragging.current) setLocal(value)
+  }, [value])
+  const shown = dragging.current ? local : value
+  const pct = max > min ? ((shown - min) / (max - min)) * 100 : 0
+  return (
+    <input
+      className="slider slider--fit"
+      type="range"
+      min={min}
+      max={max}
+      step={step}
+      value={shown}
+      title={title}
+      aria-label={ariaLabel}
+      style={{ ['--slider-pct' as any]: `${pct}%` }}
+      onChange={(e) => {
+        const v = Number(e.target.value)
+        setLocal(v)
+        onChange(v)
+      }}
+      onPointerDown={() => {
+        dragging.current = true
+      }}
+      onPointerUp={() => {
+        dragging.current = false
+      }}
+      onBlur={() => {
+        dragging.current = false
+      }}
+    />
+  )
+}
 
+/* -------------------------------- 提示条 -------------------------------- */
 export function Snackbar({ message, error }: { message: string; error?: boolean }) {
   if (!message) return null
   return (

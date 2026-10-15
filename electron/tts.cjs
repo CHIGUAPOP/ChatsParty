@@ -215,11 +215,15 @@ async function synthChatCompletions(cfg, text, style) {
     const label = cfg.provider === 'mimo' ? '小米 MiMo' : 'TTS 服务'
     const msg = json?.error?.message || json?.message || ''
     if (res.status === 401 || res.status === 403) {
-      throw new Error(
+      throw httpFail(
         describeHttpError(res.status, res.text, { label, keySummary: keySummary(key) }),
+        res.status,
       )
     }
-    throw new Error(`TTS 请求失败：${msg || `HTTP ${res.status} ${String(res.text || '').slice(0, 160)}`}`)
+    throw httpFail(
+      `TTS 请求失败：${msg || `HTTP ${res.status} ${String(res.text || '').slice(0, 160)}`}`,
+      res.status,
+    )
   }
   const data =
     json?.choices?.[0]?.message?.audio?.data || json?.audio?.data || json?.data?.[0]?.audio || ''
@@ -252,14 +256,54 @@ async function synthAudioSpeech(cfg, text, style) {
   })
 
   if (!res.ok) {
-    throw new Error(
+    throw httpFail(
       describeHttpError(res.status, res.text, {
         label: cfg.provider === 'openai' ? 'OpenAI' : 'TTS 服务',
         keySummary: keySummary(key),
       }),
+      res.status,
     )
   }
   return { base64: res.buffer.toString('base64'), mime: MIME[cfg.format] || 'audio/mpeg' }
+}
+
+/**
+ * 带 HTTP 状态码的失败。
+ * 状态码必须挂在错误对象上（不能只留在中文句子里）—— 上层要按它判断
+ * 「这次失败值不值得自动换嗓子」，而匹配中文是不可靠的。
+ */
+function httpFail(message, status) {
+  const e = new Error(message)
+  if (status) e.status = Number(status)
+  return e
+}
+
+/**
+ * 一次合成失败属于哪一类。
+ *
+ * 上层靠它决定「要不要临时换一条路走」：
+ *   credit  额度用完 / 被限流（402/429）
+ *   network 超时、断网、DNS、代理握手失败
+ *   server  平台自己 5xx
+ *   —— 这三种都是「平台这会儿不顶用」，换免费的嗓子把这一句念完是划算的；
+ * config   Key 无效 / 没权限 / 参数不对（401/403/400/404）
+ *   —— 这是**配置错了**。静默换嗓子会让人永远发现不了自己的 Key 是坏的，所以不回退。
+ */
+function classifyFailure(err) {
+  const status = Number(err && err.status) || 0
+  if (status === 402 || status === 429) return 'credit'
+  if (status >= 500) return 'server'
+  if (status >= 400) return 'config'
+  const kind = err && err.netKind
+  if (kind === 'timeout' || kind === 'dns' || kind === 'refused' || kind === 'tls') return 'network'
+  return 'other'
+}
+
+/** 值得自动换嗓子顶上的那一类失败 */
+const FALLBACK_KINDS = new Set(['credit', 'network', 'server'])
+
+function canFallback(err) {
+  return FALLBACK_KINDS.has(classifyFailure(err))
 }
 
 /* -------------------- 免费 / 本地提供方 -------------------- */
@@ -392,12 +436,12 @@ async function synthFish(cfg, text) {
     const message = fishError(res, key)
     tried.push({ model: modelId, status: res.status, message })
     // 403 = 没有 TTS 权限，换模型没意义，直接把结论抛出去
-    if (res.status === 403) throw new Error(message)
+    if (res.status === 403) throw httpFail(message, res.status)
     if (!res.ok && FISH_RETRY_STATUS.has(res.status)) {
-      last = new Error(message)
+      last = httpFail(message, res.status)
       continue
     }
-    throw new Error(message)
+    throw httpFail(message, res.status)
   }
 
   // 每个模型的失败原因都已经收在 tried 里（界面会把「模型 → HTTP 状态」列出来），
@@ -545,4 +589,7 @@ module.exports = {
   synthFish,
   FISH_MODELS,
   FISH_BASE,
+  classifyFailure,
+  canFallback,
+  FALLBACK_KINDS,
 }

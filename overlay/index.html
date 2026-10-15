@@ -427,6 +427,43 @@
         gap: calc(10 * var(--cp-u));
       }
 
+      /* 视频条目：整块 16:9 画面框 + 下方标题。画面框永远 16:9（宽度随面板，
+         高度跟随），OBS 里就是给观众看画面的 —— 「铺满」不等于「比例对」 */
+      .cp-mcard--video {
+        display: block;
+        padding: calc(8 * var(--cp-u));
+      }
+
+      .cp-mvideo {
+        position: relative;
+        width: 100%;
+        aspect-ratio: 16 / 9;
+        flex: 0 0 auto;
+        overflow: hidden;
+        border-radius: calc(10 * var(--cp-u));
+        background: #000;
+      }
+
+      .cp-mvideo video {
+        display: block;
+        width: 100%;
+        height: 100%;
+        object-fit: contain;
+      }
+
+      .cp-mvideo__none {
+        position: absolute;
+        inset: 0;
+        display: grid;
+        place-items: center;
+        color: rgba(255, 255, 255, 0.55);
+        font-size: calc(40 * var(--cp-fs));
+      }
+
+      .cp-mcard--video .cp-mbody {
+        padding: calc(8 * var(--cp-u)) calc(4 * var(--cp-u)) calc(2 * var(--cp-u));
+      }
+
       .cp-mcover {
         width: calc(48 * var(--cp-u));
         height: calc(48 * var(--cp-u));
@@ -1236,6 +1273,29 @@
       const musicEl = document.getElementById('cp-music')
       let musicState = { current: null, items: [], queued: 0 }
 
+      /* 叠加层的视频镜像。拥有者窗口（浮窗/主窗口）每 400ms 推一条 musictick，
+         这里照着对齐：差 1.5s 以上才 seek（跟引擎里镜像窗口的规则一致），
+         播放意图跟着走。同一条目不重建 <video> —— 重建等于重新拉流，画面闪回开头 */
+      let videoTag = null
+      let videoKey = ''
+      let videoFrame = null
+      let videoPlaying = true
+
+      function syncVideoWithTick(p) {
+        if (!videoTag || !videoKey || !p || String(p.key || '') !== videoKey) return
+        videoPlaying = Boolean(p.playing)
+        const t = Number(p.pos) || 0
+        if (Math.abs((videoTag.currentTime || 0) - t) > 1.5) {
+          try {
+            videoTag.currentTime = t
+          } catch {
+            /* 元数据还没到，loadedmetadata 后自然对上 */
+          }
+        }
+        if (videoPlaying && videoTag.paused) videoTag.play().catch(() => {})
+        else if (!videoPlaying && !videoTag.paused) videoTag.pause()
+      }
+
       function el(tag, cls, text) {
         const n = document.createElement(tag)
         if (cls) n.className = cls
@@ -1270,25 +1330,107 @@
         }
 
         musicEl.textContent = ''
-        if (cur) {
-          const card = el('div', 'cp-mcard')
-          const cover = el('div', 'cp-mcover')
-          if (cur.picUrl) {
-            const img = el('img')
-            img.src = cur.picUrl
-            img.alt = ''
-            cover.appendChild(img)
-          } else {
-            cover.appendChild(el('span', 'cp-mcover__none', '♪'))
+        const isVideo = Boolean(cur && cur.kind === 'video')
+        // 流地址在快照顶层（main.cjs musicSnapshot 的 stream 字段），不在条目上
+        const stream = isVideo ? String(musicState.stream || '') : ''
+        const vkey = isVideo ? 'video:' + ((cur && cur.id) ?? 0) : ''
+        if (isVideo && stream) {
+          // 视频条目：整块画成 16:9 画面框，下面一行标题
+          if (!videoTag || videoKey !== vkey) {
+            if (videoTag) {
+              try {
+                videoTag.pause()
+              } catch {
+                /* noop */
+              }
+              videoTag.removeAttribute('src')
+              videoTag.load()
+            }
+            const v = document.createElement('video')
+            // 【B 站 CDN 认 Referer】http(s) 流走本服务代理（overlay.cjs /stream/video），
+            // 从我们这边带着 B 站认的 Referer 出去；data: 流（e2e 桩）没 Referer 一说，直连
+            v.src = /^data:/i.test(stream) ? stream : '/stream/video?key=' + encodeURIComponent(vkey)
+            v.muted = true // OBS 的声音走应用本身，叠加层不出声（跟歌一样）
+            v.playsInline = true
+            v.setAttribute('playsinline', '')
+            v.preload = 'auto'
+            // 中途才连上 / 重排时快照里带着进度底 —— 先对齐再播
+            const tick = musicState.tick
+            videoPlaying = tick ? Boolean(tick.playing) : true
+            if (tick && String(tick.key || '') === vkey && Number(tick.pos) > 0) {
+              v.addEventListener(
+                'loadedmetadata',
+                () => {
+                  try {
+                    v.currentTime = Number(tick.pos) || 0
+                  } catch {
+                    /* noop */
+                  }
+                },
+                { once: true },
+              )
+            }
+            v.addEventListener('ended', () => {
+              // 拥有者会推进队列推来新快照；这之前别让重排兜底又把它播起来
+              videoPlaying = false
+            })
+            v.addEventListener('error', () => {
+              // 流挂了（过期/代理失败）别留黑框，退回播放三角占位
+              if (videoFrame) {
+                videoFrame.textContent = ''
+                videoFrame.appendChild(el('span', 'cp-mvideo__none', '▶'))
+              }
+              videoTag = null
+              videoKey = ''
+            })
+            videoTag = v
+            videoKey = vkey
+            videoFrame = el('div', 'cp-mvideo')
+            videoFrame.appendChild(v)
           }
-          card.appendChild(cover)
+          const card = el('div', 'cp-mcard cp-mcard--video')
+          card.appendChild(videoFrame)
           const body = el('div', 'cp-mbody')
-          body.appendChild(el('div', 'cp-mlabel', '正在播放'))
+          body.appendChild(el('div', 'cp-mlabel', '正在播放 · 视频'))
           body.appendChild(el('div', 'cp-mtitle', cur.name || '未命名'))
           const sub = [cur.artists, cur.requester ? cur.requester + ' 点的' : ''].filter(Boolean).join(' · ')
-          body.appendChild(el('div', 'cp-msub', sub || '—'))
+          if (sub) body.appendChild(el('div', 'cp-msub', sub))
           card.appendChild(body)
           musicEl.appendChild(card)
+          // 元素刚被 textContent='' 摘下来又搬回来（detach 不清播放状态），接着播
+          if (videoPlaying && videoTag.paused) videoTag.play().catch(() => {})
+        } else {
+          videoKey = ''
+          if (cur) {
+            const card = el('div', 'cp-mcard')
+            const cover = el('div', 'cp-mcover')
+            const coverFallback = () => {
+              cover.textContent = ''
+              // 视频没有封面时用播放三角占位，和歌的音符区分开
+              cover.appendChild(el('span', 'cp-mcover__none', isVideo ? '▶' : '♪'))
+            }
+            if (cur.picUrl) {
+              const img = el('img')
+              // 【B 站图床对第三方 Referer 直接 403（实测）】OBS 浏览源的页面地址
+              // 就是 Referer —— 不显式关掉，封面永远加载不出来只剩黑块。
+              // 顺手把 http 封面升到 https（图床两种都认，https 免得各处策略不一）。
+              img.referrerPolicy = 'no-referrer'
+              img.src = String(cur.picUrl).replace(/^http:\/\//i, 'https://')
+              img.alt = ''
+              img.onerror = coverFallback
+              cover.appendChild(img)
+            } else {
+              coverFallback()
+            }
+            card.appendChild(cover)
+            const body = el('div', 'cp-mbody')
+            body.appendChild(el('div', 'cp-mlabel', isVideo ? '正在播放 · 视频' : '正在播放'))
+            body.appendChild(el('div', 'cp-mtitle', cur.name || '未命名'))
+            const sub = [cur.artists, cur.requester ? cur.requester + ' 点的' : ''].filter(Boolean).join(' · ')
+            body.appendChild(el('div', 'cp-msub', sub || '—'))
+            card.appendChild(body)
+            musicEl.appendChild(card)
+          }
         }
         if (items.length) {
           const box = el('div', 'cp-mqueue')
@@ -1296,7 +1438,8 @@
           items.forEach((it, i) => {
             const row = el('div', 'cp-mrow')
             row.appendChild(el('span', 'cp-mrow__no', String(i + 1)))
-            row.appendChild(el('span', 'cp-mrow__name', it.name || '未命名'))
+            // 视频条目前面垫一个播放三角，和歌一眼区分开
+            row.appendChild(el('span', 'cp-mrow__name', (it.kind === 'video' ? '▶ ' : '') + (it.name || '未命名')))
             row.appendChild(el('span', 'cp-mrow__who', it.requester || ''))
             box.appendChild(row)
           })
@@ -1952,6 +2095,9 @@
             else if (msg.type === 'music') {
               musicState = msg.payload || { current: null, items: [], queued: 0 }
               renderMusic()
+            } else if (msg.type === 'musictick') {
+              // 视频镜像的进度心跳（拥有者窗口 400ms 一条），只影响 <video> 不重排
+              syncVideoWithTick(msg.payload)
             } else if (msg.type === 'face') applyFacePatch(msg.payload.src, msg.payload.data)
             else if (msg.type === 'lyric') {
               // 逐字段取值而不是 Object.assign：换歌那一帧刻意不带 lines（让它先清空），

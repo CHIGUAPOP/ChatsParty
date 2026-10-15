@@ -1,15 +1,21 @@
 'use strict'
 // session 用别名：同文件里 `session` 已经是 B站会话的变量了，撞名会直接编译不过
-const { app, BrowserWindow, ipcMain, shell, dialog, session: electronSession } = require('electron')
+const { app, BrowserWindow, ipcMain, shell, dialog, Tray, Menu, session: electronSession } = require('electron')
 const path = require('node:path')
 const fs = require('node:fs')
 const { spawn, execFile } = require('node:child_process')
 
 const { Session, Wbi } = require('./lib/http.cjs')
 const { BilibiliAPI } = require('./bilibili/api.cjs')
+const BVIDEO = require('./bilibili/video.cjs')
 const { QrLogin, collectCredentials } = require('./bilibili/auth.cjs')
 const { LiveClient } = require('./bilibili/live.cjs')
-const { PROVIDERS, synthesize, listVoices, probeFish } = require('./tts.cjs')
+const { PROVIDERS, synthesize, listVoices, probeFish, canFallback, classifyFailure } = require('./tts.cjs')
+/**
+ * 真正的合成入口。默认就是 tts.cjs 那份，**只有 e2e 会替换它**（注入超时 / 402），
+ * 生产代码一律走 synthesize。
+ */
+let synthImpl = synthesize
 const V = require('./voices.cjs')
 const L = require('./llm.cjs')
 const { shouldSpeakNow, speakableName } = require('./speech-rules.cjs')
@@ -25,7 +31,7 @@ const { FaceResolver } = require('./faces.cjs')
 const { Logger } = require('./log.cjs')
 const { OverlayServer, OVERLAY_PANELS } = require('./overlay.cjs')
 const { FloatWindows, FLOAT_PANELS } = require('./float.cjs')
-const { ConfigStore } = require('./store.cjs')
+const { ConfigStore, DEFAULTS: STORE_DEFAULTS } = require('./store.cjs')
 const pkg = require('../package.json')
 
 // CP_PROD=1 可以在未打包时直接加载构建产物，方便验证生产路径
@@ -66,9 +72,68 @@ let cachePruneTimer = null
 // 队列放主进程：观众点歌是从弹幕来的，渲染进程可能根本没打开音乐页
 const musicQueue = []
 let musicCurrent = null
+/**
+ * 拥有播放权的窗口推来的最后一条进度心跳（原样存底，随快照下发）。
+ * 浮窗这类窗口是**按需新建**的：它挂载时东西可能已经在别的窗口播到一半 ——
+ * 不把这份进度带给它，它接管播放权那一刻就会从头播（用户实测报过）。
+ */
+let musicLastTick = null
+
+/**
+ * 当前视频条目已解析的整条播放地址（key → url）。
+ * 叠加层要在 OBS 里直接放画面，而 bilivideo CDN 认 Referer —— OBS 浏览源
+ * 发出的请求我们管不着，只能让流从本进程的 overlay 服务代理出去（见
+ * overlay.cjs 的 /stream/video 路由）。e2e 下 videoAudioProvider 返回
+ * data: URL，叠加层对它直连（data: 没有 Referer 一说）。
+ */
+const musicStreamCache = new Map()
+/** 防并发重解：同一 key 的解析在途时不再起第二份 */
+const musicStreamInflight = new Map()
+
+function musicKeyOf(v) {
+  return `${v && v.kind === 'video' ? 'video' : 'song'}:${(v && v.id) ?? 0}`
+}
+
+async function resolveVideoStream(v) {
+  const key = musicKeyOf(v)
+  if (musicStreamCache.has(key)) return musicStreamCache.get(key)
+  if (musicStreamInflight.has(key)) return musicStreamInflight.get(key)
+  const p = (async () => {
+    try {
+      const cfg = store.get()
+      ensureSession()
+      let r
+      if (typeof videoAudioProvider === 'function') r = await videoAudioProvider(v || {})
+      else r = await BVIDEO.videoPlayUrl(v || {}, { session, mode: net.resolveMode('bilibili', cfg) })
+      // 渲染层那条路（music:videoAudio）返回 { url, quality }，这里统一取 url
+      const url = r && typeof r === 'object' ? r.url : r
+      if (typeof url === 'string' && url) musicStreamCache.set(key, url)
+      return url || null
+    } catch {
+      return null
+    } finally {
+      musicStreamInflight.delete(key)
+    }
+  })()
+  musicStreamInflight.set(key, p)
+  return p
+}
+
+/** 当前条目是视频就把流地址备好。pushMusicState 每次都问一声，缓存/在途去重兜着 */
+function ensureCurrentStream() {
+  if (!musicCurrent || musicCurrent.kind !== 'video') return
+  const key = musicKeyOf(musicCurrent)
+  if (musicStreamCache.has(key) || musicStreamInflight.has(key)) return
+  resolveVideoStream(musicCurrent).then((url) => {
+    // 解析期间可能已经切了条目 —— key 对不上就别把旧流推出去
+    if (url && musicCurrent && musicKeyOf(musicCurrent) === key) pushMusicState()
+  })
+}
 
 function musicSnapshot() {
-  return { items: musicQueue.slice(), current: musicCurrent, queued: musicQueue.length }
+  const stream =
+    musicCurrent && musicCurrent.kind === 'video' ? musicStreamCache.get(musicKeyOf(musicCurrent)) || null : null
+  return { items: musicQueue.slice(), current: musicCurrent, queued: musicQueue.length, tick: musicLastTick, stream }
 }
 
 /** 当前歌词的一份快照。渲染层推过来，广播给 OBS 用 */
@@ -144,15 +209,20 @@ function settlePick(uid, result) {
 }
 
 function pushMusicState() {
+  // 当前条目是视频就顺手把流地址备上（异步，好了会再推一帧）
+  ensureCurrentStream()
   const snap = musicSnapshot()
   send('music:state', snap)
   // OBS 那边也要跟着变：换歌、有人点歌都得立刻反映到画面上
   if (overlay) overlay.broadcast('music', snap)
 }
 
-/** 取下一首来播。没有就置空 */
+/** 取下一首来播。没有就置空。换了条目，旧心跳就作废（不能拿去给新条目续播） */
 function musicAdvance() {
   musicCurrent = musicQueue.shift() || null
+  musicLastTick = null
+  // 旧条目的流地址跟着作废（B 站流 URL 本身带签名时效，留着也是误导）
+  musicStreamCache.clear()
   return musicCurrent
 }
 
@@ -255,26 +325,63 @@ function closeNeteaseLogin() {
   }
 }
 
-/** 点歌：从搜索结果里挑一首能播的，放进队列 */
+/**
+ * 点歌：从搜索结果里挑一首能播的，放进队列。
+ *
+ * 队列里不只有歌 —— B 站视频（BV 号）也走同一条队列，用 `kind` 区分：
+ * 歌交给网易云取音频地址，视频交给渲染层内嵌官方播放器。
+ * 对队列来说它们都是「一条要播的东西」，顺序、上限、移除规则完全一样。
+ */
 function musicEnqueue(song, requester) {
   const cfg = store.get()
   const m = cfg.music || {}
   const max = Number(m.maxQueue) || 20
   if (musicQueue.length >= max) return { ok: false, reason: 'full' }
-  musicQueue.push({
-    id: Number(song.id),
-    name: song.name || '',
-    artists: song.artists || '',
-    durationText: song.durationText || '',
-    picUrl: song.picUrl || '',
-    requester: requester || '',
-    at: Date.now(),
-  })
+  if (song?.kind === 'video') {
+    musicQueue.push({
+      kind: 'video',
+      // 视频的 id 用 cid（同一稿件的不同分 P cid 不同，天然唯一）
+      id: Number(song.cid) || Number(song.id) || 0,
+      bvid: song.bvid || '',
+      cid: Number(song.cid) || 0,
+      name: song.title || song.name || '',
+      // 视频没有「歌手」，这一栏显示 UP 主 —— 界面上那行字本来就是给「谁做的」留的
+      artists: song.up ? `UP：${song.up}` : 'B 站视频',
+      durationText: song.durationText || '',
+      duration: Number(song.duration) || 0,
+      picUrl: song.pic || song.picUrl || '',
+      requester: requester || '',
+      at: Date.now(),
+    })
+  } else {
+    musicQueue.push({
+      kind: 'song',
+      id: Number(song.id),
+      name: song.name || '',
+      artists: song.artists || '',
+      durationText: song.durationText || '',
+      picUrl: song.picUrl || '',
+      requester: requester || '',
+      at: Date.now(),
+    })
+  }
   // 队列空着并且开着自动播放 → 立刻开播
   if (!musicCurrent && m.autoPlay !== false) musicAdvance()
   pushMusicState()
   return { ok: true, position: musicQueue.length }
 }
+
+/** 队列里的这一条是哪一类。老配置（没有 kind 字段）一律当歌 */
+function itemKind(it) {
+  return it?.kind === 'video' ? 'video' : 'song'
+}
+
+/**
+ * 取视频播放地址的实现（music:videoAudio 的真身是 BVIDEO.videoPlayUrl）。
+ * 提到模块层是因为 CP_E2E 的钩子要换掉它 —— e2e 用本地 data: URL 桩取流，
+ * 不联网也能验「真渲染层引擎 + 真 <video>」的整条链路。
+ */
+let videoAudioProvider = null
 const lastTextAt = new Map()
 const userLastSpeak = new Map()
 
@@ -334,6 +441,68 @@ let lastReplyAt = 0
 
 /* ------------------------------- 窗口 ------------------------------- */
 
+let tray = null
+/** 「已经缩到托盘」这句提示只说一次，之后每次都弹就是骚扰 */
+let trayHinted = false
+/** 真要退出的标志。点×被拦成「缩到托盘」，托盘菜单里的退出才置它 */
+let quitting = false
+
+/**
+ * 托盘图标文件在哪。
+ *
+ * build/ 不进 asar（exe 的图标是 electron-builder 拿 build/icon.ico 烧进去的），
+ * 所以打包后 build/icon.png 根本不存在 —— 托盘会变成一个空白图标，而用户是
+ * 靠它把窗口找回来的，等于点了×就失联。三条路依次兜：
+ *   打包后 → extraResources 拷出去的 resources/tray-icon.png
+ *   再兜   → electron/tray-icon.png（跟代码一起进 asar，开发时用的就是这个）
+ *   最后   → 开发目录下的 build/icon.png
+ */
+function trayIconPath() {
+  if (app.isPackaged && process.resourcesPath) {
+    const packed = path.join(process.resourcesPath, 'tray-icon.png')
+    if (fs.existsSync(packed)) return packed
+  }
+  const bundled = path.join(__dirname, 'tray-icon.png')
+  if (fs.existsSync(bundled)) return bundled
+  const dev = path.join(__dirname, '..', 'build', 'icon.png')
+  return fs.existsSync(dev) ? dev : ''
+}
+
+/** 把主界面找回来。窗口被 destroy 过（理论上不会）就重建一个 */
+function showMainWindow() {
+  if (!win || win.isDestroyed()) {
+    createWindow()
+    return
+  }
+  if (win.isMinimized()) win.restore()
+  if (!win.isVisible()) win.show()
+  win.focus()
+}
+
+function ensureTray() {
+  if (tray && !tray.isDestroyed()) return tray
+  const iconPath = trayIconPath()
+  if (!iconPath) return null
+  tray = new Tray(iconPath)
+  tray.setToolTip('ChatsParty · 弹幕姬')
+  tray.setContextMenu(
+    Menu.buildFromTemplate([
+      { label: '显示主界面', click: () => showMainWindow() },
+      { type: 'separator' },
+      { label: '退出', click: () => quitApp() },
+    ]),
+  )
+  // Windows 上左键单击是 click，双击是 double-click —— 两个都接住，别让人觉得点了没反应
+  tray.on('click', () => showMainWindow())
+  tray.on('double-click', () => showMainWindow())
+  return tray
+}
+
+function quitApp() {
+  quitting = true
+  app.quit()
+}
+
 /**
  * 窗口与任务栏图标。
  *
@@ -368,6 +537,25 @@ function createWindow() {
   win.on('resize', () => {
     const [w, h] = win.getSize()
     store.patch({ window: { width: w, height: h } })
+  })
+
+  // 点× = 缩到托盘。弹幕姬是要一直挂着收弹幕、念弹幕、放点歌的，主播点×多半只是
+  // 想把窗口收起来，不是想停掉。真退出走托盘图标上的「退出」（quitting 时不拦）。
+  win.on('close', (e) => {
+    if (quitting) return
+    if (store?.get()?.general?.closeToTray === false) return
+    e.preventDefault()
+    win.hide()
+    if (ensureTray() && !trayHinted) {
+      trayHinted = true
+      // 头一次缩进去得说一声，不然用户不知道上哪儿把窗口找回来
+      try {
+        tray.displayBalloon({
+          title: 'ChatsParty',
+          content: '已缩到托盘，还在后台收弹幕。点图标恢复界面；要退出就在图标上点右键。',
+        })
+      } catch {}
+    }
   })
 
   // 浮窗是个常驻小窗，它开着的时候「所有窗口都关了」这个信号永远等不到 ——
@@ -518,6 +706,89 @@ function pumpFace() {
 }
 
 /* ------------------------------ 弹幕接入 ------------------------------ */
+
+const BILI_COOKIE_NAMES = ['SESSDATA', 'bili_jct', 'DedeUserID', 'buvid3', 'buvid4']
+
+/**
+ * 把登录凭据同步一份给**浏览器**（渲染层的默认会话）。
+ *
+ * 为什么需要这一步：我们扫码登录拿到的 Cookie 只存在自己的 Cookie 罐里
+ * （见 ensureSession），主进程发请求时手动带上它。但 B 站视频用的是官方内嵌
+ * 播放器（iframe），它认的是浏览器自己的 Cookie —— 不同步过去，iframe 就是
+ * 游客身份，会员专属的内容和高清晰度一律看不了。观众点了个充电视频才发现
+ * 播不了，那很难看。
+ *
+ * 值的编码跟 ensureSession 保持一致：SESSDATA / bili_jct 存的是解码后的值，
+ * 写回 Cookie 时要再编一次（线上的 Cookie 本来就是带 %XX 的）。
+ */
+async function syncBiliCookiesToBrowser() {
+  const cred = (store && store.get().credentials) || {}
+  if (!cred.SESSDATA) return
+  const jar = electronSession.defaultSession.cookies
+  const expirationDate = Math.floor(Date.now() / 1000) + 15552000
+  for (const name of BILI_COOKIE_NAMES) {
+    const raw = cred[name]
+    if (!raw) continue
+    const value = name === 'SESSDATA' || name === 'bili_jct' ? encodeURIComponent(String(raw)) : String(raw)
+    try {
+      await jar.set({
+        url: 'https://www.bilibili.com',
+        name,
+        value,
+        domain: '.bilibili.com',
+        path: '/',
+        secure: true,
+        sameSite: 'no_restriction',
+        expirationDate,
+      })
+    } catch (e) {
+      log?.warn('[auth] 同步 Cookie 给浏览器失败', { name, message: e?.message })
+    }
+  }
+}
+
+/** 退出登录：浏览器里那份也要清掉，否则 iframe 还是登录态 */
+async function clearBiliCookiesInBrowser() {
+  const jar = electronSession.defaultSession.cookies
+  for (const name of BILI_COOKIE_NAMES) {
+    try {
+      await jar.remove('https://www.bilibili.com', name)
+    } catch {
+      /* noop */
+    }
+  }
+}
+
+/**
+ * 给 B 站视频 CDN 的媒体请求补上 Referer。
+ *
+ * 视频画面现在走原生 <video> 直接播 platform=html5 取来的流（见
+ * electron/bilibili/video.cjs 的 videoPlayUrl）。流地址在 bilivideo 的 CDN 上，
+ * **认 Referer**：没有 `https://www.bilibili.com/` 就可能被防盗链挡成 403。
+ * 以前画面走内嵌 iframe 时请求自带正确的 Referer，感知不到这条规矩；
+ * 换原生 <video> 之后请求从我们的会话发出去，就得自己补上。
+ * （在 <video> 标签上写 referrerPolicy 是不够的 —— 那只能控制「带不带页面地址」，
+ * 控制不了「换成 B 站想要的那一个」，所以在网络层统一注入。）
+ *
+ * 域名清单按 B 站实际在用的 CDN 根域收口：bilivideo.com / bilivideo.cn /
+ * akamaized.net（upos 的海外镜像）。没写端口 = 任何端口都匹配
+ * （实测存在 mcdn.bilivideo.cn:4483 这种带端口的地址）。
+ */
+function installVideoRefererHeader() {
+  try {
+    electronSession.defaultSession.webRequest.onBeforeSendHeaders(
+      {
+        urls: ['*://*.bilivideo.com/*', '*://*.bilivideo.cn/*', '*://*.akamaized.net/*'],
+      },
+      (details, callback) => {
+        details.requestHeaders.Referer = 'https://www.bilibili.com/'
+        callback({ requestHeaders: details.requestHeaders })
+      },
+    )
+  } catch (e) {
+    log?.warn('[video] Referer 头注入失败（视频画面可能被 CDN 防盗链挡住）', e?.message)
+  }
+}
 
 async function startLive(roomIdInput) {
   ensureSession()
@@ -1613,6 +1884,10 @@ async function handleMusicRequest(ev, keyword) {
   const m = cfg.music || {}
   const kw = String(keyword || '').trim()
   if (!kw) return
+  // BV 号优先：观众发「点歌 BV1xx…」或整条视频链接，走的是视频那条路，
+  // 拿去网易云搜歌名必然搜不到。链接可能很长，长度限制对视频不适用。
+  const bvid = BVIDEO.parseBvid(kw)
+  if (bvid) return handleVideoRequest(ev, bvid)
   if (kw.length > (Number(m.maxKeywordLength) || 30)) return
 
   const name = ev.username || '观众'
@@ -1663,6 +1938,49 @@ async function handleMusicRequest(ev, keyword) {
   }
 }
 
+/**
+ * 观众发「点歌 BV号 / 视频链接」时走这里。
+ * 和点歌同一套节流、回执、播报 —— 对观众来说这就是「点了个东西」。
+ */
+async function handleVideoRequest(ev, bvid) {
+  const cfg = store.get()
+  const m = cfg.music || {}
+  const name = ev.username || '观众'
+  const id = ev.uid || ev.username || 'anon'
+  const now = Date.now()
+  const prev = musicCooldown.get(id) || 0
+  const cd = Number(m.perUserCooldownMs) || 30000
+  if (now - prev < cd) return
+  musicCooldown.set(id, now)
+  for (const [k, v] of musicCooldown) if (now - v > 600000) musicCooldown.delete(k)
+
+  try {
+    // 带上登录身份查：会员专属视频游客查不到
+    ensureSession()
+    const v = await BVIDEO.videoInfo(bvid, { session, mode: net.resolveMode('bilibili', cfg) })
+    const r = musicEnqueue({ kind: 'video', ...v }, name)
+    if (!r.ok) {
+      if (m.replyInChat !== false) await replyChat('播放列表满了，等主播放完几个再来')
+      return
+    }
+    if (m.replyInChat !== false) {
+      await replyChat(`已点视频：${v.title}${v.up ? `（UP：${v.up}）` : ''}（第 ${r.position} 位）`)
+    }
+    if (m.announce !== false && cfg.tts?.enabled) {
+      if (speech.queue.length > 24) speech.queue.shift()
+      speech.queue.push({
+        text: `${speakName(name, cfg.tts)}点了一个视频${v.title}`,
+        style: cfg.tts.stylePrompt || '',
+        meta: { type: 'music' },
+      })
+      pumpSpeech()
+    }
+  } catch (e) {
+    console.warn('[video] 点视频失败：', e.message)
+    if (m.replyInChat !== false) await replyChat(`这个视频点不了：${e.message}`)
+  }
+}
+
 /** 绑定完成后念一句确认词，用的是新音色本身 */
 function previewBinding(profile, name) {
   if (speech.queue.length > 24) speech.queue.shift()
@@ -1705,6 +2023,103 @@ function isBlocked(text, blockWords) {
     .filter(Boolean)
   const lower = text.toLowerCase()
   return words.some((w) => lower.includes(w.toLowerCase()))
+}
+
+/* ------------------------ 纯标点弹幕 → 语气词 ------------------------
+   观众有时候整条弹幕只发一个符号（「？」「！」「…」）。这些内容过完过滤直接进
+   TTS，而 TTS 对孤立符号基本不出声 —— 表现就是「他发了，直播间没听到」。
+   按符号换成一句对应语气的语气词：原文没有实词，所以这不是替观众加话，
+   只是把他本来就有的语气说出口。 */
+
+/** 全角/半角统一成半角；两点以上的点收敛成一个省略号 */
+function normalizeTone(s) {
+  return String(s || '')
+    .replace(/？/g, '?')
+    .replace(/！/g, '!')
+    .replace(/[。．]/g, '.')
+    .replace(/～/g, '~')
+    .replace(/\.{2,}|…+/g, '…')
+}
+
+/**
+ * 这条内容是不是「只有标点」：剥完空白和符号什么都不剩才算。
+ * 连续同符号先折叠 —— 「？？？」和「？」是同一个语气，别念成三倍惊讶。
+ * 认不出的组合（'?~' 这种）返回空，原样念，不乱猜。
+ */
+function toneKeyOf(content) {
+  let s = normalizeTone(String(content || '').replace(/\s+/g, ''))
+  if (!s) return ''
+  s = s.replace(/(.)\1+/g, '$1')
+  if (s === '…') return '…'
+  if (/^[?!.~]+$/.test(s)) return s
+  return ''
+}
+
+/**
+ * 一张表 → { 符号: [候选词…] }。每行「符号 词1 词2 …」，
+ * 少于两段的行（只有符号、没说法的）不算 —— 那正好等于「这个符号保持静音」。
+ *
+ * 符号用 toneKeyOf 收拾，和「观众发来的内容」走同一套判定，两边不会各认各的。
+ */
+function parseToneTable(raw) {
+  const out = {}
+  for (const line of String(raw || '').split('\n')) {
+    const parts = line.trim().split(/\s+/).filter(Boolean)
+    if (parts.length < 2) continue
+    const key = toneKeyOf(parts[0])
+    if (!key) continue
+    out[key] = parts.slice(1)
+  }
+  return out
+}
+
+/** 内置表的原文。**只在 store 里存一份**（见 store.cjs 的 builtinTones），这里不另抄 */
+function builtinToneText() {
+  return String(STORE_DEFAULTS?.tts?.interjection?.builtinTones || '')
+}
+
+/**
+ * 当前生效的词表：主播自己写的那张优先，留空或整张写坏了就回落内置 ——
+ * 写坏一句就一声不吭地全静音，比念错还难查。
+ */
+function toneTable(t) {
+  const mine = parseToneTable(t?.interjection?.tones)
+  if (Object.keys(mine).length) return mine
+  return parseToneTable(t?.interjection?.builtinTones || builtinToneText())
+}
+
+/** 同一个符号最近念过的词。连着两条都念「啊？」比静音还难听 */
+const toneRecent = new Map()
+function pickTone(key, table) {
+  const list = table[key] || []
+  if (!list.length) return ''
+  let pool = list.filter((w) => !(toneRecent.get(key) || []).includes(w))
+  if (!pool.length) pool = list.slice()
+  const word = pool[Math.floor(Math.random() * pool.length)]
+  const next = (toneRecent.get(key) || []).concat(word)
+  // 至少留一个候选是「没念过」的，否则随机就退化成轮播
+  toneRecent.set(key, next.slice(-Math.max(1, list.length - 1)))
+  return word
+}
+
+/**
+ * 把拼好的播报句里那段「只有标点」的内容换成语气词。
+ * 只在**去重之后**调用：去重按原文比对，先转的话同一个「？」会变出三种说法
+ * 绕过去重，20 秒内连念三遍。
+ */
+function applyTone(text, content, t) {
+  const ij = t?.interjection
+  if (!ij || ij.enabled === false) return text
+  const key = toneKeyOf(content)
+  if (!key) return text
+  // 省略号默认保持静音：无语就是无语，不替他找词
+  if (key === '…' && !ij.ellipsis) return text
+  const word = pickTone(key, toneTable(t))
+  if (!word) return text
+  const c = String(content || '').trim()
+  const i = c ? text.lastIndexOf(c) : -1
+  if (i < 0) return word
+  return text.slice(0, i) + word + text.slice(i + c.length)
 }
 
 /**
@@ -1824,7 +2239,8 @@ function maybeSpeak(ev) {
 
   if (speech.queue.length > 24) speech.queue.shift()
   speech.queue.push({
-    text,
+    // 纯标点弹幕进队列前才换成语气词（去重/冷却都按上面的原文算过了）
+    text: applyTone(text, ev.content, t),
     style: profile && profile.stylePrompt ? profile.stylePrompt : t.stylePrompt,
     profile: profile || null,
     meta: { type: ev.type, username: ev.username, voiceName: profile?.name || '' },
@@ -1900,26 +2316,153 @@ function pruneTtsCache() {
 }
 
 /**
+ * 备用嗓子的配置。
+ *
+ * 候选只有 Edge（免费·免密钥）和系统语音（本地·离线）两个 —— 备用的意义就是
+ * 「不依赖任何账号和额度」，所以换成另一个付费平台没有意义。
+ * 两者都挂了才算真失败（Edge 也要联网，断网时系统语音是最后一道）。
+ */
+function fallbackCfg(t, provider) {
+  const fb = t.fallback || {}
+  const id = provider || (fb.provider === 'system' ? 'system' : 'edge')
+  const speed = Number(t.speed) || 1
+  return {
+    provider: id,
+    protocol: id === 'system' ? 'sapi' : 'edge-tts',
+    baseUrl: '',
+    apiKey: '',
+    model: '',
+    // 系统语音没得挑（用本机默认），Edge 默认给晓晓
+    voice: id === 'system' ? '' : String(fb.voice || '').trim() || 'zh-CN-XiaoxiaoNeural',
+    format: id === 'system' ? 'wav' : 'mp3',
+    speed,
+    volume: Number(t.volume) || 0.9,
+    pitch: t.pitch || '+0Hz',
+    rate: `${speed >= 1 ? '+' : '-'}${Math.abs(Math.round((speed - 1) * 100))}%`,
+    mimoMode: 'preset',
+    designPrompt: '',
+    cloneFile: '',
+    proxy: store.get().proxy,
+  }
+}
+
+/** 备用嗓子的尝试顺序：先按配置来，系统语音兜底（它完全离线） */
+function fallbackChain(t) {
+  const first = t.fallback?.provider === 'system' ? 'system' : 'edge'
+  return first === 'system' ? ['system'] : ['edge', 'system']
+}
+
+/** 冷却状态：until 之后才回去试原平台。reason 只用于日志和提示文案 */
+const ttsFallback = { until: 0, reason: '' }
+
+function fallbackActive() {
+  return ttsFallback.until > Date.now()
+}
+
+function fallbackLabel(reason) {
+  if (reason === 'credit') return '额度用完或被限流'
+  if (reason === 'network') return '连不上平台（超时或断网）'
+  if (reason === 'server') return '平台自己出错'
+  return '合成失败'
+}
+
+function providerLabel(id) {
+  return id === 'system' ? '系统语音' : id === 'edge' ? 'Edge 朗读' : id
+}
+
+/** 进入冷却。冷却期内不再去撞原平台 —— 否则每条弹幕都要先卡满一次超时才降级 */
+function enterFallback(provider, reason, err) {
+  const t = store.get().tts || {}
+  const cd = Number(t.fallback?.cooldownMs) || 0
+  if (!ttsFallback.until) {
+    // 只在「刚切过去」那一刻说一次，不然每条弹幕弹一次提示，等于刷屏
+    send('tts:notice', {
+      message:
+        `${fallbackLabel(reason)}，${cd > 0 ? `${Math.round(cd / 60000)} 分钟内` : '暂时'}先用${providerLabel(provider)}念。`,
+      reason,
+      provider,
+    })
+  }
+  ttsFallback.until = cd > 0 ? Date.now() + cd : 0
+  ttsFallback.reason = reason
+  log?.warn('[tts] 在线合成失败，已换备用嗓子', provider, fallbackLabel(reason), err?.message || String(err))
+}
+
+/** 原平台又通了：退出冷却，让它接着用 */
+function leaveFallback() {
+  if (!ttsFallback.until && !ttsFallback.reason) return
+  ttsFallback.until = 0
+  ttsFallback.reason = ''
+  send('tts:notice', { message: '在线语音恢复了，已经换回原来的嗓子。' })
+  log?.info('[tts] 在线合成恢复，已退出备用嗓子')
+}
+
+/**
  * 带缓存的合成。三条会发声的路径（弹幕播报 / 语音测试 / 音色试听）都走这里。
  * 返回 { base64, mime, cached } —— cached 只用于日志和排错，不影响播放逻辑。
+ *
+ * opts.allowFallback：音色试听要传 false —— 那边是在**验音色**，
+ * 悄悄换成别的嗓子，用户会以为自己配的那个是好的。
  */
-async function synthesizeWithCache(cfg, text, style) {
+async function synthesizeWithCache(cfg, text, style, opts = {}) {
   const p = cachePolicy()
-  const input = { cfg, text, style }
-  if (ttsCache && p.enabled) {
-    const hit = ttsCache.get(input)
-    if (hit) return { base64: hit.base64, mime: hit.mime, cached: true }
+  const t = store.get().tts || {}
+  const run = async (c) => {
+    const input = { cfg: c, text, style }
+    if (ttsCache && p.enabled) {
+      const hit = ttsCache.get(input)
+      if (hit) return { base64: hit.base64, mime: hit.mime, cached: true }
+    }
+    const audio = await synthImpl(c, text, style)
+    // Fish 用兜底模型（一般是付费额度没了，自动降级到免费模型）出声时不缓存：
+    // 等平台恢复后同一个配置会出「正品」音频，缓存住旧的会让人以为一直没恢复。
+    const cachable = Boolean(ttsCache && p.enabled && audio?.base64 && !audio.fallback)
+    if (cachable) {
+      ttsCache.put(input, audio)
+      // 每新增一条就核一次配额，免得短时间内大量新句子把磁盘撑到上限之外
+      pruneTtsCache()
+    }
+    return { ...audio, cached: false }
   }
-  const audio = await synthesize(cfg, text, style)
-  // Fish 用兜底模型（一般是付费额度没了，自动降级到免费模型）出声时不缓存：
-  // 等平台恢复后同一个配置会出「正品」音频，缓存住旧的会让人以为一直没恢复。
-  const cachable = Boolean(ttsCache && p.enabled && audio?.base64 && !audio.fallback)
-  if (cachable) {
-    ttsCache.put(input, audio)
-    // 每新增一条就核一次配额，免得短时间内大量新句子把磁盘撑到上限之外
-    pruneTtsCache()
+
+  // 备用嗓子也只是「另一个 TTS」，它自己挂了不该再回退一次（否则两份配置来回打转）
+  const online = cfg && cfg.provider !== 'edge' && cfg.provider !== 'system'
+  const fbEnabled = online && opts.allowFallback !== false && t.fallback?.enabled !== false
+
+  if (fbEnabled && fallbackActive()) {
+    const out = await runFallbackChain(t, run)
+    if (out) return { ...out, fallbackReason: ttsFallback.reason || 'credit' }
+    // 冷却期内连备用也没出声：清掉冷却，让下一条回去撞原平台碰碰运气
+    ttsFallback.until = 0
+    throw new Error('备用嗓子也没合成出来，稍后再试')
   }
-  return { ...audio, cached: false }
+
+  try {
+    const audio = await run(cfg)
+    leaveFallback()
+    return audio
+  } catch (e) {
+    if (!fbEnabled || !canFallback(e)) throw e
+    const out = await runFallbackChain(t, run)
+    if (out) {
+      enterFallback(out.fallbackProvider, classifyFailure(e), e)
+      return { ...out, fallbackReason: classifyFailure(e) }
+    }
+    throw e
+  }
+}
+
+/** 按备用链依次试，第一个出声的就用它。全都哑了返回 null（这时才真的报错） */
+async function runFallbackChain(t, run) {
+  for (const id of fallbackChain(t)) {
+    try {
+      const audio = await run(fallbackCfg(t, id))
+      if (audio?.base64) return { ...audio, fallbackProvider: id }
+    } catch (e) {
+      log?.warn('[tts] 备用嗓子也没出声', id, e.message || String(e))
+    }
+  }
+  return null
 }
 
 async function runSpeech(item) {
@@ -2030,6 +2573,8 @@ function registerIpc() {
       })
       // 登录成功这里一定有一份完整凭据；再存一次，这次允许覆盖（扫码拿到的就是最新的）
       persistCredentials('overwrite')
+      // 刚登录：把凭据同步给浏览器，内嵌播放器才是登录身份
+      syncBiliCookiesToBrowser().catch(() => {})
       const info = await getLoginInfo()
       send('bili:login', info)
       return { ok: true, info }
@@ -2049,6 +2594,7 @@ function registerIpc() {
     store.patch({
       credentials: { SESSDATA: '', bili_jct: '', DedeUserID: '', buvid3: '', buvid4: '', refreshToken: '', savedAt: 0 },
     })
+    await clearBiliCookiesInBrowser()
     return { ok: true }
   })
 
@@ -2129,10 +2675,12 @@ function registerIpc() {
   ipcMain.handle('tts:test', async () => {
     const t = store.get().tts || {}
     const started = Date.now()
+    // 这里是「验嗓子」，不是播报：换成别的嗓子就听不出配置到底对不对了
     const audio = await synthesizeWithCache(
       ttsCfg(t),
       '语音播报测试成功，你现在可以听到我的声音了。',
       t.stylePrompt,
+      { allowFallback: false },
     )
     // 直接播放，省得测完还不知道效果
     send('tts:play', { ...audio, text: '语音播报测试成功', meta: { type: 'test' }, volume: t.volume })
@@ -2246,7 +2794,51 @@ function registerIpc() {
 
   ipcMain.handle('music:state', () => musicSnapshot())
 
+  /**
+   * 跨窗口播放权的中继（归属规则见 src/lib/music-engine.tsx 顶部）。
+   * 主进程自己不碰播放器，只做两件事：把「拥有播放权的窗口」推来的进度心跳
+   * 广播给其余窗口（它们的界面照着动）；把非拥有者的播放/暂停/拖进度转给拥有者。
+   */
+  ipcMain.on('music:tick-push', (_e, p) => {
+    // 存一份底：新挂载的窗口（浮窗）拉快照时把镜像进度一次性补上
+    if (p && typeof p === 'object') {
+      musicLastTick = {
+        key: String(p.key || ''),
+        pos: Number(p.pos) || 0,
+        dur: Number(p.dur) || 0,
+        playing: Boolean(p.playing),
+        at: Date.now(),
+      }
+    }
+    send('music:tick', p)
+    // 叠加层的视频镜像也靠这份心跳对齐进度（OBS 里放视频画面用）
+    if (overlay) overlay.broadcast('musictick', p)
+  })
+  ipcMain.on('music:remote', (_e, cmd) => send('music:remote', cmd))
+
   ipcMain.handle('music:enqueue', (_e, song, requester) => musicEnqueue(song, requester))
+
+  /* B 站视频点播：点歌页里粘 BV 号 / 链接先查一下是不是有这么个视频，
+     确认了再入队（不然队列里躺着一条点不开的东西） */
+  ipcMain.handle('music:videoInfo', async (_e, text) => {
+    const cfg = store.get()
+    ensureSession()
+    return BVIDEO.videoInfo(text, { session, mode: net.resolveMode('bilibili', cfg) })
+  })
+
+  ipcMain.handle('music:enqueueVideo', (_e, v, requester) => musicEnqueue({ kind: 'video', ...(v || {}) }, requester))
+
+  /**
+   * 视频的**整条播放地址**走这条路：platform=html5 的音视频混流 mp4，
+   * 原生 <video> 直接播（画面和声音同一个元素）。见 bilibili/video.cjs。
+   * CP_E2E 下可换成桩（本地 data: URL），见 __cpE2E.video。
+   */
+  ipcMain.handle('music:videoAudio', async (_e, v) => {
+    const cfg = store.get()
+    ensureSession()
+    if (typeof videoAudioProvider === 'function') return videoAudioProvider(v || {})
+    return BVIDEO.videoPlayUrl(v || {}, { session, mode: net.resolveMode('bilibili', cfg) })
+  })
 
   /** 主播手动开始播队列第一首 */
   ipcMain.handle('music:play', () => {
@@ -2567,7 +3159,13 @@ function registerIpc() {
     } else {
       throw new Error('要试听哪个音色？')
     }
-    const audio = await synthesizeWithCache(synthCfg, '音色试听，大家好，我是你的新声音。', '').catch((e) => {
+    // 试听 = 验这个音色本身，绝不能悄悄换成备用嗓子（否则坏的 Key 听起来像是好的）
+    const audio = await synthesizeWithCache(
+      synthCfg,
+      '音色试听，大家好，我是你的新声音。',
+      '',
+      { allowFallback: false },
+    ).catch((e) => {
       // 试听失败是用户最需要线索的地方，落一份日志，省得只能看到界面上一句话
       log?.warn(
         '[voices:test] 失败',
@@ -2820,6 +3418,9 @@ async function ensureOverlay(port) {
     overlay.configProvider = () => store.get().overlay
     overlay.faceProvider = () => (faces ? [...faces.cache].map(([src, data]) => ({ src, data })) : [])
     overlay.musicProvider = () => musicSnapshot()
+    // 叠加层 <video> 播视频走本服务的流代理（CDN 防盗链），这里供真地址。
+    // 缓存在 musicAdvance 换条目时整包作废，不会有旧 key 的遗物流。
+    overlay.streamProvider = (key) => musicStreamCache.get(String(key || '')) || null
     overlay.lyricProvider = () => snapshotLyric()
     // 音色选择面板：OBS 中途连上时补发当前那一条，不然要等下一个观众搜才出现
     overlay.voicePickProvider = () => pickQueue.snapshot()
@@ -2954,6 +3555,8 @@ function bootstrap() {
     `Fish Key ${keySummary(boot.platformKeys?.fish) || '无'}`,
   )
   registerIpc()
+  // 视频 CDN 的防盗链头要在任何媒体请求发出去之前装好
+  installVideoRefererHeader()
   createWindow()
 
   // TTS 缓存：同一套音色 + 同一句话只合成一次，TTL 内复用。
@@ -2967,6 +3570,8 @@ function bootstrap() {
 
   // 有存过的凭据就立刻验一次，顺带把登录状态推给界面，不用等用户点开连接页
   verifyStoredLogin()
+  // 上次登录的 Cookie 同步给浏览器：B 站视频的内嵌播放器要用它（游客身份看不了会员内容）
+  syncBiliCookiesToBrowser().catch(() => {})
 
   // 叠加层是纯本地服务，开销可以忽略，所以默认就拉起来 ——
   // 之前要手动点「启动」，忘了点就会以为「OBS 没效果」。除非用户主动停过。
@@ -3031,6 +3636,43 @@ function bootstrap() {
       store,
       replies,
       speech,
+      /** 纯标点弹幕 → 语气词。结果带随机且有「最近念过」的状态，直接问转换结果最稳 */
+      tone: {
+        keyOf: (content) => toneKeyOf(content),
+        apply: (text, content, cfg) => applyTone(text, content, cfg || store.get().tts),
+        table: () => toneTable(store.get().tts),
+      },
+      /**
+       * 合成回退（在线语音挂了 → 换免费嗓子）的测试口。
+       * `setSynthesizer` 换掉真正的合成实现，e2e 就能注入「超时」「402 额度用完」
+       * 这类只能靠线上触发的失败，不必真去撞 fish.audio。
+       */
+      ttsFallback: {
+        synth: (cfg, text, style, opts) => synthesizeWithCache(cfg, text, style, opts),
+        setSynthesizer: (fn) => {
+          synthImpl = typeof fn === 'function' ? fn : synthesize
+        },
+        state: () => ({ ...ttsFallback, active: fallbackActive() }),
+        reset: () => {
+          ttsFallback.until = 0
+          ttsFallback.reason = ''
+        },
+        classify: (e) => classifyFailure(e),
+        canFallback: (e) => canFallback(e),
+      },
+      /**
+       * 关窗缩托盘的测试口。托盘是系统级的（截不了图也没法比对），
+       * 真正能验的是「点×之后窗口还在不在、看不看得见、图标建没建起来」。
+       */
+      tray: {
+        mainWindow: () => win,
+        show: () => showMainWindow(),
+        icon: () => Boolean(tray && !tray.isDestroyed()),
+        iconPath: () => trayIconPath(),
+        quitting: () => quitting,
+        /** 走真退出那条路（托盘菜单里的「退出」）。调了它就准备收尾 */
+        quit: () => quitApp(),
+      },
       currentProfileOf,
       /** 音色选择面板的队列。断言「台上画的那一帧」和「主进程排的队」是不是同一件事 */
       pickQueue,
@@ -3077,6 +3719,19 @@ function bootstrap() {
         /** 数一数真正发出去的请求次数，用来分辨「定时器没跳」和「跳了但没更新」 */
         calls: () => viewersFetches,
       },
+      /**
+       * B 站视频那条链路的派发口。
+       * `setUrlProvider` 把取流换成桩（e2e 用本地 data: URL，不联网也能验
+       * 「真渲染层引擎 + 真 <video> 元素」的整条链路）；enqueue/snapshot
+       * 直接操作队列，省得测试去够渲染层的 API。
+       */
+      video: {
+        setUrlProvider: (fn) => {
+          videoAudioProvider = fn
+        },
+        enqueue: (item, requester) => musicEnqueue({ kind: 'video', ...(item || {}) }, requester || 'e2e'),
+        snapshot: () => musicSnapshot(),
+      },
     }
   }
 }
@@ -3104,6 +3759,14 @@ app.on('window-all-closed', () => {
 app.on('before-quit', () => {
   stopLive()
   if (overlay) overlay.stop()
+  // 托盘不主动销毁的话，Windows 上退出后图标会挂一会儿才被系统清掉，
+  // 看着就像「没退干净」
+  if (tray) {
+    try {
+      tray.destroy()
+    } catch {}
+    tray = null
+  }
   // 索引是节流写的，退出前补一次落盘，别把「这一轮命中过几次」丢了
   if (cachePruneTimer) clearInterval(cachePruneTimer)
   try {

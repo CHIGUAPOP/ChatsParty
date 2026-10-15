@@ -62,6 +62,11 @@ function clampPanel(panel, cfg) {
     opacity: num(f.opacity, 0.95, 0.2, 1),
     // 「字体大小」的实现：窗口自身 zoom，连带布局一起缩
     scale: num(f.scale, 100, 50, 200),
+    /**
+     * 静音开关（只对音乐浮窗有意义）：里面有 B 站视频时，声音是渲染层自己放的
+     * 那一路音频，得有个能一键闭麦的地方 —— 主播切画面/接电话时用得上。
+     */
+    muted: f.muted === true,
     bounds: {
       width: Math.round(num(b.width, dw, 200, 4000)),
       height: Math.round(num(b.height, dh, 160, 4000)),
@@ -119,6 +124,20 @@ class FloatWindows {
     this.setTimers = {}
     /** panel 名 → sync 串行队列（面板之间互不干扰，各排各的） */
     this.queues = {}
+    /**
+     * 「已经写到窗口上的值」，键是 `${win.id}:opacity|zoom|top`。
+     *
+     * 存在的唯一理由：`setZoomFactor` 会让整页重新布局，页面里挂着视频 iframe 时
+     * 一次重排就是画面整个重画。而 applyTo 会被每次配置变更调到（包括拖位置松手后
+     * 400ms 那次落盘）—— 不复用旧值就会「收起浮窗时整个界面抽一下」。
+     * 窗口关掉时要把它的键清掉（id 会被复用）。
+     */
+    this.applied = {}
+    /**
+     * panel 名 → 上一次落盘的位置/大小。用来挡住「值没变也写一遍」——
+     * 那一笔会绕一圈回到 applyTo 里的 setZoomFactor（整页重排 = 界面抽搐）。
+     */
+    this.lastBounds = {}
   }
 
   say(msg, extra) {
@@ -144,6 +163,7 @@ class FloatWindows {
         opened: this.isOpen(p),
         opacity: c.opacity,
         scale: c.scale,
+        muted: c.muted,
       }
     }
     return { panels, alwaysOnTop: cfg.alwaysOnTop !== false }
@@ -314,8 +334,18 @@ class FloatWindows {
     this.say('落位校准五轮还没摆准，就这样了')
   }
 
-  /** 把旋钮落到窗口上 */
-  applyTo(w, c, alwaysOnTop) {    if (!w || w.isDestroyed()) return
+  /**
+   * 把旋钮落到窗口上。
+   *
+   * **每个值都先比一下再写**，这不是抠性能，是抠手感：
+   * `setZoomFactor` 会把整页重新布局一遍 —— 页面里挂着 B 站视频 iframe 时，
+   * 一次重排就是画面整个重画。而这个函数会被**每一次**配置变更调到，
+   * 包括「拖动位置松手后 400ms 的那次落盘」（store 写完 → config:changed →
+   * syncAll → 这里）。结果就是：**收起浮窗的瞬间整个界面抽一下**。
+   * 值没变就别碰它，抽搐自然没了。
+   */
+  applyTo(w, c, alwaysOnTop) {
+    if (!w || w.isDestroyed()) return
     /**
      * 透明度**必须走窗口级 setOpacity**（DWM 层，本机禁了 GPU 合成也有效）。
      * 试过让渲染层把 opacity 写在内容区 CSS 上 —— 窗口底板是不透明的深色，
@@ -327,23 +357,32 @@ class FloatWindows {
      * 50% → 68%，20% → 41% —— 拉得再低文字也不会淡成影子。
      * 配合渲染层 is-dim（低不透明度时文字加阴影、次要文字提亮）双保险。
      */
-    try {
-      w.setOpacity(Math.pow(c.opacity, 0.55))
-    } catch {
-      /* noop */
-    }
-    if (alwaysOnTop !== undefined) {
+    const wantOpacity = Math.pow(c.opacity, 0.55)
+    if (this.applied[`${w.id}:opacity`] !== wantOpacity) {
       try {
-        // screen-saver 这一档才能真正压在全屏游戏上面，普通档会被盖住
-        w.setAlwaysOnTop(alwaysOnTop, 'screen-saver')
+        w.setOpacity(wantOpacity)
+        this.applied[`${w.id}:opacity`] = wantOpacity
       } catch {
         /* noop */
       }
     }
-    try {
-      w.webContents.setZoomFactor(c.scale / 100)
-    } catch {
-      /* noop */
+    if (alwaysOnTop !== undefined && this.applied[`${w.id}:top`] !== alwaysOnTop) {
+      try {
+        // screen-saver 这一档才能真正压在全屏游戏上面，普通档会被盖住
+        w.setAlwaysOnTop(alwaysOnTop, 'screen-saver')
+        this.applied[`${w.id}:top`] = alwaysOnTop
+      } catch {
+        /* noop */
+      }
+    }
+    // 缩放是重排的大头：值没变就一个字都别写（见上面注释）
+    if (this.applied[`${w.id}:zoom`] !== c.scale) {
+      try {
+        w.webContents.setZoomFactor(c.scale / 100)
+        this.applied[`${w.id}:zoom`] = c.scale
+      } catch {
+        /* noop */
+      }
     }
   }
 
@@ -354,7 +393,7 @@ class FloatWindows {
       this.setTimers[panel] = null
       const cur = (this.o.getConfig() || {}).panels || {}
       const c = clampPanel(panel, cur[panel])
-      this.o.patchConfig({ panels: { [panel]: { opacity: c.opacity, scale: c.scale } } })
+      this.o.patchConfig({ panels: { [panel]: { opacity: c.opacity, scale: c.scale, muted: c.muted } } })
     }
     // 收之前先把「顺手记一笔」补上：用户拖完立刻关窗的话，那一笔还没落盘
     if (this.rememberTimers[panel]) {
@@ -366,7 +405,11 @@ class FloatWindows {
     if (!this.isOpen(panel)) return
     // 先把引用摘掉再关：closed 回调靠 this.wins[panel] === w 判断「是不是我们关的」，
     // 摘掉之后它就不会把开关拨回关（那是对「用户点浮窗里的 ×」才做的处理）
+    const goneId = w.id
     delete this.wins[panel]
+    // 顺手把「已经写上去的值」也清掉：窗口 id 会被复用，
+    // 留着旧值会让下一个复用这个 id 的窗口跳过 setOpacity/setZoomFactor
+    for (const k of Object.keys(this.applied)) if (k.startsWith(`${goneId}:`)) delete this.applied[k]
     try {
       w.close()
     } catch {
@@ -393,7 +436,7 @@ class FloatWindows {
     if (this.setTimers[panel]) clearTimeout(this.setTimers[panel])
     this.setTimers[panel] = setTimeout(() => {
       this.setTimers[panel] = null
-      this.o.patchConfig({ panels: { [panel]: { opacity: c.opacity, scale: c.scale } } })
+      this.o.patchConfig({ panels: { [panel]: { opacity: c.opacity, scale: c.scale, muted: c.muted } } })
       this.push()
     }, 400)
     return c
@@ -486,6 +529,24 @@ class FloatWindows {
     } catch {
       return
     }
+    /**
+     * **位置/大小没变就别写**。
+     *
+     * 这笔写盘会走 store → config:changed → syncAll → applyTo，
+     * 而 applyTo 里有 setZoomFactor（整页重排）。窗口静止时也照写的话，
+     * 每次开窗/收起都会平白触发一次全页重排 —— 屏幕上就是「界面抽一下」。
+     * 窗口刚建出来、settleBounds 摆位置的那几轮尤其明显。
+     */
+    const last = this.lastBounds[panel]
+    const same =
+      last &&
+      last.x === x &&
+      last.y === y &&
+      last.width === width &&
+      last.height === height &&
+      last.sf === sf
+    if (same) return
+    this.lastBounds[panel] = { x, y, width, height, sf }
     this.o.patchConfig({ panels: { [panel]: { bounds: { x, y, width, height, sf } } } })
   }
 

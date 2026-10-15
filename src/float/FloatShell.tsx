@@ -87,9 +87,9 @@ export default function FloatShell({ panel }: { panel: FloatPanel }) {
    * 关键是**绝不用主进程回流的状态盖回来** —— 之前滑块受控于 fs，拖完要等
    * 一次 IPC 往返才回显，松手那一拍先弹回旧值再应用，手感就是「不跟手 + 回弹」。
    */
-  const [knobs, setKnobs] = React.useState<{ opacity: number; scale: number } | null>(null)
-  const eff = knobs ?? { opacity: me?.opacity ?? 1, scale: me?.scale ?? 100 }
-  const turn = (p: { opacity?: number; scale?: number }) => {
+  const [knobs, setKnobs] = React.useState<{ opacity: number; scale: number; muted?: boolean } | null>(null)
+  const eff = knobs ?? { opacity: me?.opacity ?? 1, scale: me?.scale ?? 100, muted: me?.muted }
+  const turn = (p: { opacity?: number; scale?: number; muted?: boolean }) => {
     setKnobs({ ...eff, ...p })
     api.float?.set(panel, p).catch(() => {})
   }
@@ -102,6 +102,23 @@ export default function FloatShell({ panel }: { panel: FloatPanel }) {
       .then(setConfig)
       .catch(() => notify('没改成：配置没写进去', true))
   }
+
+  /**
+   * 静音。两个旋钮是一回事，改哪个都落同一份配置：
+   *  - 浮窗设置里那个开关写 float.panels.<panel>.muted（每个浮窗自己记着）
+   *  - 视频控件条上那颗喇叭写 video.muted（就是「音频出声」那一路的总开关）
+   * 所以读的时候取两者的并集 —— 任一处静音都该安静下来。
+   */
+  const musicMuted = Boolean(config?.video?.muted) || Boolean(me?.muted)
+  const patchMuted = (v: boolean) => {
+    setKnobs({ ...eff, muted: v })
+    api.float?.set(panel, { muted: v }).catch(() => {})
+    api.config
+      .patch({ video: { muted: v } })
+      .then(setConfig)
+      .catch(() => notify('没改成：配置没写进去', true))
+  }
+  const toggleMute = () => patchMuted(!musicMuted)
 
   // 低不透明度时的可读性补偿开关：窗口级透明是整扇窗一起淡，文字没法单独豁免
   //（DWM 逐像素乘 alpha）。这里在 < 75% 时切 is-dim —— 文字加阴影、次要文字提亮，
@@ -120,6 +137,15 @@ export default function FloatShell({ panel }: { panel: FloatPanel }) {
         onClick={() => setShowPop((v) => !v)}
       >
         <Icon name="settings" size={17} />
+      </button>
+      <button
+        type="button"
+        className="float-tbtn"
+        title="静音（只对音乐浮窗里的 B 站视频有效）"
+        aria-label="静音"
+        onClick={toggleMute}
+      >
+        <Icon name={musicMuted ? 'volMute' : 'vol'} size={17} />
       </button>
       <button
         type="button"
@@ -164,8 +190,15 @@ export default function FloatShell({ panel }: { panel: FloatPanel }) {
                 <Switch value={showFaces} onChange={patchShowFaces} />
               </div>
             )}
-            <div className="float-pop__hint">拖动马上生效，关掉浮窗也会记住；调得越低会自动多给文字补一点对比度</div>
-          </div>
+            {/*
+              静音放这里，是因为浮窗上没有别的常驻地方 —— 视频控件条要鼠标移到画面上
+              才出来，而「接个电话」这种事不该需要先把鼠标挪过去。
+            */}
+            <div className="float-pop__row">
+              <span>静音（视频声音）</span>
+              <Switch value={musicMuted} onChange={patchMuted} />
+            </div>
+            <div className="float-pop__hint">拖动马上生效，关掉浮窗也会记住；调得越低会自动多给文字补一点对比度</div>          </div>
         )}
 
         {/* 透明度走主进程的窗口级 setOpacity（CSS 淡化透不到窗后的桌面） */}

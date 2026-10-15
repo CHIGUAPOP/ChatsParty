@@ -55,31 +55,39 @@ function hostOf(url) {
   }
 }
 
+/**
+ * 网络错误的类别。带上它是为了让上层能**按类别决定怎么办**，而不用去匹配中文句子
+ * （「超时」和「额度用完」都值得换一条路走，Key 填错则不值得 —— 见 tts.cjs）。
+ */
+const NET_KIND = { TIMEOUT: 'timeout', DNS: 'dns', REFUSED: 'refused', TLS: 'tls', OTHER: 'other' }
+
 /** 把裸错误翻译成能照着做点什么的中文。已翻译过的不再套一层。 */
 function describeNetError(err, url) {
   if (err && err.netTranslated) return err
   const raw = String((err && (err.message || err)) || '')
   const host = hostOf(url)
-  const wrap = (m) => {
+  const wrap = (m, kind) => {
     const e = new Error(m)
     e.netTranslated = true
+    e.netKind = kind
     return e
   }
   if (/ERR_CONNECTION_TIMED_OUT|ETIMEDOUT|timeout|超时|ERR_TIMED_OUT|ERR_CONNECTION_RESET|ECONNRESET/i.test(raw)) {
     return wrap(
       `${host} 连不上（超时）。这个域名在国内通常直连不通，把上面的「外网请求」切成「走系统代理」，并确认代理软件已经开着。`,
+      NET_KIND.TIMEOUT,
     )
   }
   if (/ERR_NAME_NOT_RESOLVED|ENOTFOUND|getaddrinfo/i.test(raw)) {
-    return wrap(`${host} 域名解析失败，检查网络或 DNS 设置。`)
+    return wrap(`${host} 域名解析失败，检查网络或 DNS 设置。`, NET_KIND.DNS)
   }
   if (/ERR_CONNECTION_REFUSED|ECONNREFUSED/i.test(raw)) {
-    return wrap(`${host} 拒绝连接，如果走的是本地代理，确认代理端口还开着。`)
+    return wrap(`${host} 拒绝连接，如果走的是本地代理，确认代理端口还开着。`, NET_KIND.REFUSED)
   }
   if (/ERR_CERT|CERT_|SSL|ERR_PROXY/i.test(raw)) {
-    return wrap(`${host} 证书或代理握手失败：${raw}`)
+    return wrap(`${host} 证书或代理握手失败：${raw}`, NET_KIND.TLS)
   }
-  return wrap(`${host} 请求失败：${raw}`)
+  return wrap(`${host} 请求失败：${raw}`, NET_KIND.OTHER)
 }
 
 /**
@@ -357,4 +365,5 @@ module.exports = {
   checkEndpoint,
   hostOf,
   PROXY_SENSITIVE,
+  NET_KIND,
 }

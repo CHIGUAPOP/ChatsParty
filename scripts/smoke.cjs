@@ -199,6 +199,24 @@ function checkMusicOverlay() {
   ok('主进程给新客户端补发点歌状态', read(path.join(root, 'electron', 'main.cjs')).includes('overlay.musicProvider'))
   ok('叠加层支持补发', read(path.join(root, 'electron', 'overlay.cjs')).includes('musicProvider'))
 
+  // B 站图床对第三方 Referer 直接 403（实测 403）：OBS 浏览源的页面地址就是
+  // Referer —— 封面 img 必须显式 no-referrer，否则永远加载不出来只剩黑块
+  ok('叠加层封面不带 Referer（B 站图床 403 第三方 Referer）', /img\.referrerPolicy = 'no-referrer'/.test(overlayHtml))
+  // 视频条目（kind:'video'）在叠加层要有自己的标识，不能照着歌画
+  ok('叠加层区分视频条目', overlayHtml.includes("isVideo ? '正在播放 · 视频' : '正在播放'") && overlayHtml.includes("it.kind === 'video' ? '▶ ' : ''"))
+
+  // ---- 叠加层放视频：画面框 + 流代理 + 心跳镜像 ----
+  ok('叠加层视频条目画 16:9 画面框', /\.cp-mvideo\s*\{[^}]*aspect-ratio:\s*16\s*\/\s*9/s.test(overlayHtml))
+  ok('叠加层视频直连 data: 流、http(s) 走代理', overlayHtml.includes("v.src = /^data:/i.test(stream) ? stream : '/stream/video?key=' + encodeURIComponent(vkey)"))
+  ok('叠加层视频镜像静音（OBS 声音走应用本身）', overlayHtml.includes('v.muted = true'))
+  ok('叠加层接得住 musictick 心跳', /msg\.type === 'musictick'/.test(overlayHtml))
+  ok('叠加层同一条目不重建 video（重建会闪回开头）', overlayHtml.includes('if (!videoTag || videoKey !== vkey)'))
+  ok('主进程解析视频流随快照下发', read(path.join(root, 'electron', 'main.cjs')).includes('musicStreamCache') && read(path.join(root, 'electron', 'main.cjs')).includes('ensureCurrentStream()'))
+  ok('主进程把播放心跳推给叠加层', read(path.join(root, 'electron', 'main.cjs')).includes("overlay.broadcast('musictick', p)"))
+  ok('叠加层服务有视频流代理路由', read(path.join(root, 'electron', 'overlay.cjs')).includes("urlPath === '/stream/video'"))
+  ok('流代理带 B 站 Referer（CDN 防盗链 403 第三方）', read(path.join(root, 'electron', 'overlay.cjs')).includes("Referer: 'https://www.bilibili.com/'"))
+  ok('流代理透传 Range（拖进度要 206）', read(path.join(root, 'electron', 'overlay.cjs')).includes("headers.Range = String(req.headers.range)"))
+
   // 队列条数上限：不设上限的话，观众一口气点 20 首会把半个画面盖住。
   // 两条实现各写各的，所以直接比对**表达式本身**，保证截断规则一致
   const CLAMP = 'Math.min(Math.floor(v), 10)'
@@ -216,7 +234,8 @@ function checkMusicOverlay() {
   // 播放逻辑已经从 MusicPage 搬进常驻的 music-engine，闸门也就跟着搬过去了。
   const engine = read(path.join(root, 'src', 'lib', 'music-engine.tsx'))
   ok('状态没拉回来前不动播放器', /if \(!ready\) return/.test(engine))
-  ok('停止分支不会再抢在状态前面', /}, \[ready, state\.current\?\.id\]\)/.test(engine), '缺少 ready 依赖')
+  // ownsPlayback 也在依赖里：播放权翻回来时（音乐浮窗关掉），这个窗口要把当前这条接上
+  ok('停止分支不会再抢在状态前面', /}, \[ready, state\.current\?\.id, ownsPlayback/.test(engine), '缺少 ready 依赖')
 
   // 更要命的一个坑：播放器曾经住在 MusicPage 里，切走页面组件一卸载，
   // 订阅被摘、effect 停摆，一首歌放完没人接下一首 —— 必须切回点歌页才继续。
@@ -227,7 +246,7 @@ function checkMusicOverlay() {
   ok('MusicPage 改用引擎', /useMusicPlayer\(\)/.test(musicPage))
   ok('引擎挂在 App 层常驻', /MusicPlayerProvider/.test(app) && /music-engine/.test(app))
   // 播放器的回调必须活着 —— 一旦 Audio 的 onended 被摘，队列就永远停在上一首
-  ok('播完自动推进下一首', /el\.onended[\s\S]{0,80}api\.music\.next\(\)/.test(engine))
+  ok('播完自动推进下一首', /el\.onended[\s\S]{0,140}api\.music\.next\(\)/.test(engine))
 
   /* ---- 叠加层：整体缩放 / 字号 / 歌词 ---- */
 
@@ -797,6 +816,52 @@ async function testVoices() {
 
   console.log('\n[38] 桌面浮窗（弹幕/观众/礼物/音乐，弹出为浮窗）')
   testFloatWindow()
+
+  console.log('\n[39] 点 B 站视频（BV 号和歌同一条队列）')
+  testVideoQueue()
+
+  console.log('\n[40] 关掉主界面 = 缩到托盘（后台继续收弹幕）')
+  testTray()
+}
+
+/**
+ * 关窗缩托盘。
+ *
+ * 这段守的是一个「做反了比不做还糟」的点：点×之后如果应用真退出了，
+ * 弹幕、点歌、播报全断 —— 而主播点×只是想把窗口收起来。反过来，
+ * 只拦住关闭却不给托盘图标和退出菜单，用户就再也找不回界面、也关不掉进程。
+ * 所以两头都得有：拦得住，也退得出。
+ */
+function testTray() {
+  const root = path.join(__dirname, '..')
+  const read = (p) => fs.readFileSync(path.join(root, p), 'utf8')
+  const main = read('electron/main.cjs')
+  const page = read('src/pages/AppearancePage.tsx')
+  const apiSrc = read('src/lib/api.ts')
+  const pkg = JSON.parse(read('package.json'))
+
+  ok('默认点×是缩起来', readStoreDefaults().general?.closeToTray === true, readStoreDefaults().general)
+  ok(
+    '点×被拦下来并把窗口藏起来',
+    /win\.on\('close'/.test(main) && /e\.preventDefault\(\)/.test(main) && /win\.hide\(\)/.test(main),
+  )
+  ok('配置里关掉这项就真退出', /general\?\.closeToTray === false\) return/.test(main))
+  ok('缩进去时把托盘建起来', /win\.hide\(\)[\s\S]{0,200}ensureTray\(\)/.test(main))
+  ok('托盘菜单里有「退出」（不然就关不掉进程了）', /label: '退出'/.test(main))
+  ok('有真退出的口子', /function quitApp\(\)/.test(main) && /quitting = true/.test(main))
+  ok('点托盘图标能把界面找回来', /function showMainWindow\(\)/.test(main) && /tray\.on\('click'/.test(main))
+  ok('退出时销毁托盘（不然图标挂着像没退干净）', /before-quit[\s\S]{0,500}tray\.destroy\(\)/.test(main))
+  // build/ 不进 asar，打包后 build/icon.png 读不到 —— 托盘会变成空白图标
+  ok(
+    '托盘图标路径有兜底（打包后 / asar 内 / 开发目录）',
+    /process\.resourcesPath/.test(main) && /tray-icon\.png/.test(main) && /build', 'icon\.png/.test(main),
+  )
+  ok('界面上能关掉这项', /general: \{ closeToTray: v \}/.test(page))
+  ok('类型里有 general', /general\?:/.test(apiSrc))
+  ok('有托盘的端到端脚本', pkg.scripts['e2e:tray'] === 'electron scripts/e2e-tray.cjs', pkg.scripts['e2e:tray'])
+  // 「点×之后窗口还在不在」静态断言证明不了，得真点一次
+  const e2e = read('scripts/e2e-tray.cjs')
+  ok('e2e 真的点了一次 ×', /win\.close\(\)/.test(e2e) && /!w\.isVisible\(\)/.test(e2e))
 }
 
 /**
@@ -968,7 +1033,9 @@ function testFloatWindow() {
      本机画不出来）—— 所以拖可读性曲线抬低端 + 渲染层 is-dim 补对比度。 */
   ok(
     '透明度走窗口级 setOpacity + 可读性曲线（100%→100%，越低抬得越多）',
-    /setOpacity\(Math\.pow\(c\.opacity, 0\.55\)\)/.test(float) && !/opacity: eff\.opacity/.test(shell),
+    /setOpacity\(wantOpacity\)/.test(float) &&
+      /const wantOpacity = Math\.pow\(c\.opacity, 0\.55\)/.test(float) &&
+      !/opacity: eff\.opacity/.test(shell),
   )
   ok(
     '低不透明度时渲染层切 is-dim 补可读性（文字阴影 + 次要文字提亮）',
@@ -977,6 +1044,22 @@ function testFloatWindow() {
   ok('置顶用 screen-saver 档（普通档压不住全屏游戏）', /setAlwaysOnTop\(alwaysOnTop, 'screen-saver'\)/.test(float))
   ok('字体大小走窗口的 zoom', /setZoomFactor\(c\.scale \/ 100\)/.test(float))
   ok('加载完再压一次缩放（换页会重置）', /did-finish-load[\s\S]{0,200}?setZoomFactor/.test(float))
+  /**
+   * 抽搐的根因：applyTo 会被**每一次**配置变更调到（包括拖位置松手后 400ms 那次落盘），
+   * 而它无条件 setZoomFactor —— 那是一次整页重排，页面上挂着视频 iframe 时就是画面整个重画。
+   * 现在每个值都先跟上次写的比一比。
+   */
+  ok(
+    '没变的值不许再写窗口（setZoomFactor 会整页重排 = 收起浮窗时抽搐）',
+    /this\.applied\[`\$\{w\.id\}:zoom`\] !== c\.scale/.test(float) &&
+      /this\.applied\[`\$\{w\.id\}:opacity`\] !== wantOpacity/.test(float) &&
+      /this\.applied\[`\$\{w\.id\}:top`\] !== alwaysOnTop/.test(float),
+  )
+  ok('窗口关掉要清掉它的「已写值」（id 会被复用）', /startsWith\(`\$\{goneId\}:`\)\) delete this\.applied/.test(float))
+  ok(
+    '位置没变就别写盘（那笔会绕回 applyTo 触发重排）',
+    /const last = this\.lastBounds\[panel\]/.test(float) && /if \(same\) return/.test(float),
+  )
 
   // ---- 位置记忆 ----
   ok('拖完 / 拉完都记一笔', /on\('moved'/.test(float) && /on\('resized'/.test(float))
@@ -1005,7 +1088,7 @@ function testFloatWindow() {
   )
   ok(
     'close() 先摘引用再关窗（好让 closed 认出这是「我们关的」）',
-    /delete this\.wins\[panel\][\s\S]{0,120}?w\.close\(\)/.test(float),
+    /delete this\.wins\[panel\][\s\S]{0,400}?w\.close\(\)/.test(float),
   )
   ok('close() 也会把没落盘的旋钮补上', /close\(panel\) \{[\s\S]{0,200}?setTimers\[panel\]/.test(float))
   ok('sync 串行化（并发开关会互相踩）', /this\.queues\[panel\]/.test(float))
@@ -1582,6 +1665,15 @@ function testPackaging() {
     pkg.build.portable.unpackDirName,
   )
   ok('图标还在', pkg.build.win.icon === 'build/icon.ico')
+  // 托盘图标：build/ 不进 asar，打包后得靠 extraResources 另带一份
+  const extras = pkg.build.extraResources || []
+  ok(
+    '托盘图标打进包（缩到托盘后得有东西可点）',
+    extras.some((e) => e && /build[\\/]icon\.png$/.test(String(e.from || ''))),
+    extras,
+  )
+  ok('代码里也备了一份图标（前一条找不到时兜住）', fs.existsSync(path.join(root, 'electron', 'tray-icon.png')))
+  ok('electron/ 在打包清单里（上面那份才会跟进去）', pkg.build.files.includes('electron/**'))
 
   // ---- 本段最要紧的一条 ----
   const ignore = read('.gitignore')
@@ -2924,6 +3016,95 @@ function testLiveControls() {
     ok('恢复默认音色试听过转换', /speakName\(name, t\)\}换回默认音色了/.test(mainSrc))
     // 回执是发到直播间给人看的文字，不是念出来的 —— 保留真名，别顺手改了
     ok('文字回执仍用真名', /await replyChat\(p \? `\$\{name\}的音色：/.test(mainSrc))
+
+    /* ---------------- 纯标点弹幕 → 语气词 ----------------
+       观众整条弹幕只发一个「？」「！」时，TTS 念孤立符号基本不出声 ——
+       他发了，直播间却没听到。按符号换成对应语气的一句再念。
+       原文没有实词，所以这不是替观众加话，只是把语气说出口。 */
+    ok('有「只有标点」的判定', /function toneKeyOf\(/.test(mainSrc))
+    ok('连发符号先折叠（？？？ 不是三倍惊讶）', /replace\(\/\(\.\)\\1\+\/g, '\$1'\)/.test(mainSrc))
+    ok('认不出的组合不动它', /if \(\/\^\[\?!\.~]\+\$\/\.test\(s\)\) return s/.test(mainSrc))
+    ok('省略号默认保持静音', /if \(key === '…' && !ij\.ellipsis\) return text/.test(mainSrc))
+    ok('随机有「最近念过」的防重', /toneRecent/.test(mainSrc) && /Math\.random/.test(mainSrc))
+    // 【顺序】去重按原文比对：先转成「啊？」「嗯？」「诶？」就绕过去重了，
+    // 20 秒内连念三遍比静音还糟 —— 所以转换必须在去重之后
+    const iDedup = mainSrc.indexOf('if (t.mergeDuplicate)')
+    const iApply = mainSrc.indexOf('applyTone(text, ev.content, t)')
+    ok('去重在转换之前（否则三种说法绕过去重连念三遍）', iDedup > 0 && iApply > iDedup, { iDedup, iApply })
+    ok('只动播报文本，不动回执', !/replyChat\(applyTone/.test(mainSrc))
+  }
+
+  /* ---------------- 在线语音挂了 → 自动换免费嗓子 ----------------
+     超时 / 断网 / 额度用完 / 平台 5xx 时，换一个不依赖账号和额度的嗓子把这句念完，
+     直播间不会因为一个平台抽风就整段静音。Key 填错（401/403）**不**换 ——
+     那是配置错了，悄悄换掉的话用户永远发现不了自己的 Key 是坏的。 */
+  {
+    const root = path.join(__dirname, '..')
+    const readSrc = (p) => fs.readFileSync(path.join(root, p), 'utf8')
+    const mainSrc = readSrc(path.join('electron', 'main.cjs'))
+    const ttsSrc = readSrc(path.join('electron', 'tts.cjs'))
+    const netSrc = readSrc(path.join('electron', 'lib', 'net.cjs'))
+    const voicePage = readSrc(path.join('src', 'pages', 'VoicePage.tsx'))
+    const apiSrc = readSrc(path.join('src', 'lib', 'api.ts'))
+    const preload = readSrc(path.join('electron', 'preload.cjs'))
+    const d = readStoreDefaults()
+    ok('默认开着合成回退', d.tts?.fallback?.enabled === true)
+    ok('默认备用嗓子是 Edge（免费·免密钥）', d.tts?.fallback?.provider === 'edge')
+    ok('默认有冷却（不然每条弹幕都要先卡满一次超时）', Number(d.tts?.fallback?.cooldownMs) > 0)
+    ok('额度/限流算「平台这会儿不顶用」', /status === 402 \|\| status === 429/.test(ttsSrc) && ttsSrc.includes("return 'credit'"))
+    ok('超时/断网也算', /kind === 'timeout'/.test(ttsSrc) && ttsSrc.includes("return 'network'"))
+    ok('Key 错/没权限算配置错误', /status >= 400\) return 'config'/.test(ttsSrc))
+    // 回退集合里不能有 config —— 那会让「Key 填错了」被静音掩盖掉
+    ok('只有平台临时问题才换嗓子（配置错误不在回退集合里）', /new Set\(\['credit', 'network', 'server'\]\)/.test(ttsSrc))
+    // 靠中文句子匹配「是不是超时」不可靠，类别必须结构化地带在错误对象上
+    ok('网络错误的类别是结构化的（不靠匹配中文）', netSrc.includes('e.netKind = kind'))
+    ok('HTTP 失败把状态码挂在错误上', /function httpFail\(message, status\)/.test(ttsSrc))
+    ok('主进程有回退分支', mainSrc.includes('runFallbackChain') && mainSrc.includes('fallbackActive()'))
+    ok('不可回退的失败原样抛出', mainSrc.includes('!canFallback(e)'))
+    // 试听是在验音色，换成别的嗓子就听不出好坏 —— 两条试听路径都得关掉回退
+    ok('试听不换嗓子（两条路径都关掉了）', (mainSrc.match(/allowFallback: false/g) || []).length >= 2)
+    ok('换嗓子会通知一声（不悄悄换掉）', mainSrc.includes("send('tts:notice'") && mainSrc.includes('leaveFallback'))
+    ok('备用链最后还有本地系统语音（完全离线）', /first === 'system' \? \['system'\] : \['edge', 'system'\]/.test(mainSrc))
+    ok('语音页能改这个开关', voicePage.includes('setFallback({ enabled: v })') && voicePage.includes('自动换嗓子'))
+    ok('类型里有 fallback', /fallback\?: \{/.test(apiSrc))
+    ok('渲染层有通知通道', apiSrc.includes('onNotice') && preload.includes("'tts:notice'"))
+  }
+
+  {
+    const root = path.join(__dirname, '..')
+    const readSrc = (p) => fs.readFileSync(path.join(root, p), 'utf8')
+    const voicePage = readSrc(path.join('src', 'pages', 'VoicePage.tsx'))
+    const apiSrc = readSrc(path.join('src', 'lib', 'api.ts'))
+    const editor = readSrc(path.join('src', 'components', 'ToneTable.tsx'))
+    const toneMain = readSrc(path.join('electron', 'main.cjs'))
+    ok('语音页有语气词开关', voicePage.includes('纯标点弹幕念成语气词') && /setInterjection\(\{ enabled: v \}\)/.test(voicePage))
+    ok('语音页能改词表', /setInterjection\(\{ tones: v \}\)/.test(voicePage))
+    ok('语音页有省略号开关', /setInterjection\(\{ ellipsis: v \}\)/.test(voicePage))
+    ok('类型里有 interjection', /interjection\?:/.test(apiSrc))
+    ok('默认开着语气词', readStoreDefaults().tts?.interjection?.enabled === true)
+    ok('默认不念省略号', readStoreDefaults().tts?.interjection?.ellipsis === false)
+
+    /* 词表是**按符号逐条编辑**的（一个符号一行、候选词是能点掉的标签），
+       不是一整块要自己对着格式写的文本框 —— 后者用户根本看不出哪里能改 */
+    ok('语气词表有结构化编辑器', editor.includes('tone-word__del') && editor.includes('tone-add__input'))
+    ok('语音页用的是结构化编辑器（不再让用户裸写整张表）', voicePage.includes('<ToneTableEditor') && !/value=\{ij\.tones\}/.test(voicePage))
+    ok('删掉整行 = 那个符号保持静音（只写有说法的行）', /filter\(\(r\) => r\.words\.length\)/.test(editor))
+    // 界面上显示的是「内置表」，真正生效的也是它 —— 两处各存一份的话早晚会走岔
+    const builtin = readStoreDefaults().tts?.interjection?.builtinTones
+    const builtinKeys = String(builtin || '')
+      .split('\n')
+      .map((l) => l.trim().split(/\s+/)[0])
+      .filter(Boolean)
+    ok('内置语气词表在 store 里（唯一一份）', builtinKeys.length === 7, builtinKeys)
+    ok('主进程按 store 那份回落，不再各存一份', !/TONE_DEFAULTS/.test(toneMain) && /builtinTones/.test(toneMain))
+    const missingSym = builtinKeys.filter((k) => !editor.includes(`key: '${k}'`))
+    ok('编辑器列出了内置表里的每个符号', missingSym.length === 0, missingSym)
+    const toneFn = toneMain.slice(toneMain.indexOf('function toneTable'), toneMain.indexOf('function toneTable') + 300)
+    ok('留空或写坏都回落内置（不会一声不吭全静音）', toneFn.includes('tones') && toneFn.includes('builtinToneText()'))
+    // 全角 → 半角的映射两边各有一份（主进程 normalizeTone / 编辑器 foldSymbol），
+    // 只改一边的话，界面上显示的和真正生效的就不是同一张表了
+    const foldPairs = [`.replace(/？/g, '?')`, `.replace(/！/g, '!')`, `.replace(/～/g, '~')`]
+    ok('编辑器与主进程的全角折叠映射一致', foldPairs.every((s) => editor.includes(s) && toneMain.includes(s)))
   }
 
   ok('弹幕自动滚动默认开', DEFAULTS.danmaku?.autoScroll === true)
@@ -3823,6 +4004,211 @@ async function mockTts() {
   } finally {
     global.fetch = real
   }
+}
+
+/**
+ * [39] 点 B 站视频。
+ *
+ * 用户要的是：点歌 + BV 号 → 和歌排在同一条队列里 → 弹幕功能区显示画面（控件悬浮）
+ * → 浮窗里也一样。这段守的是这套机制的几个容易悄悄坏掉的地方。
+ */
+function testVideoQueue() {
+  const root = path.join(__dirname, '..')
+  const read = (p) => fs.readFileSync(path.join(root, p), 'utf8')
+  const main = read('electron/main.cjs')
+  const video = read('electron/bilibili/video.cjs')
+  const engine = read('src/lib/music-engine.tsx')
+  const stage = read('src/components/VideoStage.tsx')
+  const console_ = read('src/components/MusicConsole.tsx')
+  const page = read('src/pages/MusicPage.tsx')
+  const css = read('src/styles.css')
+  const apiTs = read('src/lib/api.ts')
+  const preload = read('electron/preload.cjs')
+
+  // ---- 认 BV 号 ----
+  ok('能从裸 BV 号里认出来', /parseBvid\(/.test(video) && /BV\[0-9A-Za-z\]\{10\}/.test(video))
+  ok(
+    '也能从链接里认出来（?bvid= 优先，退回全文第一个 BV 号）',
+    /\[\?&\]bvid=\(BV\[0-9A-Za-z\]\{10\}\)/.test(video) && /s\.match\(BVID_RE\)/.test(video),
+  )
+  ok('认不出时给一句能照着做的话', /没认出 BV 号/.test(video))
+  ok('分 P：?p=n，默认第 1 P', /\[\?&\]p=\(\\d\{1,4\}\)/.test(video) && /pages\[Math\.min\(page/.test(video))
+
+  // ---- 查视频信息要带登录身份 ----
+  ok(
+    '查视频信息走登录会话（会员视频游客查不到）',
+    /opts\.session\s*\n?\s*\? \{ ok: true, data: await opts\.session\.getJSON/.test(video) &&
+      /BVIDEO\.videoInfo\([\s\S]{0,80}?\{ session/.test(main),
+  )
+  ok('查之前先 ensureSession（会话是懒建的）', /ensureSession\(\)[\s\S]{0,120}?BVIDEO\.videoInfo/.test(main))
+  ok(
+    '内嵌播放器复用同一份登录 Cookie（浏览器那份不写就是游客）',
+    /syncBiliCookiesToBrowser/.test(main) &&
+      /jar\.set\(\{[\s\S]{0,240}?domain: '\.bilibili\.com'/.test(main) &&
+      /bili:logout[\s\S]{0,400}?clearBiliCookiesInBrowser/.test(main),
+  )
+  ok(
+    '视频 CDN 的防盗链 Referer 在网络层注入（原生 <video> 的请求从我们的会话发出）',
+    /installVideoRefererHeader\(\)/.test(main) &&
+      /\*:\/\/\*\.bilivideo\.com\/\*/.test(main) &&
+      /details\.requestHeaders\.Referer = 'https:\/\/www\.bilibili\.com\/'/.test(main),
+  )
+
+  // ---- 同一条队列 ----
+  ok('视频和歌排在同一条队列里（kind 区分）', /kind: 'video'/.test(main) && /musicQueue\.push\(\{[\s\S]{0,80}?kind: 'song'/.test(main))
+  ok('视频的 UP 主占「歌手」那一栏', /artists: song\.up \? `UP：\$\{song\.up\}`/.test(main))
+  ok('弹幕里发 BV 号走视频那条路，不拿去搜歌名', /const bvid = BVIDEO\.parseBvid\(kw\)[\s\S]{0,120}?handleVideoRequest/.test(main))
+  ok('视频有 cid / 总秒数（播放器靠它计时推进）', /cid: Number\(song\.cid\)/.test(main) && /duration: Number\(song\.duration\)/.test(main))
+  ok('队列条目类型在渲染层也有（老数据当歌）', /kind\?: 'song' \| 'video'/.test(apiTs))
+
+  // ---- 引擎：视频和歌不串 ----
+  ok('id 带类型前缀（歌和视频的 id 各编各的，撞号会误判）', /function keyOf\(/.test(engine) && /`\$\{kindOf\(item\)\}:\$\{item\.id/.test(engine))
+  ok('轮到视频时把音频停掉（两条路共用一条队列，绝不同时出声）', /audioEl\.onended = null[\s\S]{0,160}?playingId = key/.test(engine))
+  ok('轮到歌时把视频元素停掉', /setVideo\(null\)[\s\S]{0,80}?videoEl\.pause\(\)/.test(engine))
+  ok('视频不取歌词（别拿 cid 去问网易云）', /kindOf\(state\.current\) === 'video'[\s\S]{0,120}?setLrc\(\[\]\)/.test(engine))
+  ok('视频按「没有歌」上报，OBS 不挂上一首的最后一句', /kindOf\(state\.current\) === 'video' \? 0/.test(engine))
+
+  // ---- 画面：原生 <video>（内嵌 iframe 已整个退役） ----
+  // 历史包袱别回去：B 站内嵌播放器在跨域 iframe 里，currentTime / pause / volume
+  // 全碰不到 —— 「暂停=卸载、进度靠数、音量靠外挂」这些 bug 全源于此，而且
+  // 用户机器上它连画面都渲染不出来。platform=html5 的整条 mp4 是唯一出路。
+  ok(
+    '画面用原生 <video> 直接播（内嵌 iframe 退役，player.bilibili.com 不许回来）',
+    !/player\.bilibili\.com/.test(stage) &&
+      /document\.createElement\('video'\)/.test(engine) &&
+      /function getVideoElement\(\)/.test(engine) &&
+      /el\.playsInline = true/.test(engine),
+  )
+  ok('画面和声音是同一个元素（流是音视频混流的整条 mp4，不需要第二路喇叭）', !/vstage__audio/.test(stage) && !/vstage__audio/.test(css))
+  ok('元素是模块级单例（页面切换重挂不打断播放）', /if \(el\.parentElement !== host\) host\.appendChild\(el\)/.test(engine) && /videoAttach\?\.\(host\)/.test(stage))
+  ok('挂上就播（原生 play）', /await el\.play\(\)/.test(engine))
+  ok(
+    '暂停/继续就是原生 pause/play（进度天然保留，不再卸播放器记进度）',
+    /videoEl\?\.pause\(\)/.test(engine) && /el\.play\(\)[\s\S]{0,80}?setPlaying\(true\)/.test(engine),
+  )
+  ok('播完靠原生 ended 推进下一首（不再按总时长自己数）', /el\.onended = \(\) => \{[\s\S]{0,160}?api\.music\.next\(\)/.test(engine))
+  ok('音量/静音直接落在原生元素上', /el\.volume = Math\.min\(1, Math\.max\(0, videoVolumeCfg\)\)/.test(engine) && /el\.muted = videoMutedCfg/.test(engine))
+
+  // ---- 跨窗口播放权 ----
+  // 主窗口和每个浮窗都是独立渲染进程、各自一份引擎；广播又不分窗口 ——
+  // 不分归属的话开个音乐浮窗就是两份声音一起响。
+  ok(
+    '同一时刻只有一个窗口出声（音乐浮窗 > 主窗口，其它浮窗永不拥有）',
+    /const ownsPlayback = isMusicFloat \|\| \(!isFloatWindow && !musicFloatOpen\)/.test(engine),
+  )
+  ok('非拥有者把本地元素安静停掉（浮窗开着时主窗口不当喇叭）', /if \(!ownsPlayback\) \{[\s\S]{0,200}?videoEl\.pause\(\)/.test(engine))
+  ok(
+    '拥有者把进度当心跳推出去，别的窗口照着镜像（镜像前先确认自己不是拥有者）',
+    /api\.music\.tickPush\?\.\(/.test(engine) && /api\.music\.onTick\?\.\(/.test(engine) && /ownsPlaybackRef\.current\) return/.test(engine),
+  )
+  ok(
+    '非拥有者的播放/暂停/拖进度转发给拥有者执行',
+    /api\.music\.remote\?\.\(\{ type: 'toggle' \}\)/.test(engine) &&
+      /api\.music\.remote\?\.\(\{ type: 'seek', sec: s \}\)/.test(engine) &&
+      /api\.music\.onRemote\?\.\(/.test(engine),
+  )
+  ok('主进程只当中继（心跳广播 + 指令转发），自己不碰播放器', /music:tick-push/.test(main) && /ipcMain\.on\('music:remote'/.test(main))
+  ok('渲染层接口齐（心跳 + 遥控）', /tickPush/.test(preload) && /onTick/.test(preload) && /remote: \(cmd\)/.test(preload) && /onRemote/.test(preload))
+  ok(
+    '音乐浮窗开着时主窗口只摆占位（画面在音乐浮窗里）',
+    /videoElsewhere: !ownsPlayback/.test(engine) && /画面在音乐浮窗里/.test(stage) && /vstage__elsewhere/.test(css),
+  )
+
+  // ---- 取流：platform=html5 的整条 mp4（免 wbi 签名的老接口，音视频混流） ----
+  ok(
+    '取整条能直接播的流（platform=html5 走免签名老接口，durl 单段）',
+    /platform=html5/.test(video) && /x\/player\/playurl/.test(video) && /durl/.test(video),
+  )
+  ok(
+    '取流失败不当致命错（主进程可接受、渲染层提示一句跳下一首，队列不停摆）',
+    /没给到可用的播放地址/.test(video) && /拿不到这条视频的播放地址/.test(engine),
+  )
+  ok('同一条视频的流地址有缓存（暂停/重挂不重复取）', /streamCache/.test(engine))
+  ok('控件条上有能拖的音量（喇叭 + 细滑块）', /SliderFit/.test(stage) && /vstage__vol/.test(css) && /slider--fit/.test(css))
+  ok('点喇叭能一键静音', /volMute/.test(stage) && /onMuted/.test(stage) && /volMute/.test(read('src/components/ui.tsx')))
+  ok('音量落配置（滑条是滑条：拖到哪停哪，重开也记得）', /video: \{\s*volume/.test(read('electron/store.cjs')) && /volume: number/.test(apiTs))
+  ok('音量先改本地再落盘（受控于 IPC 回流的滑条会弹回去）', /setVideoVolume/.test(engine) && /api\.config\.patch\(\{ video: \{ volume: n \}/.test(engine))
+
+  // ---- 浮窗也有音量/静音 ----
+  ok('浮窗设置里有静音开关', /静音（视频声音）/.test(read('src/float/FloatShell.tsx')) && /musicMuted/.test(read('src/float/FloatShell.tsx')))
+  ok('浮窗头部有常驻静音按钮（等控件条浮出来太慢）', /toggleMute/.test(read('src/float/FloatShell.tsx')))
+  ok('浮窗静音记在配置里（关掉重开还是静音）', /muted: c\.muted/.test(read('electron/float.cjs')) && /muted: f\.muted === true/.test(read('electron/float.cjs')))
+  ok('渲染层接口齐（videoAudio）', /videoAudio/.test(preload) && /music:videoAudio/.test(main) && /videoAudio/.test(apiTs))
+
+  ok('控件平时藏着，鼠标移到画面上才出来', /\.vstage__ctrl \{[\s\S]{0,300}?opacity: 0;/.test(css) && /\.vstage:hover \.vstage__ctrl/.test(css))
+  ok('按着控件拖动时不许淡出（不然音量拖到一半会消失）', /\.vstage__ctrl:active/.test(css))
+  ok('控件能播停 / 跳下一个 / 跳进度 / 用浏览器打开', /onToggle/.test(stage) && /onNext/.test(stage) && /onSeek/.test(stage) && /openExternal/.test(stage))
+  ok('画面 16:9，别变形', /aspect-ratio: 16 \/ 9/.test(css))
+  /**
+   * **这条断言必须活着**：B 站播放器只画自己那 16:9 的一块，容器拉成别的形状
+   * （曾经为了「浮窗里铺满」把 aspect-ratio 改成 auto + flex:1）它就在容器里
+   * 只画一小块 + 一大片白/黑 —— 用户看到的就是「无法播放画面」。已经栽过两次。
+   * 只查「有 aspect-ratio:16/9 这条规则」不够：后来的规则会把它覆盖掉，
+   * 所以三条一起查：不许 auto、不许被 flex 拉大、必须按 16:9 定高。
+   */
+  ok(
+    '画面不许自由拉伸（拉成非 16:9 = 播放器只画一小块 + 大片留白）',
+    !/\.vstage__frame[^{]*\{[^}]*?aspect-ratio:\s*auto/.test(css) &&
+      !/\.vconsole \.vstage__frame[^{]*\{[^}]*?flex:\s*1 1 auto/.test(css) &&
+      /\.float-body--music > \.vconsole \.vstage__frame[^{]*\{[^}]*?aspect-ratio:\s*16 \/ 9/.test(css) &&
+      /\.vconsole \.vstage__frame[^{]*\{[^}]*?aspect-ratio:\s*16 \/ 9/.test(css),
+  )
+  ok('加载不出来时不留黑屏（给提示 + 浏览器出口）', /vstage__fail/.test(stage) && /vstage__fail/.test(css))
+  ok('缓冲中/出错都有那条贴底提示（缓冲中… / 错误消息）', /\(buffering \|\| error\) && !elsewhere/.test(stage) && /error \|\| '缓冲中…'/.test(stage))
+  // ---- 「只有声音没有画面」的回归护栏（有实证，别再改回去） ----
+  ok(
+    '提示层不许盖住画面（必须是贴底窄条，不是 inset:0 的整块底板）',
+    /\.vstage__fail\s*\{[^}]*?bottom:\s*0/.test(css) && !/\.vstage__fail\s*\{[^}]*?inset:\s*0/.test(css),
+  )
+  ok(
+    '提示层底色半透明（不透明底板会把画面整个盖掉 = 有声音没画面）',
+    /\.vstage__fail\s*\{[^}]*?background:\s*rgba\(0,\s*0,\s*0,\s*0\.\d+\)/.test(css),
+  )
+  // ---- 「反复出现滑杆」的回归护栏（探针实测的滚动条反馈循环，别再改回去） ----
+  // 装着 16:9 视频卡的滚动容器：滚动条出现 → 内容宽收窄 → 视频卡（16:9）变矮 →
+  // 总高缩回临界以内 → 滚动条消失 → 内容变宽 → 卡变高 → 又超高……内容高度恰好
+  // 卡在临界值时就是 0.25s 一循环的永动抖动（用户看到控件条上的滑杆反复蹦）。
+  // 这三处（主内容区 / 弹幕页侧栏 / 音乐浮窗）必须永久预留滚动条槽位断掉宽度反馈。
+  ok(
+    '滚动容器预留滚动条槽位（滚动条出没不许改变内容宽 = 视频卡反复变形抖动）',
+    /\.content\s*\{[^}]*?scrollbar-gutter:\s*stable/.test(css) &&
+      /\.danmaku-side\s*\{[^}]*?scrollbar-gutter:\s*stable/.test(css) &&
+      /\.float-body--music\s*\{[^}]*?scrollbar-gutter:\s*stable/.test(css),
+  )
+  ok(
+    '侧栏视频卡不许负 margin（iframe 时代的 margin:-8px 遗留会把 stretch 宽撑到 310+16=326，横向溢出成环）',
+    !/\.danmaku-side \.vconsole\s*\{[^}]*?margin:\s*-/.test(css),
+  )
+  // ---- 拖进度 ----
+  ok(
+    '跳进度就是原生 seek（直接拨 currentTime，不再重建播放器）',
+    /el\.currentTime = s/.test(engine) && !/seekN/.test(engine) && !/playerSrc/.test(stage),
+  )
+  ok(
+    '元数据没到时点的进度有 pendingSeek 兜底',
+    /pendingSeekRef\.current = s/.test(engine) && /el\.currentTime = pendingSeekRef\.current/.test(engine),
+  )
+
+  // ---- 弹幕功能区 + 浮窗 ----
+  // 用户点名的：播放视频时只有画面 + 控制器 + 关闭按钮，没有任何别的 UI
+  const videoBranch = console_.split('if (video) {')[1]?.split('\n\n  return (')[0] || ''
+  ok(
+    '轮到视频时音乐控制台整块换成画面（没有卡片外壳）',
+    /<div className="vconsole">/.test(videoBranch) && !/side-card/.test(videoBranch),
+  )
+  ok(
+    '纯播放器形态：没有标题 / UP 主 / 待播队列 / 说明文字',
+    /className="vconsole"/.test(console_) &&
+      /<VideoStage[\s\S]{0,120}?\bbare\b/.test(console_) &&
+      /bare \? ' vstage--bare' : ''/.test(stage) &&
+      /\{!bare && \(/.test(stage) &&
+      /\{!bare && \(\s*<button/.test(stage),
+  )
+  ok('关闭（收回）按钮浮在画面右上角', /vconsole__actions/.test(console_) && /\.vconsole__actions/.test(css) && /\.vconsole__actions:focus-within/.test(css))
+  ok('浮窗走的是同一个 MusicConsole（自动同步）', /MusicConsole/.test(read('src/float/FloatShell.tsx')))
+  ok('点歌页能粘 BV 号/链接手动加', /api\.music\.videoInfo/.test(page) && /加入队列/.test(page))
+  ok('队列里视频条目有标记，跟歌分得开', /it\.kind === 'video' && <Chip/.test(page))
+  ok('渲染层接口齐（查信息 + 入队）', /videoInfo/.test(preload) && /enqueueVideo/.test(preload) && /music:enqueueVideo/.test(main))
 }
 
 main().catch((e) => {

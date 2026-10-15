@@ -58,8 +58,31 @@ export interface AppConfig {
     readSuperchat: boolean
     readEnter: boolean
     blockWords: string
+    /**
+     * 观众只发一个标点时（「？」「！」）换成对应语气的语气词再念 —— 孤立符号 TTS 念出来是静音。
+     * tones 是主播自己写的那张表（每行「符号 词1 词2 …」，随机抽一个），留空用 builtinTones。
+     */
+    interjection?: {
+      enabled?: boolean
+      tones?: string
+      /** 内置表（只读）。界面在 tones 为空时按它显示，「恢复内置默认」就是清空 tones */
+      builtinTones?: string
+      ellipsis?: boolean
+    }
     /** 合成缓存：同一套音色 + 同一句话只请求一次，TTL 内复用并刷新时间戳 */
     cache: { enabled: boolean; ttlMs: number; maxMB: number }
+    /**
+     * 合成失败（超时 / 断网 / 额度用完 / 平台 5xx）时自动换免费嗓子把这句念完 ——
+     * 别让直播间因为一个平台抽风就整段静音。Key 填错（401/403）不回退。
+     */
+    fallback?: {
+      enabled?: boolean
+      /** edge（免费·免密钥）或 system（本地·离线） */
+      provider?: 'edge' | 'system'
+      voice?: string
+      /** 触发后多久之内不再去撞原平台（ms） */
+      cooldownMs?: number
+    }
   }
   theme: { seed: string; mode: 'light' | 'dark'; contrast: number; motion?: 'standard' | 'expressive' }
   overlay: {
@@ -202,7 +225,15 @@ export interface AppConfig {
     replyInChat: boolean
     cookie: string
   }
+  /** B 站视频的声音（画面在官方内嵌播放器里，跨域碰不到它的音量） */
+  video: {
+    /** 自己那一路音频的音量 0~1 */
+    volume: number
+    muted: boolean
+  }
   window: { width: number; height: number }
+  /** 关掉主界面时缩到系统托盘，后台继续收弹幕；真退出走托盘图标的右键菜单 */
+  general?: { closeToTray?: boolean }
 }
 
 export interface MusicSong {
@@ -228,7 +259,13 @@ export interface MusicAccount {
   channel: 'weapi' | 'linux'
 }
 
+/**
+ * 队列里的一条。它**不一定是歌** —— B 站视频（BV 号）走的是同一条队列，
+ * 用 kind 区分：歌交给网易云取音频，视频交给内嵌的 B 站官方播放器。
+ */
 export interface MusicQueueItem {
+  /** 'song' 是老数据（没有这个字段）的默认值 */
+  kind?: 'song' | 'video'
   id: number
   name: string
   artists: string
@@ -236,12 +273,35 @@ export interface MusicQueueItem {
   picUrl?: string
   requester?: string
   at: number
+  /** 仅视频：BV 号 / cid / 总秒数（播放器按它计时推进下一首） */
+  bvid?: string
+  cid?: number
+  duration?: number
+}
+
+/** B 站视频信息（点歌页粘 BV 号后查出来的那条） */
+export interface VideoInfo {
+  bvid: string
+  aid: number
+  cid: number
+  title: string
+  up: string
+  pic: string
+  duration: number
+  durationText: string
+  page: number
 }
 
 export interface MusicState {
   items: MusicQueueItem[]
   current: MusicQueueItem | null
   queued: number
+  /**
+   * 最后一条播放心跳（拥有播放权的窗口每 400ms 推一次，主进程存底）。
+   * 新开的窗口（典型：刚弹出的音乐浮窗）挂载时靠它把镜像进度补上，
+   * 否则接管播放权那一刻会被当成「换了条目」从头播。
+   */
+  tick?: { key: string; pos: number; dur: number; playing: boolean } | null
 }
 
 export interface MusicAudio {
@@ -319,7 +379,7 @@ export interface FloatBounds {
 
 /** 桌面浮窗的实时状态。每个面板开了没有、两个旋钮现在是什么值 */
 export interface FloatState {
-  panels: Record<FloatPanel, { opened: boolean; opacity: number; scale: number }>
+  panels: Record<FloatPanel, { opened: boolean; opacity: number; scale: number; muted?: boolean }>
   alwaysOnTop: boolean
 }
 
@@ -416,6 +476,8 @@ interface Bridge {
     onPlay: (cb: (p: { base64: string; mime: string; text: string; meta: unknown; volume: number }) => void) => () => void
     onState: (cb: (s: { state: string; text: string }) => void) => () => void
     onError: (cb: (e: { message: string; text: string }) => void) => () => void
+    /** 不是失败，是「换了个嗓子在念」这类需要主播知道一声的提示 */
+    onNotice: (cb: (n: { message: string; reason?: string; provider?: string }) => void) => () => void
     onSkip: (cb: () => void) => () => void
     cacheInfo: () => Promise<TtsCacheInfo>
     cacheClear: () => Promise<{ ok: boolean; cleared: number; bytes: number }>
@@ -490,6 +552,24 @@ interface Bridge {
     onLogin: (cb: (r: { ok: boolean; cookie?: string; nickname?: string; vip?: boolean; cancelled?: boolean; message?: string }) => void) => () => void
     state: () => Promise<MusicState>
     enqueue: (song: MusicSong, requester?: string) => Promise<{ ok: boolean; position?: number; reason?: string }>
+    /** 查一条 B 站视频（BV 号或链接） */
+    videoInfo: (text: string) => Promise<VideoInfo>
+    /** B 站视频入同一条队列 */
+    enqueueVideo: (v: VideoInfo, requester?: string) => Promise<{ ok: boolean; position?: number; reason?: string }>
+    /**
+     * B 站视频的**整条播放地址**（platform=html5，音视频混流的 mp4）。
+     * 原生 <video> 直接播它 —— 画面和声音从同一个元素出。
+     */
+    videoAudio: (v: { bvid?: string; cid?: number }) => Promise<{ url: string; quality?: number }>
+    /**
+     * 跨窗口播放权（见 music-engine 顶部说明）：同一时刻只有一个窗口真正出声。
+     * 拥有者把当前进度当心跳推出去，其余窗口照着镜像；非拥有者的
+     * 播放/暂停/拖进度转发给拥有者去执行。
+     */
+    tickPush: (p: { key?: string; pos: number; dur: number; playing: boolean }) => void
+    onTick: (cb: (p: { pos: number; dur: number; playing: boolean }) => void) => () => void
+    remote: (cmd: { type: 'toggle' } | { type: 'seek'; sec: number }) => void
+    onRemote: (cb: (cmd: { type: 'toggle' } | { type: 'seek'; sec: number }) => void) => () => void
     play: () => Promise<MusicState>
     next: () => Promise<MusicState>
     remove: (index: number) => Promise<MusicState>
@@ -550,7 +630,10 @@ interface Bridge {
     open: (panel: FloatPanel) => Promise<{ ok: boolean; message?: string }>
     close: (panel: FloatPanel) => Promise<{ ok: boolean }>
     /** 浮窗里的设置弹层用：改不透明度 / 字体大小，当场生效 */
-    set: (panel: FloatPanel, patch: { opacity?: number; scale?: number }) => Promise<{ ok: boolean }>
+    set: (
+      panel: FloatPanel,
+      patch: { opacity?: number; scale?: number; muted?: boolean },
+    ) => Promise<{ ok: boolean }>
     /** 开关、拖拽、关窗都会推一帧，界面据此把圆点/占位摆到正确的位置 */
     onState: (cb: (s: FloatState) => void) => () => void
   }

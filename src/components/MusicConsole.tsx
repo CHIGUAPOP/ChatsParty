@@ -1,6 +1,7 @@
 import React from 'react'
 import { api } from '../lib/api'
 import { Button, Icon, Slider } from './ui'
+import VideoStage from './VideoStage'
 import { useMusicPlayer } from '../lib/music-engine'
 
 function fmt(sec: number) {
@@ -28,11 +29,71 @@ export default function MusicConsole({
   /** 桌面浮窗的设置/× 两颗按钮：排在这个头部最右（主窗口不传） */
   actions?: React.ReactNode
 }) {
-  const { state, playing, position, duration, loading, toggle } = useMusicPlayer()
+  const {
+    state,
+    playing,
+    position,
+    duration,
+    loading,
+    toggle,
+    video,
+    videoPlaying,
+    videoElapsed,
+    videoDuration,
+    videoBuffering,
+    videoReady,
+    videoError,
+    videoElsewhere,
+    videoAttach,
+    videoVolume,
+    videoMuted,
+    setVideoVolume,
+    setVideoMuted,
+    videoSeekTo,
+  } = useMusicPlayer()
   const cur = state.current
   // 只预告「下一首」，不预告两首：右侧栏高度是抢来的 —— 多摆一条歌名，
   // 观众榜就少一行。队列看全了去「点歌」页。
   const upcoming = state.items.slice(0, 1)
+
+  /**
+   * 队列里轮到 B 站视频：这一块**整个就是播放器**。
+   *
+   * 用户点名的：播放时只留画面和控件，其余全不要 —— 没有卡片头部（「B 站视频」
+   * 那行字是废话，画面本身就是），没有视频标题、没有 UP 主、没有「待播 N」，
+   * 也没有底下那条「下一个是谁」。那些信息在**点歌页**里看（那边是完整的
+   * 播放面板 + 队列），而这里和浮窗只需要画面。
+   *
+   * 浮窗那两颗按钮（设置 / 静音 / 收回）例外 —— 它们是窗口的操作入口，
+   * 去掉就没法收回浮窗了。所以它们浮在画面右上角，鼠标移上去才显形。
+   */
+  if (video) {
+    return (
+      <div className="vconsole">
+        <VideoStage
+          bare
+          bvid={video.bvid}
+          pic={video.pic}
+          playing={videoPlaying}
+          elapsed={videoElapsed}
+          duration={videoDuration || video.duration}
+          buffering={videoBuffering}
+          ready={videoReady}
+          error={videoError}
+          elsewhere={videoElsewhere}
+          videoAttach={videoAttach}
+          volume={videoVolume}
+          muted={videoMuted}
+          onVolume={setVideoVolume}
+          onMuted={setVideoMuted}
+          onToggle={toggle}
+          onNext={() => api.music.next()}
+          onSeek={videoSeekTo}
+        />
+        {actions && <div className="vconsole__actions">{actions}</div>}
+      </div>
+    )
+  }
 
   return (
     <section className="side-card side-card--console">

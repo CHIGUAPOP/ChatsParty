@@ -1,7 +1,9 @@
 import React from 'react'
 import { api, AppConfig, MusicAccount, MusicSong } from '../lib/api'
 import { Button, Card, Chip, Icon, Row, SectionTitle, Select, Slider, Switch, TextField, useLiveSave } from '../components/ui'
+import VideoStage from '../components/VideoStage'
 import { useMusicPlayer } from '../lib/music-engine'
+import { VideoInfo } from '../lib/api'
 
 interface Props {
   config: AppConfig
@@ -39,7 +41,34 @@ function splitList(s: string): string[] {
 export default function MusicPage({ config, patch, notify }: Props) {
   const m = config.music
   const player = useMusicPlayer()
-  const { state, playing, position, duration, loading: loadingUrl, lrc, lrcIndex, toggle } = player
+  const {
+    state,
+    playing,
+    position,
+    duration,
+    loading: loadingUrl,
+    lrc,
+    lrcIndex,
+    toggle,
+    video,
+    videoPlaying,
+    videoElapsed,
+    videoDuration,
+    videoBuffering,
+    videoReady,
+    videoError,
+    videoElsewhere,
+    videoAttach,
+    videoVolume,
+    videoMuted,
+    setVideoVolume,
+    setVideoMuted,
+    videoSeekTo,
+  } = player
+  // B 站视频点播：粘 BV 号或视频链接，先查出来再入队
+  const [bvText, setBvText] = React.useState('')
+  const [bvInfo, setBvInfo] = React.useState<VideoInfo | null>(null)
+  const [bvBusy, setBvBusy] = React.useState(false)
   const [keyword, setKeyword] = React.useState('')
   const [results, setResults] = React.useState<MusicSong[]>([])
   const [searching, setSearching] = React.useState(false)
@@ -72,6 +101,31 @@ export default function MusicPage({ config, patch, notify }: Props) {
     const r = await api.music.enqueue(song, '主播')
     if (r.ok) notify(`已加入点歌队列（第 ${r.position} 位）`)
     else notify(r.reason === 'full' ? '歌单满了，先放完几首' : '加入失败', true)
+  }
+
+  const lookupVideo = async () => {
+    const t = bvText.trim()
+    if (!t) return
+    setBvBusy(true)
+    setBvInfo(null)
+    try {
+      const v = await api.music.videoInfo(t)
+      setBvInfo(v)
+    } catch (e: any) {
+      notify(String(e?.message || e), true)
+    } finally {
+      setBvBusy(false)
+    }
+  }
+
+  const enqueueVideo = async () => {
+    if (!bvInfo) return
+    const r = await api.music.enqueueVideo(bvInfo, '主播')
+    if (r.ok) {
+      notify(`已加入播放队列（第 ${r.position} 位）`)
+      setBvText('')
+      setBvInfo(null)
+    } else notify(r.reason === 'full' ? '队列满了，先放完几个' : '加入失败', true)
   }
 
   const runCheck = async () => {
@@ -152,12 +206,18 @@ export default function MusicPage({ config, patch, notify }: Props) {
     <div className="music-page">
       <Card title="正在播放" desc={cur ? `${cur.requester || '主播'}点的` : '队列空着的时候这里是空的'}>
         <div className="music-now">
-          <div className="music-now__cover">
-            {cur?.picUrl ? <img src={cur.picUrl} alt="" /> : <Icon name="music" size={36} />}
-          </div>
+          {!video && (
+            <div className="music-now__cover">
+              {cur?.picUrl ? <img src={cur.picUrl} alt="" /> : <Icon name="music" size={36} />}
+            </div>
+          )}
           <div className="music-now__main">
-            <div className="music-now__title">{cur ? cur.name : '没有在播的歌'}</div>
-            <div className="music-now__sub">{cur ? cur.artists : '搜一首，或者等观众在弹幕里点'}</div>
+            <div className="music-now__title">
+              {video ? video.title : cur ? cur.name : '没有在播的歌'}
+            </div>
+            <div className="music-now__sub">
+              {video ? (video.up ? `UP：${video.up}` : 'B 站视频') : cur ? cur.artists : '搜一首，或者等观众在弹幕里点'}
+            </div>
             <div className="music-now__ctrl">
               <Button variant="filled" small onClick={toggle} icon={playing ? 'stop' : 'play'}>
                 {playing ? '暂停' : '播放'}
@@ -166,12 +226,37 @@ export default function MusicPage({ config, patch, notify }: Props) {
                 下一首
               </Button>
               <span className="music-now__time">
-                {fmt(position)} / {cur ? cur.durationText || fmt(duration) : '0:00'}
+                {video ? `${fmt(videoElapsed)} / ${fmt(video.duration)}` : `${fmt(position)} / ${cur ? cur.durationText || fmt(duration) : '0:00'}`}
               </span>
-              {loadingUrl && <span className="music-now__tip">取播放地址…</span>}
+              {!video && loadingUrl && <span className="music-now__tip">取播放地址…</span>}
             </div>
           </div>
         </div>
+
+        {/* 轮到 B 站视频时把画面摆出来（和弹幕功能区那块是同一个组件） */}
+        {video && (
+          <div className="music-video">
+            <VideoStage
+              bvid={video.bvid}
+              pic={video.pic}
+              playing={videoPlaying}
+              elapsed={videoElapsed}
+              duration={videoDuration || video.duration}
+              buffering={videoBuffering}
+              ready={videoReady}
+              error={videoError}
+              elsewhere={videoElsewhere}
+              videoAttach={videoAttach}
+              volume={videoVolume}
+              muted={videoMuted}
+              onVolume={setVideoVolume}
+              onMuted={setVideoMuted}
+              onToggle={toggle}
+              onNext={() => api.music.next()}
+              onSeek={videoSeekTo}
+            />
+          </div>
+        )}
 
         <div style={{ width: 220, marginTop: 4 }}>
           <Slider value={m.volume} min={0} max={1} step={0.05} onChange={(v) => patch({ music: { volume: v } })} />
@@ -232,6 +317,43 @@ export default function MusicPage({ config, patch, notify }: Props) {
         )}
       </Card>
 
+      <Card title="点 B 站视频" desc="粘 BV 号或视频链接，和点歌共用同一条队列；观众也能在弹幕里发「点歌 BV号」">
+        <div className="row">
+          <div className="music-search">
+            <input
+              className="field__input"
+              placeholder="BV号 或 https://www.bilibili.com/video/BV…"
+              value={bvText}
+              onChange={(e) => setBvText(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !(e.nativeEvent as any).isComposing) lookupVideo()
+              }}
+            />
+            <Button onClick={lookupVideo} disabled={bvBusy || !bvText.trim()} icon="search">
+              {bvBusy ? '查询中…' : '查询'}
+            </Button>
+          </div>
+        </div>
+
+        {bvInfo && (
+          <div className="music-result">
+            <div className="music-result__main">
+              <span className="music-result__name">{bvInfo.title}</span>
+              <span className="music-result__meta">{bvInfo.up ? `UP：${bvInfo.up} · ` : ''}B 站视频</span>
+            </div>
+            <span className="music-result__dur">{bvInfo.durationText}</span>
+            <Button variant="outlined" small onClick={enqueueVideo} icon="add">
+              加入队列
+            </Button>
+          </div>
+        )}
+
+        <div className="tip" style={{ marginTop: 10 }}>
+          视频画面直接播 B 站给的整条流（网页端老接口，通常 480P）—— 暂停、进度、音量都是真控件。
+          会员 / 充电专属的视频拿不到地址，会提示并自动跳下一首。
+        </div>
+      </Card>
+
       <Card title={`待播队列（${state.queued}）`} desc="观众点的和主播点的都在这里，按顺序播">
         {state.items.length === 0 ? (
           <div className="empty-state" style={{ padding: 18 }}>
@@ -240,10 +362,11 @@ export default function MusicPage({ config, patch, notify }: Props) {
         ) : (
           <div className="music-results">
             {state.items.map((it, i) => (
-              <div key={`${it.id}-${it.at}`} className="music-result">
+              <div key={`${it.kind || 'song'}-${it.id}-${it.at}`} className="music-result">
                 <span className="music-result__no">{i + 1}</span>
                 <div className="music-result__main">
                   <span className="music-result__name">{it.name}</span>
+                  {it.kind === 'video' && <Chip variant="gift">B 站视频</Chip>}
                   <span className="music-result__meta">
                     {it.artists}
                     {it.requester ? ` · ${it.requester}点的` : ''}

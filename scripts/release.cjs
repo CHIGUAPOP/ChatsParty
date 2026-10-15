@@ -181,31 +181,26 @@ const size = (f) => fs.statSync(path.join(OUT_DIR, f)).size
 
 /* ------------------------------ 发布 ------------------------------ */
 
-async function recentCommits(n = 8) {
-  try {
-    // 交付仓库里才有 .git；工作副本里没有，取不到就少写一段，不算错
-    const out = await run('git', ['log', `-${n}`, '--pretty=- %s'], { cwd: ROOT })
-    return out.trim().split('\n').filter(Boolean)
-  } catch {
-    return []
-  }
-}
-
 async function notesFor(artifact) {
   const custom = val('--notes')
   if (custom) return custom
 
-  const commits = await recentCommits()
-  const lines = [
+  // 说明来源优先级：
+  // 1. --notes "..." 命令行直接给
+  // 2. release-notes/<TAG>.md —— 每个版本发版前写好的正式更新说明（首选）
+  // 3. 兜底一行使用提示
+  // **绝不自动拼 git log**：仓库历史短，会一路翻回旧版本的提交
+  //（v1.1.0 的说明里就混进过 v0.1.0 时代的「免安装版一键打成」），用户点名不要。
+  const notesFile = path.join(ROOT, 'release-notes', `${TAG}.md`)
+  if (fs.existsSync(notesFile)) {
+    return fs.readFileSync(notesFile, 'utf8').trim()
+  }
+  return [
     `**免安装版**：下载下面的 \`${artifact.name}\`，双击即用，不需要安装。`,
     '',
     '首次启动会提示 Windows 防火墙放行 —— 叠加层要监听本地 12450 端口给 OBS 连，',
     '选「专用网络」允许即可。',
-    '',
-  ]
-  if (commits.length) lines.push('### 本次包含', '', ...commits, '')
-  lines.push('完整改动见 [提交记录](https://github.com/CHIGUAPOP/ChatsParty/commits/main)。')
-  return lines.join('\n')
+  ].join('\n')
 }
 
 async function main() {

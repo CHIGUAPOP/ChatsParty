@@ -45,6 +45,7 @@ const api = {
     onPlay: (cb) => on('tts:play', cb),
     onState: (cb) => on('tts:state', cb),
     onError: (cb) => on('tts:error', cb),
+    onNotice: (cb) => on('tts:notice', cb),
     onSkip: (cb) => on('tts:skip', cb),
     cacheInfo: () => ipcRenderer.invoke('tts:cache:info'),
     cacheClear: () => ipcRenderer.invoke('tts:cache:clear'),
@@ -77,6 +78,16 @@ const api = {
     onLogin: (cb) => on('music:login', cb),
     state: () => ipcRenderer.invoke('music:state'),
     enqueue: (song, requester) => ipcRenderer.invoke('music:enqueue', song, requester),
+    // B 站视频（BV 号）也进同一条队列
+    videoInfo: (text) => ipcRenderer.invoke('music:videoInfo', text),
+    enqueueVideo: (v, requester) => ipcRenderer.invoke('music:enqueueVideo', v, requester),
+    // 视频的「能拖的音量」：原生 <video> 的音量直接可调（platform=html5 整条流）
+    videoAudio: (v) => ipcRenderer.invoke('music:videoAudio', v),
+    // 跨窗口播放权：拥有者推进度心跳，别的窗口照着镜像；非拥有者的播放键转发给拥有者
+    tickPush: (p) => ipcRenderer.send('music:tick-push', p),
+    onTick: (cb) => on('music:tick', cb),
+    remote: (cmd) => ipcRenderer.send('music:remote', cmd),
+    onRemote: (cb) => on('music:remote', cb),
     play: () => ipcRenderer.invoke('music:play'),
     next: () => ipcRenderer.invoke('music:next'),
     remove: (index) => ipcRenderer.invoke('music:remove', index),

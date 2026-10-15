@@ -1,6 +1,19 @@
 import React from 'react'
 import { api, AppConfig, TtsCacheInfo } from '../lib/api'
-import { Button, Card, Row, SectionTitle, Select, Slider, Switch, TextArea, TextField, useLiveSave } from '../components/ui'
+import {
+  Button,
+  Card,
+  Chip,
+  Row,
+  SectionTitle,
+  Select,
+  Slider,
+  Switch,
+  TextArea,
+  TextField,
+  useLiveSave,
+} from '../components/ui'
+import { ToneTableEditor } from '../components/ToneTable'
 
 const MINUTE = 60_000
 const HOUR = 60 * MINUTE
@@ -128,6 +141,22 @@ export default function VoicePage({ config, patch, notify }: Props) {
   }
 
   const set = (k: string, v: unknown) => patch({ tts: { [k]: v } })
+
+  /** 纯标点弹幕的语气词那组配置。整块是可选的，补丁只带改动的那个字段（store 是深合并） */
+  const ij = {
+    enabled: t.interjection?.enabled !== false,
+    tones: t.interjection?.tones || '',
+    ellipsis: t.interjection?.ellipsis === true,
+  }
+  const setInterjection = (p: Record<string, unknown>) => patch({ tts: { interjection: p } })
+  /** 合成失败时的备用嗓子。整块可选，补丁只带改动的那个字段（store 是深合并） */
+  const fb = {
+    enabled: t.fallback?.enabled !== false,
+    provider: t.fallback?.provider === 'system' ? ('system' as const) : ('edge' as const),
+    voice: t.fallback?.voice || 'zh-CN-XiaoxiaoNeural',
+    cooldownMs: Number(t.fallback?.cooldownMs) || 5 * MINUTE,
+  }
+  const setFallback = (p: Record<string, unknown>) => patch({ tts: { fallback: p } })
 
   /**
    * B站默认昵称改念的那个称呼。
@@ -418,6 +447,77 @@ export default function VoicePage({ config, patch, notify }: Props) {
             rows={2}
           />
         </div>
+      </Card>
+
+      <Card
+        title="纯标点弹幕念成语气词"
+        desc="观众只发一个「？」「！」「…」时，TTS 念出来基本是静音 —— 他发了，直播间却没听到。按符号换成一句对应语气的语气词再念：原文没有实词，所以这不是替他加话，只是把他本来就有的语气说出口。"
+        actions={<Chip>{ij.tones.trim() ? '自定义词表' : '内置默认'}</Chip>}
+      >
+        <Row label="启用" hint="只作用于整条弹幕只有符号的情况，正常的句子一个字都不动">
+          <Switch value={ij.enabled !== false} onChange={(v) => setInterjection({ enabled: v })} />
+        </Row>
+        <Row label="省略号也念（呃…）" hint="关掉的话「…」保持静音 —— 无语就是无语">
+          <Switch value={ij.ellipsis === true} onChange={(v) => setInterjection({ ellipsis: v })} />
+        </Row>
+        <div style={{ marginTop: 8 }}>
+          <ToneTableEditor
+            tones={ij.tones}
+            builtin={t.interjection?.builtinTones || ''}
+            ellipsis={ij.ellipsis}
+            onChange={(v) => setInterjection({ tones: v })}
+          />
+        </div>
+      </Card>
+
+      <SectionTitle>合成失败时怎么办</SectionTitle>
+      <Card
+        title="自动换嗓子，别让直播间静音"
+        desc="在线语音（Fish / MiMo / OpenAI）这一句没合成出来 —— 超时、断网、额度用完、平台自己出错 —— 就换下面这个免费嗓子把这句念完。Key 填错或没权限（401/403）不换：那是配置错了，悄悄换掉的话你永远发现不了自己填的 Key 是坏的。"
+      >
+        <Row label="启用" hint="只管「平台这会儿不顶用」的情况；配置错误照样报错给你看">
+          <Switch value={fb.enabled !== false} onChange={(v) => setFallback({ enabled: v })} />
+        </Row>
+        <div className="grid" style={{ marginTop: 8 }}>
+          <Select
+            label="备用嗓子"
+            value={fb.provider === 'system' ? 'system' : 'edge'}
+            onChange={(v) =>
+              setFallback({
+                provider: v,
+                // 系统语音的音色是本机装的，这里给不了列表 —— 换过去就交给系统默认
+                voice: v === 'system' ? '' : fb.voice || 'zh-CN-XiaoxiaoNeural',
+              })
+            }
+            options={[
+              { value: 'edge', label: 'Edge 朗读（免费 · 免密钥）' },
+              { value: 'system', label: '系统语音（本地 · 离线）' },
+            ]}
+          />
+          {fb.provider !== 'system' && (
+            <Select
+              label="备用音色"
+              value={fb.voice || 'zh-CN-XiaoxiaoNeural'}
+              onChange={(v) => setFallback({ voice: v })}
+              options={(providers.edge?.voices || []).map((v: any) => ({ value: v.id, label: v.label }))}
+            />
+          )}
+        </div>
+        <Row
+          label={`冷却 ${Math.round((fb.cooldownMs || 0) / MINUTE)} 分钟`}
+          hint="这段时间里直接走备用嗓子，不再去撞那个抽风的平台 —— 否则每条弹幕都要先卡满一次超时才降级。冷却结束会自动回去试一次，通了就换回来"
+        >
+          <div style={{ width: 200 }}>
+            <Slider
+              value={Math.round((fb.cooldownMs || 0) / MINUTE)}
+              min={1}
+              max={30}
+              step={1}
+              onChange={(v) => setFallback({ cooldownMs: v * MINUTE })}
+              suffix=" 分钟"
+            />
+          </div>
+        </Row>
       </Card>
 
       <SectionTitle>合成缓存</SectionTitle>

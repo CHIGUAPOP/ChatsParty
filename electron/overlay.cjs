@@ -1,5 +1,6 @@
 'use strict'
 const http = require('node:http')
+const https = require('node:https')
 const fs = require('node:fs')
 const path = require('node:path')
 const { WebSocketServer } = require('ws')
@@ -55,6 +56,9 @@ class OverlayServer {
     this.voicePickProvider = null
     // 在线观众（高能榜）：中途连上时补发当前名单，不然要等下一次轮询
     this.viewersProvider = null
+    // 视频流代理的真地址供给（key → url）。主进程把当前视频的流地址
+    // 解析好存着（见 main.cjs musicStreamCache），换条目即作废。
+    this.streamProvider = null
     // 有客户端连上/断开时回调，主进程据此把「几个连接」推给界面
     this.onClientsChange = null
     this.requestedPort = port
@@ -87,7 +91,17 @@ class OverlayServer {
   listen(port) {
     return new Promise((resolve, reject) => {
       const server = http.createServer((req, res) => {
-        let urlPath = (req.url || '/').split('?')[0]
+        const rawUrl = req.url || '/'
+        const qIndex = rawUrl.indexOf('?')
+        const query = new URLSearchParams(qIndex >= 0 ? rawUrl.slice(qIndex + 1) : '')
+        let urlPath = rawUrl.split('?')[0]
+        // 视频流代理：叠加层 <video> 播 bilivideo 的整条 mp4，但 CDN 认 Referer
+        // （第三方页面 Referer 直接 403，实测）—— OBS 浏览源发什么 Referer 我们
+        // 管不着，让请求从本服务出去，带上 B 站认的那份。见 proxyStream()。
+        if (urlPath === '/stream/video') {
+          this.proxyStream(req, res, query.get('key'))
+          return
+        }
         if (urlPath === '/' || urlPath === '/overlay') urlPath = '/index.html'
         // /overlay/lyric 这类「只开某一块」的地址也回 index.html ——
         // 页面读 location.pathname 就知道该画哪一块，不用为每块单独留一份 HTML
@@ -231,6 +245,43 @@ class OverlayServer {
 
   get clientCount() {
     return this.clients.size
+  }
+
+  /**
+   * 视频流代理。Range 头原样透传（<video> 拖进度要 206），响应里跟画面/进度
+   * 有关的头也透传。上游挂了回 502，页面那边有兜底占位。
+   */
+  proxyStream(req, res, key) {
+    const target = this.streamProvider ? this.streamProvider(String(key || '')) : null
+    // data: URL（e2e 桩）不走这里 —— 页面对它直连，代理只管 http(s)
+    if (!target || !/^https?:/i.test(target)) {
+      res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' }).end('no stream')
+      return
+    }
+    const headers = {
+      Referer: 'https://www.bilibili.com/',
+      'User-Agent':
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    }
+    if (req.headers.range) headers.Range = String(req.headers.range)
+    const mod = /^https:/i.test(target) ? https : http
+    const up = mod.get(target, { headers }, (ur) => {
+      const h = {}
+      for (const k of ['content-type', 'content-length', 'content-range', 'accept-ranges']) {
+        if (ur.headers[k]) h[k] = ur.headers[k]
+      }
+      res.writeHead(ur.statusCode || 502, h)
+      ur.pipe(res)
+    })
+    up.on('error', () => {
+      try {
+        res.writeHead(502, { 'Content-Type': 'text/plain; charset=utf-8' }).end('upstream error')
+      } catch {
+        /* 头可能已经发出去了，算了 */
+      }
+    })
+    // OBS 那头断了（换条目/关源）就别再拉上游
+    req.on('close', () => up.destroy())
   }
 }
 

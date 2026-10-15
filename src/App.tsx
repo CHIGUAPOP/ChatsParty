@@ -94,6 +94,8 @@ export default function App() {
         setFaceTick((t) => t + 1)
       }),
       api.tts.onError((e) => notify(`语音合成失败：${e.message}`, true)),
+      // 在线语音挂了、临时换备用嗓子念 —— 不是错误，但主播得知道现在听到的不是原来那个声音
+      api.tts.onNotice((n) => n?.message && notify(n.message)),
       // 主进程把密钥里的脏字符洗掉了 —— 说一声，否则用户永远不知道刚才 401 为什么
       api.config.onNotice((n) => {
         if (n?.messages?.length) notify(n.messages.join('；'), true)
