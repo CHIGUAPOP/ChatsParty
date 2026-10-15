@@ -133,24 +133,6 @@ build/               打包资源：应用图标 build/icon.png（源图）与 b
 - 仓库中**不包含任何个人密钥**，也请勿把本机生成的配置文件提交上来。
 - 若你 fork 本仓库用于分发，请自查是否误带了 `userData`、日志或构建产物。
 
-## 打包
-
-```bash
-npm run build            # vite build + electron-builder → release/ChatsParty-x.y.z-Portable.exe
-npm run verify:package   # 起一次包确认真能跑（临时配置 + 随机端口，跑完自动关掉）
-npm run release          # 打包 → 传到 GitHub Releases
-```
-
-打出来的是**免安装版单文件**，双击即用。
-
-发布一律走 GitHub Releases，**exe 不进 git 仓库**：一个包七十多 MB，而 git 的历史只增不减 ——
-提交进去以后每次发版都留一份，仓库很快上 GB，想清理只能重写历史。`release/` 已在 `.gitignore` 里。
-
-`npm run release` 需要 [GitHub CLI](https://cli.github.com/)（`gh`），凭据按
-「环境变量 `GH_TOKEN` → gh 已登录的账号 → 本机 git 凭据」的顺序找，所以只要你能 `git push`，就能发版。
-常用参数：`--skip-build`（只重传现成的包）、`--draft`（先发草稿）、`--file <路径>`（传别处打好的包）、
-`--dry-run`（只打包不上传）。
-
 ## 声明
 
 - 本项目仅供学习交流与个人直播辅助使用，请遵守 B 站 / 网易云 / 各 TTS 服务商的用户协议。
