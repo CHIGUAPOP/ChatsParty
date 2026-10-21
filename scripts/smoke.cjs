@@ -119,6 +119,7 @@ async function main() {
   checkCsp()
   checkMusicOverlay()
   checkOverlayLayout()
+  await checkEmoticons()
   checkStoreMerge()
   checkCommands()
   checkNeteaseLogin()
@@ -247,6 +248,21 @@ function checkMusicOverlay() {
   ok('引擎挂在 App 层常驻', /MusicPlayerProvider/.test(app) && /music-engine/.test(app))
   // 播放器的回调必须活着 —— 一旦 Audio 的 onended 被摘，队列就永远停在上一首
   ok('播完自动推进下一首', /el\.onended[\s\S]{0,140}api\.music\.next\(\)/.test(engine))
+  // 「点歌从 2 分多开始放」那次事故的护栏：换歌时把 positionRef（上一首残留的
+  // 进度）当成了新歌的起点。续播位置**只在条目没换**时才用（浮窗播到哪这边接到哪），
+  // 换歌一律从头。视频分支一直是对的（itemChanged ? 0 : 镜像），歌这路曾经写反了。
+  ok(
+    '换歌从头播（续播位置只在条目没换时才用）',
+    /const resumeAt = itemChanged \? 0 : Math\.floor\(positionRef\.current\)/.test(engine),
+    /audioKey === key \? 0 : Math\.floor\(positionRef\.current\)/.test(engine)
+      ? '方向反了：audioKey !== key 恰恰是要重新取链的新歌'
+      : null,
+  )
+  ok(
+    '播完 / 断流把进度归零（旧进度不再有机会被当成下一首的起点）',
+    /el\.onended = \(\) => \{[\s\S]{0,160}?setPosition\(0\)/.test(engine) &&
+      /el\.onerror = \(\) => \{[\s\S]{0,220}?setPosition\(0\)/.test(engine),
+  )
 
   /* ---- 叠加层：整体缩放 / 字号 / 歌词 ---- */
 
@@ -347,6 +363,117 @@ function checkMusicOverlay() {
  * 叠放必须「真重叠才叠」（否则宽画面下也会被无谓地挪开）、
  * 塞不下必须裁掉最老的而不是糊到别人身上。
  */
+/**
+ * 弹幕里的表情包。
+ *
+ * 用户报的毛病是「表情包显示的是对应的文字」—— 根因有两层：
+ *   ① 只在弹幕包自带 emots 时才换图，而那个字段只覆盖一部分弹幕
+ *   ② 键格式不统一：收藏集（pkg_type=3）下发 `[dog]`，通用表情下发 `啊`，
+ *      直接 emots[名字] 去查必然漏
+ * 这里守住「名字归一 + 三路合并 + 直播优先」这三件事别被改回去，
+ * 以及渲染端三处（主界面 / 悬浮窗共用 / OBS 叠加层）都必须带 no-referrer。
+ */
+function checkEmoticons() {
+  return (async () => {
+    console.log('\n[24c] 表情图册')
+  const root = path.join(__dirname, '..')
+  const read = (p) => (fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : '')
+  const E = require('../electron/emoticons.cjs')
+
+  // ---- 名字归一 ----
+  ok('带方括号的名字会被剥掉', E.normName('[dog]') === 'dog')
+  ok('不带方括号的名字原样保留', E.normName('啊') === '啊')
+  ok('首尾空白一并去掉', E.normName('  热  ') === '热')
+  ok('空值不会炸', E.normName(null) === '' && E.normName(undefined) === '')
+
+  // ---- 面板解析 ----
+  const liveRes = {
+    code: 0,
+    data: {
+      data: [
+        { pkg_id: 100, pkg_type: 3, emoticons: [{ emoji: '[dog]', url: 'http://a.com/dog.png', width: 200, height: 60 }] },
+        { pkg_id: 1, pkg_type: 1, emoticons: [{ emoji: '啊', url: 'http://a.com/ah.png' }] },
+      ],
+    },
+  }
+  const live = E.parseLivePanel(liveRes)
+  ok('直播面板：收藏集与通用表情都收进来', live.length === 2, live.map((x) => x[0]))
+  ok('直播面板：键已归一（没有 [dog]）', live[0][0] === 'dog', live[0][0])
+  ok('直播面板：http 升 https', live[0][1].url === 'https://a.com/dog.png', live[0][1].url)
+
+  const replyRes = {
+    code: 0,
+    data: {
+      packages: [
+        {
+          emote: [
+            { text: '[doge_金箍]', url: 'http://b.com/jingu.png', meta: { alias: '金箍' } },
+            { text: '[dog]', url: 'http://b.com/dog2.png' },
+          ],
+        },
+      ],
+    },
+  }
+  const reply = E.parseReplyPanel(replyRes)
+  ok('评论面板：正文名 + alias 都收', reply.length === 3, reply.map((x) => x[0]))
+  ok('评论面板：alias 也能查到', reply.some(([n]) => n === '金箍'))
+
+  const book = E.mergeBook([reply, live])
+  ok('合并后直播面板优先（同名的狗取直播那张）', book.dog.url === 'https://a.com/dog.png', book.dog.url)
+  ok('混合大小写的名字两种键都能查到', (() => {
+    const b = E.mergeBook([[['Doge', { url: 'https://a.com/x.png', w: 0, h: 0 }]]])
+    return b.Doge && b.doge && b.doge.url === 'https://a.com/x.png'
+  })())
+
+  // ---- 拉取：没会话 / 拉失败都不许抛，也不许把旧图册清空 ----
+  const eb = new E.EmoticonBook({ getSession: () => null })
+  let threw = null
+  try {
+    const r = await eb.refresh(1, { force: true })
+    ok('没有会话时 refresh 直接返回 false（不抛）', r === false, r)
+  } catch (e) {
+    threw = String(e && e.message)
+    ok('没有会话时 refresh 直接返回 false（不抛）', false, threw)
+  }
+  ok('两个面板都要登录态（URL 写死在这两处）', /GetEmoticons/.test(E.LIVE_PANEL) && /panel\/web/.test(E.REPLY_PANEL))
+
+  // 换房间必须重拉：收藏集/粉丝团表情是按房间给的，沿用上一家的图册会画错图
+  const calls = []
+  const rb = new E.EmoticonBook({ getSession: () => null })
+  rb.fetchJson = async (url) => {
+    calls.push(url)
+    return url.includes('GetEmoticons') ? liveRes : replyRes
+  }
+  await rb.refresh(111, { force: true })
+  const n1 = calls.length
+  await rb.refresh(111) // 同一个房间：TTL 内不重拉
+  ok('同一个房间在 TTL 内不重复拉', calls.length === n1, calls.length - n1)
+  await rb.refresh(222) // 换房间：即使 TTL 内也要重拉
+  ok('换了房间立刻重拉（不吃 TTL）', calls.length > n1 && calls.slice(n1).some((u) => u.includes('room_id=222')), calls.slice(n1))
+
+  // ---- 各处接线 ----
+  const preload = read(path.join(root, 'electron', 'preload.cjs'))
+  const mainSrc = read(path.join(root, 'electron', 'main.cjs'))
+  const page = read(path.join(root, 'src', 'pages', 'DanmakuPage.tsx'))
+  const lib = read(path.join(root, 'src', 'lib', 'emoticons.ts'))
+  const css = read(path.join(root, 'src', 'styles.css'))
+  const overlayHtml = read(path.join(root, 'overlay', 'index.html'))
+
+  ok('preload 暴露了图册接口', /emoticons:\s*\{/.test(preload) && /emoticons:get/.test(preload) && /emoticons:changed/.test(preload))
+  ok('主进程进了房间就拉图册', /refreshEmoticons\(\)/.test(mainSrc) && /refreshEmoticons\(\)\s*\n?\s*return \{ realRoomId/.test(mainSrc))
+  ok('登录成功后也拉一次（面板要登录态）', /rememberIfLoggedIn[\s\S]{0,200}refreshEmoticons\(\)/.test(mainSrc))
+  ok('叠加层连上来时补发图册', /emoticonProvider/.test(mainSrc) && /emoticonProvider/.test(read(path.join(root, 'electron', 'overlay.cjs'))))
+  ok('主界面不再只认事件自带的 emots', !/if \(!ev\.emots\) return text/.test(page) && /lookupEmoticon\(/.test(page))
+  ok('主界面表情图带 no-referrer（B站图床 403）', /className="danmaku-emote"[\s\S]{0,220}referrerPolicy="no-referrer"/.test(page))
+  ok('浮窗共用同一份渲染层（图册要自己订一份）', /useEmoticonBookSync/.test(read(path.join(root, 'src', 'float', 'FloatShell.tsx'))))
+  ok('渲染层有图册 store 与查表口径', /useSyncExternalStore/.test(lib) && /lookupEmoticon/.test(lib) && /local\[`\[\$\{name\}\]`\]/.test(lib))
+  ok('表情图高度跟着文字走', /\.danmaku-emote\s*\{[^}]*?height:\s*1\.7em/.test(css))
+  ok('叠加层也认图册且带 no-referrer', /let emoteBook = \{\}/.test(overlayHtml) && /msg\.type === 'emoticons'/.test(overlayHtml) && /img\.referrerPolicy = 'no-referrer'/.test(overlayHtml))
+  ok('叠加层也容忍带方括号的键', /local\['\[' \+ name \+ '\]'\]/.test(overlayHtml))
+  ok('叠加层正则放宽到 24 字（春卷饭10周年表情包_再见吧 有 14 字）', /1,24/.test(overlayHtml) && /1,24/.test(lib))
+  })()
+}
+
 function checkOverlayLayout() {
   console.log('\n[24b] 叠加层自动避让')
   const root = path.join(__dirname, '..')
@@ -1460,7 +1587,16 @@ function testViewers() {
   // 播放器本体必须常驻，控制台只是遥控器；住在这里的话切页面就会断
   ok('控制台只是遥控器，用常驻的播放引擎', /useMusicPlayer\(\)/.test(mc))
   ok('三个键：播放/暂停、下一首、清空', /onClick=\{toggle\}/.test(mc) && /api\.music\.next\(\)/.test(mc) && /api\.music\.clear\(\)/.test(mc))
-  ok('音量也在这儿能调', /Slider value=\{volume\}/.test(mc))
+  // 播视频时这颗滑条必须调**视频**音量 —— 以前写死 music.volume，拖它对视频毫无作用
+  ok(
+    '音量也在这儿能调（跟着当前条目走：播视频时调的是视频音量）',
+    /Slider value=\{muted \? 0 : vol\}/.test(mc) && /const setVol = onVolume \|\| setActiveVolume/.test(mc),
+  )
+  ok(
+    '调用方不再把滑条写死在 music.volume 上',
+    !/onVolume=\{\(v\) => patch\(\{ music: \{ volume: v \} \}\)\}/.test(read('src/pages/DanmakuPage.tsx')) &&
+      !/onVolume=\{\(v\) => \{[\s\S]{0,80}music: \{ volume: v \}/.test(read('src/float/FloatShell.tsx')),
+  )
   // 右侧栏的高度是「三块抢一栏」，每多一条待播就少一行观众榜。
   // 这条钉住的是取舍本身，不是在数括号 —— 改成 2 之前先想清楚拿谁换。
   ok('只预告「下一首」，不预告两首', /state\.items\.slice\(0, 1\)/.test(mc))
@@ -4087,7 +4223,14 @@ function testVideoQueue() {
     /videoEl\?\.pause\(\)/.test(engine) && /el\.play\(\)[\s\S]{0,80}?setPlaying\(true\)/.test(engine),
   )
   ok('播完靠原生 ended 推进下一首（不再按总时长自己数）', /el\.onended = \(\) => \{[\s\S]{0,160}?api\.music\.next\(\)/.test(engine))
-  ok('音量/静音直接落在原生元素上', /el\.volume = Math\.min\(1, Math\.max\(0, videoVolumeCfg\)\)/.test(engine) && /el\.muted = videoMutedCfg/.test(engine))
+  // 依赖必须是**本地 state**：拖滑条走的是 api.config.patch（直接 IPC），不经过 App 那份
+  // config —— 等 config 回流的话这一下永远等不到，就是「滑条动了音量不动」那次事故。
+  ok(
+    '音量/静音直接落在原生元素上（且跟着本地 state 走，不等配置回流）',
+    /el\.volume = Math\.min\(1, Math\.max\(0, videoVolume\)\)/.test(engine) &&
+      /el\.muted = videoMuted/.test(engine) &&
+      /\}, \[videoVolume, videoMuted\]\)/.test(engine),
+  )
 
   // ---- 跨窗口播放权 ----
   // 主窗口和每个浮窗都是独立渲染进程、各自一份引擎；广播又不分窗口 ——
@@ -4134,6 +4277,51 @@ function testVideoQueue() {
   ok('浮窗头部有常驻静音按钮（等控件条浮出来太慢）', /toggleMute/.test(read('src/float/FloatShell.tsx')))
   ok('浮窗静音记在配置里（关掉重开还是静音）', /muted: c\.muted/.test(read('electron/float.cjs')) && /muted: f\.muted === true/.test(read('electron/float.cjs')))
   ok('渲染层接口齐（videoAudio）', /videoAudio/.test(preload) && /music:videoAudio/.test(main) && /videoAudio/.test(apiTs))
+
+  // ---- 清晰度可手调 ----
+  // 选了 1080P 也可能被 B 站夹回 720P（这条老接口的 accept_quality 常常只有 16/64），
+  // 所以「请求的档」和「实际拿到的档」必须分开存、分开显示。
+  const store = read('electron/store.cjs')
+  const VQ = require(path.join(root, 'electron', 'bilibili', 'video.cjs'))
+  ok('默认清晰度 720P（配置存的是 B 站 qn 码）', /quality: 64/.test(store) && VQ.normalizeQuality(undefined) === 64)
+  ok('认不出的值退回默认档（脏配置不至于取不到流）', VQ.normalizeQuality('999') === 64 && VQ.normalizeQuality(null) === 64)
+  ok('取流按请求的清晰度发（不是写死一档）', /const qn = normalizeQuality\(opts\.qn\)/.test(video) && /qn=\$\{qn\}/.test(video))
+  ok('主进程两条取流路径都带清晰度（主进程自己那条 + 渲染层那条）', main.split('qn: videoQualityWanted()').length === 3)
+  ok(
+    '返回值里带**实际**拿到的清晰度（被夹低了要说出来）',
+    /quality: Number\(body\.quality\)/.test(video) && /musicStreamQuality/.test(main) && /streamQuality/.test(main),
+  )
+  // 档位表在两处（取流模块 / 界面下拉），改一边漏一边 = 界面上有档选了没效果
+  const qPairs = (src) => {
+    const i = src.indexOf('QUALITY_OPTIONS = [')
+    const block = src.slice(i, src.indexOf(']', i))
+    return (block.match(/\{[^}]*\}/g) || [])
+      .map((s) => {
+        const nums = s.match(/\d+/g) || []
+        const strs = s.match(/'([^']*)'/g) || []
+        return `${nums[0]}:${String(strs[strs.length - 1] || '').replace(/'/g, '')}`
+      })
+      .join(',')
+  }
+  ok(
+    '两处档位表逐行一致（取流模块 ↔ 界面下拉）',
+    qPairs(video) === qPairs(page) && qPairs(video) === '16:360P,32:480P,64:720P,74:720P60,80:1080P,116:1080P60,120:4K',
+  )
+  ok(
+    '清晰度改了旧的流当场作废（不缓存上一个清晰度的地址）',
+    /applyVideoQualityChange/.test(main) && /musicStreamCache\.clear\(\)/.test(main) && /musicStreamQuality\.clear\(\)/.test(main),
+  )
+  ok('主进程喊一声让渲染层重取（music:reload）', /send\('music:reload'\)/.test(main) && /onReload/.test(preload) && /onReload/.test(apiTs))
+  ok(
+    '换清晰度不把视频弹回开头（按当前进度接回去，镜像窗口换好流停在那）',
+    /api\.music\.onReload\?\.\(/.test(engine) &&
+      /streamCache\.delete\(/.test(engine) &&
+      /loadVideo\(cur, keyOf\(cur\), ownsPlaybackRef\.current && wasPlaying, Math\.floor\(Number\(at\) \|\| 0\)\)/.test(engine),
+  )
+  ok(
+    '正在播放的卡片写明实际那档（别让人以为选了 1080P 就是 1080P）',
+    /qualityText\(state\.streamQuality\)/.test(page) && /实际 \$\{qualityText/.test(page),
+  )
 
   ok('控件平时藏着，鼠标移到画面上才出来', /\.vstage__ctrl \{[\s\S]{0,300}?opacity: 0;/.test(css) && /\.vstage:hover \.vstage__ctrl/.test(css))
   ok('按着控件拖动时不许淡出（不然音量拖到一半会消失）', /\.vstage__ctrl:active/.test(css))

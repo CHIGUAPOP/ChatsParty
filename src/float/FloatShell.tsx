@@ -2,6 +2,7 @@ import React from 'react'
 import { api, AppConfig, FloatPanel, FloatState, LiveEvent } from '../lib/api'
 import { MusicPlayerProvider } from '../lib/music-engine'
 import { setResolvedFace } from '../lib/faces'
+import { useEmoticonBookSync } from '../lib/emoticons'
 import { Icon, Slider, Snackbar, Switch, useDraftInput } from '../components/ui'
 import ViewersList from '../components/ViewersList'
 import PaidHistory from '../components/PaidHistory'
@@ -36,6 +37,9 @@ export default function FloatShell({ panel }: { panel: FloatPanel }) {
     setToast({ message, error })
     window.setTimeout(() => setToast({ message: '' }), error ? 5200 : 3200)
   }, [])
+
+  // 弹幕浮窗是独立的渲染进程，表情图册要自己订一份（主进程推给所有窗口）
+  useEmoticonBookSync()
 
   React.useEffect(() => {
     api.config.get().then(setConfig)
@@ -229,15 +233,8 @@ export default function FloatShell({ panel }: { panel: FloatPanel }) {
             )}
             {panel === 'viewers' && <ViewersList actions={winButtons} />}
             {panel === 'gifts' && <PaidHistory events={events} actions={winButtons} />}
-            {panel === 'music' && (
-              <MusicConsole
-                volume={config?.music?.volume ?? 0.6}
-                actions={winButtons}
-                onVolume={(v) => {
-                  api.config.patch({ music: { volume: v } }).then(setConfig)
-                }}
-              />
-            )}
+            {/* 音量不在这里传：控制台自己按「当前播的是歌还是视频」选旋钮 */}
+            {panel === 'music' && <MusicConsole actions={winButtons} />}
           </div>
         </div>
 

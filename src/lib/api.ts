@@ -1,3 +1,13 @@
+/** 一张表情图片。w/h 是 B 站给的原始尺寸（0 表示没给），渲染时只用高度 */
+export interface EmoticonItem {
+  url: string
+  w?: number
+  h?: number
+}
+
+/** 表情图册：归一后的表情名 → 图片。名字已剥掉方括号，同一份里也留了小写键 */
+export type EmoticonBook = Record<string, EmoticonItem>
+
 export interface LiveEvent {
   id?: string
   type: 'danmaku' | 'gift' | 'guard' | 'superchat' | 'enter' | 'live' | 'offline' | 'other'
@@ -230,6 +240,11 @@ export interface AppConfig {
     /** 自己那一路音频的音量 0~1 */
     volume: number
     muted: boolean
+    /**
+     * B 站视频**请求的**清晰度（qn 码，见 MusicPage 的 QUALITY_OPTIONS）。
+     * 实际拿到的可能更低 —— 服务端会夹，真值看 MusicState.streamQuality。
+     */
+    quality?: number
   }
   window: { width: number; height: number }
   /** 关掉主界面时缩到系统托盘，后台继续收弹幕；真退出走托盘图标的右键菜单 */
@@ -302,6 +317,13 @@ export interface MusicState {
    * 否则接管播放权那一刻会被当成「换了条目」从头播。
    */
   tick?: { key: string; pos: number; dur: number; playing: boolean } | null
+  /** 当前视频的整条流地址（歌没有）。浮窗与叠加层靠它播画面 */
+  stream?: string | null
+  /**
+   * 这条流**实际拿到**的清晰度（B 站 qn 码）。
+   * 选了 1080P 也可能被夹回 720P，所以显示的是它，不是设置里选的那档。
+   */
+  streamQuality?: number
 }
 
 export interface MusicAudio {
@@ -464,6 +486,14 @@ interface Bridge {
     refresh: () => Promise<ViewersState>
     onState: (cb: (s: ViewersState) => void) => () => void
   }
+  /**
+   * 表情图册（名字 → 图片）。弹幕包自带的 `emots` 只覆盖一部分且键格式不统一，
+   * 主进程会把直播面板 + 评论面板合并成一张全量表推过来。
+   */
+  emoticons: {
+    get: () => Promise<EmoticonBook>
+    onChanged: (cb: (book: EmoticonBook) => void) => () => void
+  }
   tts: {
     providers: () => Promise<Record<string, any>>
     voices: (provider: string, force?: boolean) => Promise<{ ok: boolean; voices?: any[]; message?: string }>
@@ -570,6 +600,8 @@ interface Bridge {
     onTick: (cb: (p: { pos: number; dur: number; playing: boolean }) => void) => () => void
     remote: (cmd: { type: 'toggle' } | { type: 'seek'; sec: number }) => void
     onRemote: (cb: (cmd: { type: 'toggle' } | { type: 'seek'; sec: number }) => void) => () => void
+    /** 视频清晰度被改了：主进程喊一声，渲染层丢掉本地缓存的流并按新清晰度重取（进度接回原处） */
+    onReload: (cb: () => void) => () => void
     play: () => Promise<MusicState>
     next: () => Promise<MusicState>
     remove: (index: number) => Promise<MusicState>

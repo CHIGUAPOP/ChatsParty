@@ -1,5 +1,6 @@
 import React from 'react'
-import { api, AppConfig, FloatPanel, FloatState, LiveEvent } from '../lib/api'
+import { api, AppConfig, EmoticonBook, FloatPanel, FloatState, LiveEvent } from '../lib/api'
+import { EMOTE_RE, lookupEmoticon, useEmoticons } from '../lib/emoticons'
 import { Button, Chip, Icon, Select, Switch, UserAvatar, useDraftInput } from '../components/ui'
 import ViewersList from '../components/ViewersList'
 import PaidHistory from '../components/PaidHistory'
@@ -266,10 +267,8 @@ export default function DanmakuPage({ config, patch, notify, events, status }: P
           onClose={() => closeFloat('music')}
           className="float-region--music"
         >
-          <MusicConsole
-            volume={config.music?.volume ?? 0.6}
-            onVolume={(v) => patch({ music: { volume: v } })}
-          />
+          {/* 音量交给控制台自己：它知道当前播的是歌还是视频，会调对应的那个旋钮 */}
+          <MusicConsole />
         </FloatRegion>
       </aside>
     </div>
@@ -344,6 +343,9 @@ export function EventRow({
   // 主播身上没有自己房间的粉丝牌，房管位也不是他 —— 弹幕包里根本没有「我是主播」这个字段，
   // 只能拿 uid 和连接房间时记下的主播 uid 比。标出来是为了让「谁会被当成主播放行」看得见。
   const isAnchor = anchorUid > 0 && Number(ev.uid) === anchorUid
+  // 订阅图册：主进程推来新图册时（登录后 / 进房间后）这一行要重新画，
+  // 否则早先渲染出来的那几条会一直停在「[表情名]」文字上
+  const book = useEmoticons()
   return (
     <div className="danmaku-item">
       {showFace && <UserAvatar src={ev.face} name={name} uid={ev.uid} />}
@@ -361,9 +363,10 @@ export function EventRow({
           {ev.price ? <Chip variant={ev.type === 'superchat' ? 'sc' : 'gift'}>¥{ev.price}</Chip> : null}
         </div>
         {ev.emojiUrl ? (
-          <img src={ev.emojiUrl} alt={ev.content} style={{ height: 40 }} />
+          // B站图床认 Referer：带本机地址过去会 403，必须 no-referrer
+          <img className="danmaku-emoji" src={ev.emojiUrl} alt={ev.content} referrerPolicy="no-referrer" />
         ) : (
-          <div className="danmaku-text">{renderContent(ev)}</div>
+          <div className="danmaku-text">{renderContent(ev, book)}</div>
         )}
       </div>
     </div>
@@ -371,20 +374,27 @@ export function EventRow({
 }
 
 /** 把 [表情名] 替换成图片，直播间表情才有画面感 */
-function renderContent(ev: LiveEvent) {
+function renderContent(ev: LiveEvent, book: EmoticonBook) {
   const text = ev.content || ''
-  if (!ev.emots) return text
+  // 一条方括号都没有就别白扫一遍正则（绝大多数弹幕走这条）
+  if (!text.includes('[')) return text
   const parts: React.ReactNode[] = []
-  const re = /\[([^\]]{1,12})\]/g
+  const re = new RegExp(EMOTE_RE.source, 'g')
   let last = 0
   let m: RegExpExecArray | null
   let key = 0
   while ((m = re.exec(text))) {
     if (m.index > last) parts.push(text.slice(last, m.index))
-    const emot = ev.emots[m[1]]
+    const emot = lookupEmoticon(ev, book, m[1])
     if (emot?.url) {
       parts.push(
-        <img key={key++} src={emot.url} alt={m[1]} style={{ height: 24, verticalAlign: 'middle' }} />,
+        <img
+          key={key++}
+          className="danmaku-emote"
+          src={emot.url}
+          alt={m[1]}
+          referrerPolicy="no-referrer"
+        />,
       )
     } else {
       parts.push(m[0])

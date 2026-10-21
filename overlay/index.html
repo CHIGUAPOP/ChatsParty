@@ -1949,30 +1949,57 @@
         for (let i = 0; i < live.length - cap; i++) beginLeave(live[i], dir)
       }
 
-      function renderEmots(text, emots) {
-        if (!emots) return null
-        const frag = document.createDocumentFragment()
-        const re = /\[([^\]]{1,12})\]/g
-        let last = 0
-        let m
-        let hit = false
-        while ((m = re.exec(text))) {
-          if (m.index > last) frag.appendChild(document.createTextNode(text.slice(last, m.index)))
-          const e = emots[m[1]]
-          if (e && e.url) {
-            hit = true
-            const img = document.createElement('img')
-            img.src = e.url
-            img.alt = m[1]
-            frag.appendChild(img)
-          } else {
-            frag.appendChild(document.createTextNode(m[0]))
-          }
-          last = m.index + m[0].length
+      /*
+        表情图册：名字 → 图片地址。主进程把直播面板 + 评论面板合并成一份推过来，
+        弹幕里只有「[表情名]」文本时靠它换图。
+        事件自带的 emots 优先，但它只在发送端带了表情数据时才有，且键格式不统一
+        （收藏集给 `[dog]`、通用表情给 `啊`）—— 所以两边都做剥括号归一。
+      */
+      let emoteBook = {};
+
+      function normEmoteName(raw) {
+        const s = String(raw == null ? '' : raw).trim();
+        const m = /^\[([^\]]{1,24})\]$/.exec(s);
+        return (m ? m[1] : s).trim();
+      }
+
+      function lookupEmote(ev, name) {
+        const low = name.toLowerCase();
+        const local = ev && ev.emots;
+        if (local) {
+          const hit = local[name] || local['[' + name + ']'] || local[low];
+          if (hit && hit.url) return hit;
         }
-        if (!hit) return null
-        if (last < text.length) frag.appendChild(document.createTextNode(text.slice(last)))
-        return frag
+        const g = emoteBook[name] || emoteBook[low];
+        return g && g.url ? g : null;
+      }
+
+      function renderEmots(text, ev) {
+        if (!text || text.indexOf('[') < 0) return null;
+        const frag = document.createDocumentFragment();
+        const re = /\[([^\]]{1,24})\]/g;
+        let last = 0;
+        let m;
+        let hit = false;
+        while ((m = re.exec(text))) {
+          if (m.index > last) frag.appendChild(document.createTextNode(text.slice(last, m.index)));
+          const e = lookupEmote(ev, m[1]);
+          if (e) {
+            hit = true;
+            const img = document.createElement('img');
+            img.src = e.url;
+            img.alt = m[1];
+            // B站图床认 Referer：OBS 那边是从本机地址请求的，带过去会 403
+            img.referrerPolicy = 'no-referrer';
+            frag.appendChild(img);
+          } else {
+            frag.appendChild(document.createTextNode(m[0]));
+          }
+          last = m.index + m[0].length;
+        }
+        if (!hit) return null;
+        if (last < text.length) frag.appendChild(document.createTextNode(text.slice(last)));
+        return frag;
       }
 
       function addItem(ev) {
@@ -2037,9 +2064,11 @@
           const img = document.createElement('img')
           img.src = ev.emojiUrl
           img.style.height = '40px'
+          // 同上：图床认 Referer，OBS 页面带本机 Referer 会 403
+          img.referrerPolicy = 'no-referrer'
           text.appendChild(img)
         } else {
-          const frag = renderEmots(ev.content || '', ev.emots)
+          const frag = renderEmots(ev.content || '', ev)
           if (frag) text.appendChild(frag)
           else text.textContent = ev.content || ''
         }
@@ -2099,6 +2128,10 @@
               // 视频镜像的进度心跳（拥有者窗口 400ms 一条），只影响 <video> 不重排
               syncVideoWithTick(msg.payload)
             } else if (msg.type === 'face') applyFacePatch(msg.payload.src, msg.payload.data)
+            else if (msg.type === 'emoticons') {
+              // 整份换掉（主进程只在图册换代时推，不是每帧）
+              emoteBook = msg.payload && typeof msg.payload === 'object' ? msg.payload : {}
+            }
             else if (msg.type === 'lyric') {
               // 逐字段取值而不是 Object.assign：换歌那一帧刻意不带 lines（让它先清空），
               // 合并的话旧歌词会赖着不走，出现「新歌配旧词」

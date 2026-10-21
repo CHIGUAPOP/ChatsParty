@@ -68,6 +68,18 @@ export interface MusicPlayerValue {
   videoMuted: boolean
   setVideoVolume: (v: number) => void
   setVideoMuted: (v: boolean) => void
+  /**
+   * **跟着当前条目走的音量旋钮**：在播 B 站视频时它控制视频音量，在播歌时控制歌的音量。
+   *
+   * 为什么非要有它：界面上有好几处音量滑块（点歌页「正在播放」卡片、弹幕页和浮窗的
+   * 音乐控制台），以前一律绑死 `music.volume` —— 于是播着视频拖它们，画面上那个滑块
+   * 动得挺欢，视频一点没变小（视频的音量在 `video.volume` 上）。用户眼里就是
+   * 「音量控制失灵」。所有「不知道当前播的是什么」的地方都应该用这四个，别直接用配置里的值。
+   */
+  activeVolume: number
+  activeMuted: boolean
+  setActiveVolume: (v: number) => void
+  setActiveMuted: (v: boolean) => void
   /** 拖进度条：跳到第 n 秒（原生 seek，直接拨 currentTime，不再重建任何东西） */
   videoSeekTo: (sec: number) => void
 }
@@ -214,10 +226,10 @@ export function MusicPlayerProvider({ config, notify, children }: Props) {
   /** 视频的音量/静音（直接落在原生元素上，碰得到了） */
   const videoVolumeCfg = Number.isFinite(Number(config?.video?.volume)) ? Number(config?.video?.volume) : 0.8
   const videoMutedCfg = config?.video?.muted === true
+  // 这两个 ref 只在这里取初值，之后跟着本地 state 走（见下面「装载新流」那组 effect）——
+  // 每次渲染都拿 config 覆盖的话，拖滑条时 ref 会被按回旧值
   const videoVolumeRef = React.useRef(videoVolumeCfg)
-  videoVolumeRef.current = videoVolumeCfg
   const videoMutedRef = React.useRef(videoMutedCfg)
-  videoMutedRef.current = videoMutedCfg
   const notifyRef = React.useRef(notify)
   notifyRef.current = notify
   /** 播放意图的最新值（「该不该在响」）。播放权翻回来时照它决定接不接着放 */
@@ -228,6 +240,9 @@ export function MusicPlayerProvider({ config, notify, children }: Props) {
   positionRef.current = position
   const videoElapsedRef = React.useRef(0)
   videoElapsedRef.current = videoElapsed
+  /** 最新一帧队列状态：主进程广播过来的回调（如清晰度改动）里要读它 */
+  const stateRef = React.useRef(state)
+  stateRef.current = state
 
   /* ---- 跨窗口播放权 ---- */
   const thisFloat = new URLSearchParams(window.location.search).get('float')
@@ -268,6 +283,9 @@ export function MusicPlayerProvider({ config, notify, children }: Props) {
     el.ontimeupdate = () => setPosition(el.currentTime || 0)
     el.onerror = () => {
       setPlaying(false)
+      // 进度归零：残留的「上一首播到哪」一旦被当成下一首的起点，
+      // 新歌就会从上首的位置开始放（用户看到「怎么从 2 分多开始」）
+      setPosition(0)
       // 播放中途断流也走这里；统一由它负责提示 + 跳下一首
       notifyRef.current(describeAudioFailure(el), true)
       playingId = 0
@@ -276,6 +294,7 @@ export function MusicPlayerProvider({ config, notify, children }: Props) {
     }
     el.onended = () => {
       setPlaying(false)
+      setPosition(0)
       playingId = 0
       audioKey = ''
       api.music.next()
@@ -602,9 +621,16 @@ export function MusicPlayerProvider({ config, notify, children }: Props) {
     setVideo(null)
     setVideoPlaying(false)
     if (videoEl) videoEl.pause()
-    // 播放权刚翻回来且元素里还是这首：接着放（别从头）；元素里是旧条目：
-    // 重新取链，位置从镜像来的进度续 —— 浮窗播到哪，这边接到哪
-    const resumeAt = audioKey === key ? 0 : Math.floor(positionRef.current)
+    /**
+     * 续播位置：**只有条目没换**才按镜像进度接（浮窗播到哪这边接到哪）；
+     * 条目换了（观众点歌 / 播完推进）一律从头。
+     *
+     * 这里曾经写成 `audioKey === key ? 0 : positionRef.current` —— 方向正好反了：
+     * audioKey !== key 恰恰是「要重新取链的新歌」，却拿 positionRef（上一首残留的
+     * 进度）当起点，于是新歌从上一首播到的地方开始（用户看到「怎么从 2 分多开始放」）。
+     * 视频分支一直是对的（itemChanged ? 0 : 镜像），歌这路漏了。
+     */
+    const resumeAt = itemChanged ? 0 : Math.floor(positionRef.current)
     playCurrent(cur, autoPlay, resumeAt)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ready, state.current?.id, ownsPlayback, loadVideo, playCurrent])
@@ -614,14 +640,6 @@ export function MusicPlayerProvider({ config, notify, children }: Props) {
     if (audioEl) audioEl.volume = volumeRef.current
   }, [config?.music?.volume])
 
-  /* 视频的音量/静音直接落在原生元素上 —— 原生 video，碰得到了 */
-  React.useEffect(() => {
-    const el = videoEl
-    if (!el) return
-    el.volume = Math.min(1, Math.max(0, videoVolumeCfg))
-    el.muted = videoMutedCfg
-  }, [videoVolumeCfg, videoMutedCfg])
-
   /**
    * 视频的声音。写进配置是为了「滑条是滑条」—— 拖到哪就停在哪，关掉重开也一样，
    * 而不是每拖一下都靠一次 IPC 往返回显（那手感就是弹回去）。
@@ -629,6 +647,27 @@ export function MusicPlayerProvider({ config, notify, children }: Props) {
    */
   const [videoVolume, setVideoVolumeState] = React.useState(videoVolumeCfg)
   const [videoMuted, setVideoMutedState] = React.useState(videoMutedCfg)
+
+  /**
+   * 视频的音量/静音直接落在原生元素上 —— 原生 video，碰得到了。
+   *
+   * **依赖必须是本地 state，不能是 config**：拖滑条走的是 `setVideoVolume`
+   * → `api.config.patch`（直接 IPC），不经过 App 那份 config state ——
+   * 等 config 回流的话这一下永远等不到，表现就是「滑条动得挺欢，视频音量纹丝不动」。
+   */
+  React.useEffect(() => {
+    const el = videoEl
+    if (!el) return
+    el.volume = Math.min(1, Math.max(0, videoVolume))
+    el.muted = videoMuted
+  }, [videoVolume, videoMuted])
+
+  /* 装载新一条流时也要按当前这两个值来（元素可能被换过 src） */
+  React.useEffect(() => {
+    videoVolumeRef.current = videoVolume
+    videoMutedRef.current = videoMuted
+  }, [videoVolume, videoMuted])
+
   React.useEffect(() => {
     setVideoVolumeState(videoVolumeCfg)
   }, [videoVolumeCfg])
@@ -653,6 +692,23 @@ export function MusicPlayerProvider({ config, notify, children }: Props) {
     setVideoMutedState(Boolean(v))
     api.config.patch({ video: { muted: Boolean(v) } }).catch(() => {})
   }, [])
+
+  /** 歌的音量。也立刻落到元素上，别等配置回流（滑条要跟手） */
+  const setMusicVolume = React.useCallback((v: number) => {
+    const n = Math.min(1, Math.max(0, Number(v)))
+    if (!Number.isFinite(n)) return
+    volumeRef.current = n
+    if (audioEl) audioEl.volume = n
+    api.config.patch({ music: { volume: n } }).catch(() => {})
+  }, [])
+
+  /** 当前在播的是视频吗（video 非空 = 轮到 B 站视频了） */
+  const onVideo = Boolean(video)
+  const activeVolume = onVideo ? videoVolume : Number.isFinite(Number(config?.music?.volume)) ? Number(config?.music?.volume) : 0.6
+  // 歌没有静音这一档（静音是给视频准备的），所以播歌时恒为 false
+  const activeMuted = onVideo ? videoMuted : false
+  const setActiveVolume = onVideo ? setVideoVolume : setMusicVolume
+  const setActiveMuted = onVideo ? setVideoMuted : () => {}
 
   /**
    * 拖进度条：跳到第 n 秒。原生 seek —— 直接拨 currentTime，
@@ -805,6 +861,24 @@ export function MusicPlayerProvider({ config, notify, children }: Props) {
     return () => off?.()
   }, [])
 
+  /**
+   * 清晰度被改了：主进程喊一嗓子，这里丢掉本地缓存的流（旧流是上一个清晰度的）
+   * 重新取一条，并把进度拨回原处 —— 换清晰度不该把视频弹回开头。
+   */
+  React.useEffect(() => {
+    const off = api.music.onReload?.(() => {
+      const cur = stateRef.current?.current
+      if (!cur || kindOf(cur) !== 'video') return
+      const el = getVideoElement()
+      const at = Number.isFinite(Number(el?.currentTime)) ? Number(el.currentTime) : videoElapsedRef.current
+      const wasPlaying = Boolean(el?.src) && !el.paused
+      streamCache.delete(`${cur.bvid || ''}:${Number(cur.cid) || 0}`)
+      // 只有真正出声的那个窗口继续放；镜像窗口换好流停在那儿，等心跳来带
+      loadVideo(cur, keyOf(cur), ownsPlaybackRef.current && wasPlaying, Math.floor(Number(at) || 0))
+    })
+    return () => off?.()
+  }, [loadVideo])
+
   /* 歌词：换歌时取一次。视频没有歌词，别拿 cid 去问网易云 */
   React.useEffect(() => {
     const id = state.current?.id
@@ -918,6 +992,10 @@ export function MusicPlayerProvider({ config, notify, children }: Props) {
     videoMuted,
     setVideoVolume,
     setVideoMuted,
+    activeVolume,
+    activeMuted,
+    setActiveVolume,
+    setActiveMuted,
     videoSeekTo,
   }
 

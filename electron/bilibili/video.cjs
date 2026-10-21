@@ -20,6 +20,39 @@ const net = require('../lib/net.cjs')
 const BVID_RE = /BV[0-9A-Za-z]{10}/g
 
 /**
+ * 可选清晰度（B 站的 qn 码）。
+ *
+ * 这张表是**请求用的档位**，不是「一定能拿到」：服务端按视频本身有的清晰度
+ * 和当前身份（游客 / 登录 / 大会员）夹一次，结果在返回值的 `quality` 和
+ * `accept_quality` 里。实测 platform=html5 这条老接口大多只认 16 和 64，
+ * 要 1080P 也会被夹回 720P —— 所以界面上要显示实际拿到的那一档。
+ *
+ * 界面（src/pages/MusicPage.tsx 的 QUALITY_OPTIONS）跟这张表是镜像，
+ * smoke 有断言盯着两边逐行一致。
+ */
+const QUALITY_OPTIONS = [
+  { qn: 16, label: '360P' },
+  { qn: 32, label: '480P' },
+  { qn: 64, label: '720P' },
+  { qn: 74, label: '720P60' },
+  { qn: 80, label: '1080P' },
+  { qn: 116, label: '1080P60' },
+  { qn: 120, label: '4K' },
+]
+
+/** 认不出 / 没传就退回默认档（720P） */
+function normalizeQuality(qn) {
+  const n = Number(qn)
+  return QUALITY_OPTIONS.some((o) => o.qn === n) ? n : 64
+}
+
+/** qn 码 → 「720P」这种给人看的字 */
+function qualityLabel(qn) {
+  const hit = QUALITY_OPTIONS.find((o) => o.qn === Number(qn))
+  return hit ? hit.label : ''
+}
+
+/**
  * 从一段文本里抠出 BV 号。
  * 支持：裸 BV 号、`bilibili.com/video/BVxxx`、`?bvid=BVxxx`、以及带分 P 的链接。
  * 拿不到返回 null。
@@ -119,19 +152,22 @@ async function videoInfo(bvid, opts = {}) {
  * 报错当日志看就行，别当致命错误。
  *
  * @param {{bvid?:string, cid?:number|string}} item
- * @param {{session?: {getJSON:Function}, mode?: string}} opts
- * @returns {Promise<{url:string, quality?:number}>}
+ * @param {{session?: {getJSON:Function}, mode?: string, qn?: number|string}} opts
+ *   opts.qn 是**请求的清晰度**（见 QUALITY_OPTIONS），不传按默认档（720P）。
+ * @returns {Promise<{url:string, quality?:number, qualityLabel?:string, accept?:number[], requested?:number}>}
+ *   quality 是**实际拿到**的那档 —— 可能被服务端夹低，界面显示它才不会骗人。
  */
 async function videoPlayUrl(item, opts = {}) {
   const bvid = parseBvid((item && (item.bvid || item)) || '')
   const cid = Number(item && item.cid) || 0
   if (!bvid) throw new Error('缺 BV 号，取不了播放地址')
+  const qn = normalizeQuality(opts.qn)
   const qs = [
     `bvid=${encodeURIComponent(bvid)}`,
     `cid=${cid}`,
     'platform=html5',
     'high_quality=1',
-    'qn=64',
+    `qn=${qn}`,
     'otype=json',
   ].join('&')
   const url = `https://api.bilibili.com/x/player/playurl?${qs}`
@@ -149,16 +185,33 @@ async function videoPlayUrl(item, opts = {}) {
     throw new Error(msg || `取播放地址失败（${res.status}）`)
   }
   const body = d.data || {}
+  const accept = Array.isArray(body.accept_quality) ? body.accept_quality.slice() : []
+  const got = () => ({
+    requested: qn,
+    accept,
+    quality: Number(body.quality) || 0,
+    qualityLabel: qualityLabel(Number(body.quality) || 0),
+  })
   // html5 这条路给的是 durl（单文件 mp4，音视频都在里面）
   const durl = Array.isArray(body.durl) ? body.durl[0] : null
-  if (durl && durl.url) return { url: durl.url, quality: Number(body.quality) || 0 }
+  if (durl && durl.url) return { url: durl.url, ...got() }
   // 万一只给了 DASH（接口变了），就从里面挑一条音频 —— 我们只要声音
   const dash = body.dash || {}
   const audio = Array.isArray(dash.audio) && dash.audio.length ? dash.audio[0] : null
   if (audio && (audio.baseUrl || audio.base_url)) {
-    return { url: audio.baseUrl || audio.base_url, quality: Number(audio.id) || 0 }
+    return { url: audio.baseUrl || audio.base_url, ...got() }
   }
   throw new Error('这个视频没给到可用的播放地址（可能是会员 / 充电专属）')
 }
 
-module.exports = { parseBvid, parsePage, fmtDuration, videoInfo, videoPlayUrl, BVID_RE }
+module.exports = {
+  parseBvid,
+  parsePage,
+  fmtDuration,
+  videoInfo,
+  videoPlayUrl,
+  BVID_RE,
+  QUALITY_OPTIONS,
+  normalizeQuality,
+  qualityLabel,
+}

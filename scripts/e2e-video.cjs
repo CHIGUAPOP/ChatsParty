@@ -134,6 +134,8 @@ const STAGE_SNIPPET = `(() => {
     videoHeight: el ? el.videoHeight : 0,
     paused: el ? el.paused : null,
     currentTime: el ? el.currentTime : -1,
+    // 只看尾部标记（data: URL 本体是几十 KB 的 base64，别往日志里倒）
+    src: el ? String(el.src).slice(-24) : '',
     volume: el ? el.volume : -1,
     muted: el ? el.muted : null,
     elsewhere: Boolean(q('.vstage__elsewhere')),
@@ -500,6 +502,80 @@ async function main() {
       ok('叠加层页面加载并播放', false, String(e && e.message))
     }
     ovWin.destroy()
+  }
+
+  console.log('[9] 改清晰度 → 旧流作废重取，进度接回原处（不弹回开头）')
+  // 每次取流都给一个带编号的地址：src 变了才会真重载
+  //（引擎里「同一条流就别重设 src」，地址一模一样的话这步会被跳过去）
+  let take = 0
+  V.setUrlProvider(async () => ({ url: `${clip}#take${++take}`, quality: 16 }))
+  const before = (await run(main, STAGE_SNIPPET)) || {}
+  const at0 = Number(before.currentTime) || 0
+  await run(main, `window.chatsparty.config.patch({ video: { quality: 16 } })`)
+  const after = await waitFor(async () => {
+    const r = await run(main, STAGE_SNIPPET)
+    return r && r.hasEl && /#take/.test(r.src || '') ? r : null
+  }, 10000)
+  ok('改了清晰度就重取一条流（旧地址当场作废）', Boolean(after && take >= 1), after ? `第 ${take} 次取流` : '没换地址')
+  ok(
+    '换清晰度不把视频弹回开头（接着原来的进度放）',
+    Boolean(after && Number(after.currentTime) >= Math.max(0, at0 - 1.2)),
+    after ? `${at0.toFixed(2)}s → ${Number(after.currentTime).toFixed(2)}s` : null,
+  )
+  ok('换完还在播（不是换完就停在那儿）', Boolean(after && after.paused === false), after && after.paused)
+
+  console.log('[10] 音量控制：在播视频时调的是**视频**音量（不是歌的）')
+  // 「音量滑块拖了没反应」那次的原因：界面上有几处滑条写死 music.volume，
+  // 播视频时拖它们当然动不了视频的音量。这里真去拖一次，再看元素的 volume。
+  const VOL = `(() => {
+    const el = document.querySelector('.vstage__videohost video')
+    return el ? { volume: Number(el.volume.toFixed(2)), muted: el.muted } : null
+  })()`
+  /** 用原生 setter 改受控 range 的值（React 收的是 input 事件） */
+  const DRAG = (sel, v) =>
+    run(
+      main,
+      `(() => {
+        const el = document.querySelector(${JSON.stringify(sel)})
+        if (!el) return false
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
+        setter.call(el, String(${v}))
+        el.dispatchEvent(new Event('input', { bubbles: true }))
+        return true
+      })()`,
+    )
+
+  const vol0 = await run(main, VOL)
+  ok('元素上真的有音量可量', Boolean(vol0), vol0)
+  const dragged = await DRAG('.vstage__vol input[type=range]', 0.35)
+  const vol1 = await waitFor(async () => {
+    const r = await run(main, VOL)
+    return r && Math.abs(r.volume - 0.35) < 0.06 ? r : null
+  }, 6000)
+  ok('画面控件条上的音量滑条真能改视频音量', Boolean(dragged && vol1), vol1)
+  await run(main, `(() => { const b = document.querySelector('.vstage__vol .vstage__btn'); if (b) b.click(); return Boolean(b) })()`)
+  const muted1 = await waitFor(async () => {
+    const r = await run(main, VOL)
+    return r && r.muted === true ? r : null
+  }, 6000)
+  ok('控件条上的喇叭能静音视频', Boolean(muted1), muted1)
+  await run(main, `(() => { const b = document.querySelector('.vstage__vol .vstage__btn'); if (b) b.click(); return Boolean(b) })()`)
+
+  // 点歌页「正在播放」卡片里那一块：以前写死 music.volume，播视频时完全没用
+  await run(
+    main,
+    `(() => { const items = [...document.querySelectorAll('.nav-rail__item')]; const t = items.find((x) => (x.textContent || '').includes('点歌')); if (t) t.click(); return Boolean(t) })()`,
+  )
+  const onMusicPage = await waitFor(async () => run(main, `Boolean(document.querySelector('.music-now__vol input[type=range]'))`), 8000)
+  if (!onMusicPage) {
+    console.log('  DEBUG 点歌页没渲染出音量行（跳过这一条）')
+  } else {
+    const dragged2 = await DRAG('.music-now__vol input[type=range]', 0.2)
+    const vol2 = await waitFor(async () => {
+      const r = await run(main, VOL)
+      return r && Math.abs(r.volume - 0.2) < 0.06 ? r : null
+    }, 6000)
+    ok('点歌页正在播放里的音量滑条也能改视频音量', Boolean(dragged2 && vol2), vol2)
   }
 
   console.log(`\n结果：${pass} 通过 / ${fail} 失败`)

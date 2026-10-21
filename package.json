@@ -25,6 +25,8 @@
     "e2e:launchpad": "electron scripts/e2e-launchpad.cjs",
     "e2e:panels": "electron scripts/e2e-panels.cjs",
     "e2e:video": "electron scripts/e2e-video.cjs",
+    "e2e:song": "electron scripts/e2e-song-start.cjs",
+    "e2e:emote": "electron scripts/e2e-emote.cjs",
     "start": "electron .",
     "e2e:viewers": "electron scripts/e2e-viewers.cjs"
   },

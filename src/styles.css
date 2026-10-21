@@ -1015,6 +1015,21 @@ body {
   word-break: break-word;
 }
 
+/* 弹幕里的 B 站表情。高度跟文字走，宽度按图本身比例 ——
+   通用表情是 200×60 的宽图，写死 width 会把它压扁 */
+.danmaku-emote {
+  height: 1.7em;
+  width: auto;
+  vertical-align: -0.45em;
+  margin: 0 1px;
+}
+
+/* 醒目留言里插整张表情图（emoji_img_url），比行内表情大一号 */
+.danmaku-emoji {
+  height: 40px;
+  width: auto;
+}
+
 .chip {
   display: inline-flex;
   align-items: center;
@@ -1557,6 +1572,21 @@ body {
 .music-now__tip {
   font-size: 12px;
   color: var(--md-sys-color-primary);
+}
+
+/* 正在播放卡片里的音量行：喇叭（视频时可点静音）+ 滑条 + 百分比 */
+.music-now__vol {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+  color: var(--md-sys-color-on-surface-variant);
+}
+
+.music-now__volval {
+  font-size: 12px;
+  color: var(--md-sys-color-on-surface-variant);
+  font-variant-numeric: tabular-nums;
 }
 
 .music-lyric {
@@ -2706,6 +2736,13 @@ body {
   gap: 8px;
   padding: 0 12px 6px;
   color: var(--md-sys-color-on-surface-variant);
+}
+
+.mconsole__volval {
+  font-size: 11px;
+  min-width: 34px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
 }
 
 .mconsole__queue {

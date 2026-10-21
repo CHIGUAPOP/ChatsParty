@@ -28,6 +28,7 @@ const NCM = require('./netease.cjs')
 const net = require('./lib/net.cjs')
 const { normalizeKey, describeKey, keySummary, keyWarnings, keyShapeWarnings } = require('./lib/keytext.cjs')
 const { FaceResolver } = require('./faces.cjs')
+const { EmoticonBook } = require('./emoticons.cjs')
 const { Logger } = require('./log.cjs')
 const { OverlayServer, OVERLAY_PANELS } = require('./overlay.cjs')
 const { FloatWindows, FLOAT_PANELS } = require('./float.cjs')
@@ -87,8 +88,15 @@ let musicLastTick = null
  * data: URL，叠加层对它直连（data: 没有 Referer 一说）。
  */
 const musicStreamCache = new Map()
+/** 实际拿到的清晰度（qn 码）。要 1080P 也可能被 B 站夹成 720P，界面得显示真拿到的那档 */
+const musicStreamQuality = new Map()
 /** 防并发重解：同一 key 的解析在途时不再起第二份 */
 const musicStreamInflight = new Map()
+
+/** 配置里请求的清晰度（qn）。认不出的值退到默认档 720P */
+function videoQualityWanted() {
+  return BVIDEO.normalizeQuality(store.get().video?.quality)
+}
 
 function musicKeyOf(v) {
   return `${v && v.kind === 'video' ? 'video' : 'song'}:${(v && v.id) ?? 0}`
@@ -104,10 +112,14 @@ async function resolveVideoStream(v) {
       ensureSession()
       let r
       if (typeof videoAudioProvider === 'function') r = await videoAudioProvider(v || {})
-      else r = await BVIDEO.videoPlayUrl(v || {}, { session, mode: net.resolveMode('bilibili', cfg) })
+      else r = await BVIDEO.videoPlayUrl(v || {}, { session, mode: net.resolveMode('bilibili', cfg), qn: videoQualityWanted() })
       // 渲染层那条路（music:videoAudio）返回 { url, quality }，这里统一取 url
       const url = r && typeof r === 'object' ? r.url : r
-      if (typeof url === 'string' && url) musicStreamCache.set(key, url)
+      if (typeof url === 'string' && url) {
+        musicStreamCache.set(key, url)
+        const q = Number(r && r.quality) || 0
+        if (q) musicStreamQuality.set(key, q)
+      }
       return url || null
     } catch {
       return null
@@ -131,9 +143,34 @@ function ensureCurrentStream() {
 }
 
 function musicSnapshot() {
-  const stream =
-    musicCurrent && musicCurrent.kind === 'video' ? musicStreamCache.get(musicKeyOf(musicCurrent)) || null : null
-  return { items: musicQueue.slice(), current: musicCurrent, queued: musicQueue.length, tick: musicLastTick, stream }
+  const isVideo = Boolean(musicCurrent && musicCurrent.kind === 'video')
+  const key = musicKeyOf(musicCurrent)
+  const stream = isVideo ? musicStreamCache.get(key) || null : null
+  // 实际拿到的清晰度（不是用户选的那档）—— 界面拿它显示「这条现在是 720P」
+  const streamQuality = isVideo ? Number(musicStreamQuality.get(key)) || 0 : 0
+  return {
+    items: musicQueue.slice(),
+    current: musicCurrent,
+    queued: musicQueue.length,
+    tick: musicLastTick,
+    stream,
+    streamQuality,
+  }
+}
+
+/**
+ * 清晰度改了：所有缓存的流都作废（旧流是上一个清晰度），
+ * 让渲染层按新的重取一次，正在播的那条也重新解析（进度由渲染层自己接回去）。
+ */
+async function applyVideoQualityChange() {
+  musicStreamCache.clear()
+  musicStreamQuality.clear()
+  // 先喊一声：渲染层清掉自己那份流缓存，重新取流（此时配置已经是新的了）
+  send('music:reload')
+  if (musicCurrent && musicCurrent.kind === 'video') {
+    await resolveVideoStream(musicCurrent)
+    pushMusicState()
+  }
 }
 
 /** 当前歌词的一份快照。渲染层推过来，广播给 OBS 用 */
@@ -393,6 +430,31 @@ let faceBusy = 0
 // 头像 bytes 的解析结果，原 URL -> data URL，跨事件复用
 let faces = null
 const faceDispatched = new Set()
+
+/**
+ * 表情图册。弹幕里的「[表情名]」靠它换成图片 —— 弹幕包自带的 `meta.emots`
+ * 只覆盖一部分（键格式还不统一），见 electron/emoticons.cjs 顶上的说明。
+ */
+let emoticons = null
+function ensureEmoticons() {
+  if (emoticons) return emoticons
+  emoticons = new EmoticonBook({ getSession: () => session, log })
+  emoticons.onChange = (book) => {
+    // 界面与叠加层是两份渲染进程，各自维护一份图册；换代时两份都要换
+    send('emoticons:changed', book)
+    if (overlay) overlay.broadcast('emoticons', book)
+  }
+  return emoticons
+}
+
+/** 拉一次图册。只在前台「已经知道房间、已经登录」的时机调用，失败静默 */
+function refreshEmoticons(force = false) {
+  const roomId = Number(store?.get?.().room?.realRoomId) || 0
+  if (!session) return
+  ensureEmoticons()
+    .refresh(roomId, { force })
+    .catch(() => {})
+}
 
 /**
  * B站图床有防盗链，界面这边（file:// 或 OBS 的 127.0.0.1）直接 <img src> 会拿到 403。
@@ -678,7 +740,11 @@ function persistCredentials(policy = 'merge') {
 
 /** 每次拿到「确实已登录」的响应都顺手补一次持久化，防止某次写入时机错过 */
 function rememberIfLoggedIn(navData) {
-  if (navData?.isLogin) persistCredentials('merge')
+  if (navData?.isLogin) {
+    persistCredentials('merge')
+    // 两个表情面板都要登录态，登录成功才能拿到；没登录时调用只会白跑一次
+    refreshEmoticons()
+  }
   return Boolean(navData?.isLogin)
 }
 
@@ -854,6 +920,8 @@ async function startLive(roomIdInput) {
   await live.start()
   // 进了房间才知道主播 uid，到时候才能查高能榜
   startViewersPolling()
+  // 表情图册要真实房间号（面板按房间给收藏集/粉丝团表情），连上之后再拉
+  refreshEmoticons()
   return { realRoomId, title: info.title || '' }
 }
 
@@ -2512,8 +2580,11 @@ async function runSpeech(item) {
 
 function registerIpc() {
   ipcMain.handle('config:get', () => store.get())
+  // 表情图册：界面启动时先要一份（可能弹幕比图册先到），之后靠 emoticons:changed 更新
+  ipcMain.handle('emoticons:get', () => (emoticons ? emoticons.get() : {}))
   ipcMain.handle('config:patch', async (_e, patch) => {
     const before = store.get().overlay?.port
+    const beforeQuality = store.get().video?.quality
     // 密钥先洗干净再落盘，脏字符是「Key 明明填对了却 401」的头号原因
     const secretNotes = sanitizeSecrets(patch)
     const next = store.patch(patch || {})
@@ -2526,6 +2597,10 @@ function registerIpc() {
     // 浮窗的开关 / 旋钮改了要当场落到窗口上（开着就是「拖滑块马上看得见」）
     if (patch && patch.float) {
       ensureFloats().syncAll()
+    }
+    // 视频清晰度改了：旧的流是上一个清晰度的，作废重取（正在播的那条当场换，进度接回去）
+    if (patch && patch.video && BVIDEO.normalizeQuality(next.video?.quality) !== BVIDEO.normalizeQuality(beforeQuality)) {
+      await applyVideoQualityChange()
     }
     // 在线观众的开关 / 刷新间隔改了：重开定时器，不然新间隔要等下次连房间才生效
     if (patch && patch.viewers) {
@@ -2837,7 +2912,11 @@ function registerIpc() {
     const cfg = store.get()
     ensureSession()
     if (typeof videoAudioProvider === 'function') return videoAudioProvider(v || {})
-    return BVIDEO.videoPlayUrl(v || {}, { session, mode: net.resolveMode('bilibili', cfg) })
+    return BVIDEO.videoPlayUrl(v || {}, {
+      session,
+      mode: net.resolveMode('bilibili', cfg),
+      qn: videoQualityWanted(),
+    })
   })
 
   /** 主播手动开始播队列第一首 */
@@ -3426,6 +3505,8 @@ async function ensureOverlay(port) {
     overlay.voicePickProvider = () => pickQueue.snapshot()
     // 在线观众：OBS 中途连上时补发当前名单，不然要等下一次轮询（十几秒）
     overlay.viewersProvider = () => viewersSnapshot()
+    // 表情图册：OBS 在弹幕跑了一阵之后才连上时补发，否则新页面只认自己收到事件之后的那几张图
+    overlay.emoticonProvider = () => (emoticons ? emoticons.get() : null)
     overlay.onClientsChange = () => sendOverlayStatus()
   }
   return overlay.start(Number(port) || overlayPort())
@@ -3674,6 +3755,36 @@ function bootstrap() {
         quit: () => quitApp(),
       },
       currentProfileOf,
+      /**
+       * 表情图册的测试口。
+       *
+       * 两个面板都要登录态，e2e 的临时 userData 永远没登录 —— 所以既能换掉取数实现，
+       * 也能直接塞一份图册。真正要验的是「界面上那行 [表情名] 有没有变成图片」，
+       * 以及名字归一（收藏集给 `[dog]`、通用表情给 `啊`）有没有吃掉格式差异。
+       */
+      emoticons: {
+        book: () => (emoticons ? emoticons.get() : {}),
+        setBook: (book) => {
+          ensureEmoticons()
+          emoticons.book = book && typeof book === 'object' ? book : {}
+          emoticons.at = Date.now()
+          send('emoticons:changed', emoticons.book)
+          if (overlay) overlay.broadcast('emoticons', emoticons.book)
+        },
+        refresh: (force) =>
+          ensureEmoticons().refresh(Number(store.get().room?.realRoomId) || 0, { force: Boolean(force) }),
+        /** 换掉取面板的实现（不联网也能验合并逻辑） */
+        setFetcher: (fn) => {
+          ensureEmoticons()
+          emoticons.fetchJson = typeof fn === 'function' ? fn : null
+        },
+        reset: () => {
+          if (emoticons) {
+            emoticons.reset()
+            emoticons.fetchJson = null
+          }
+        },
+      },
       /** 音色选择面板的队列。断言「台上画的那一帧」和「主进程排的队」是不是同一件事 */
       pickQueue,
       pickSnapshot: () => pickQueue.snapshot(),

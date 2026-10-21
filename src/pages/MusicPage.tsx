@@ -17,6 +17,29 @@ const BR_OPTIONS = [
   { value: '320000', label: '极高 320k' },
 ]
 
+/**
+ * B 站视频清晰度（qn 码）。
+ *
+ * 跟 electron/bilibili/video.cjs 的 QUALITY_OPTIONS 是**镜像**，改一边要改另一边
+ * （smoke 有断言盯着）。选哪一档不代表一定能拿到：服务端按视频本身有的清晰度
+ * 和当前身份夹一次（实测这条老接口大多只给 360P / 720P），
+ * 所以界面上另外显示「实际拿到多少」。
+ */
+const QUALITY_OPTIONS = [
+  { value: '16', label: '360P' },
+  { value: '32', label: '480P' },
+  { value: '64', label: '720P' },
+  { value: '74', label: '720P60' },
+  { value: '80', label: '1080P' },
+  { value: '116', label: '1080P60' },
+  { value: '120', label: '4K' },
+]
+
+/** qn → 「720P」。认不出就空串（界面上不显示） */
+function qualityText(qn?: number) {
+  return QUALITY_OPTIONS.find((o) => o.value === String(qn || 0))?.label || ''
+}
+
 /** 逗号 / 顿号 / 换行分隔的一串触发词 → 数组（与 electron/store.cjs 的清洗规则一致） */
 function splitList(s: string): string[] {
   return String(s || '')
@@ -63,6 +86,10 @@ export default function MusicPage({ config, patch, notify }: Props) {
     videoMuted,
     setVideoVolume,
     setVideoMuted,
+    activeVolume,
+    activeMuted,
+    setActiveVolume,
+    setActiveMuted,
     videoSeekTo,
   } = player
   // B 站视频点播：粘 BV 号或视频链接，先查出来再入队
@@ -214,6 +241,10 @@ export default function MusicPage({ config, patch, notify }: Props) {
           <div className="music-now__main">
             <div className="music-now__title">
               {video ? video.title : cur ? cur.name : '没有在播的歌'}
+              {/* 选了 1080P 也可能被 B 站夹成 720P —— 显示实际拿到的那档，别让人以为生效了 */}
+              {video && qualityText(state.streamQuality) && (
+                <Chip variant="gift">{`实际 ${qualityText(state.streamQuality)}`}</Chip>
+              )}
             </div>
             <div className="music-now__sub">
               {video ? (video.up ? `UP：${video.up}` : 'B 站视频') : cur ? cur.artists : '搜一首，或者等观众在弹幕里点'}
@@ -258,8 +289,37 @@ export default function MusicPage({ config, patch, notify }: Props) {
           </div>
         )}
 
-        <div style={{ width: 220, marginTop: 4 }}>
-          <Slider value={m.volume} min={0} max={1} step={0.05} onChange={(v) => patch({ music: { volume: v } })} />
+        {/*
+          音量跟着当前条目走：在播 B 站视频时这里是**视频音量**（以前写死 music.volume，
+          播着视频拖它却一点没变化 —— 视频的音量在 video.volume 上）。
+        */}
+        <div className="music-now__vol">
+          {video ? (
+            <button
+              type="button"
+              className="icon-btn"
+              onClick={() => setVideoMuted(!videoMuted)}
+              title={videoMuted ? '取消静音' : '静音'}
+              aria-label={videoMuted ? '取消静音' : '静音'}
+            >
+              <Icon name={videoMuted ? 'volMute' : 'vol'} size={18} />
+            </button>
+          ) : (
+            <Icon name="voice" size={18} />
+          )}
+          <div style={{ width: 220 }}>
+            <Slider
+              value={video && videoMuted ? 0 : activeVolume}
+              min={0}
+              max={1}
+              step={0.05}
+              onChange={setActiveVolume}
+            />
+          </div>
+          <span className="music-now__volval">
+            {Math.round((video && videoMuted ? 0 : activeVolume) * 100)}%
+            {video ? '（视频）' : ''}
+          </span>
         </div>
 
         {lrc.length > 0 && (
@@ -349,7 +409,8 @@ export default function MusicPage({ config, patch, notify }: Props) {
         )}
 
         <div className="tip" style={{ marginTop: 10 }}>
-          视频画面直接播 B 站给的整条流（网页端老接口，通常 480P）—— 暂停、进度、音量都是真控件。
+          视频画面直接播 B 站给的整条流 —— 暂停、进度、音量都是真控件。清晰度在下面的「点歌设置」里选，
+          实际能拿到哪一档由 B 站决定（这条老接口多数视频只给到 720P），正在播放的卡片上会写明实际那档。
           会员 / 充电专属的视频拿不到地址，会提示并自动跳下一首。
         </div>
       </Card>
@@ -403,6 +464,19 @@ export default function MusicPage({ config, patch, notify }: Props) {
         <Row label="音质" hint="匿名身份通常能拿到 320k；换更高需要填 Cookie">
           <div style={{ width: 150 }}>
             <Select label="音质" value={String(m.br)} onChange={(v) => patch({ music: { br: Number(v) } })} options={BR_OPTIONS} />
+          </div>
+        </Row>
+        <Row
+          label="视频清晰度"
+          hint="点歌里点的 B 站视频按这一档取；拿不到就自动落到最接近的一档（正在播放的会当场换，进度接着走）"
+        >
+          <div style={{ width: 150 }}>
+            <Select
+              label="视频清晰度"
+              value={String(config.video?.quality ?? 64)}
+              onChange={(v) => patch({ video: { quality: Number(v) } })}
+              options={QUALITY_OPTIONS}
+            />
           </div>
         </Row>
         <Row label="队列上限" hint="防止一个人把歌单刷满">

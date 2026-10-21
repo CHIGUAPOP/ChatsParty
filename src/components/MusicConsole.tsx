@@ -24,8 +24,13 @@ export default function MusicConsole({
   onVolume,
   actions,
 }: {
-  volume: number
-  onVolume: (v: number) => void
+  /**
+   * 音量。留空就用引擎那份「跟着当前条目走」的（在播视频时是视频音量、播歌时是歌的）——
+   * 传了就按传的来。以前调用方一律传 `music.volume`，结果是播着视频拖它，
+   * 视频一点没变（视频音量在 `video.volume` 上），看着像「音量控制失灵」。
+   */
+  volume?: number
+  onVolume?: (v: number) => void
   /** 桌面浮窗的设置/× 两颗按钮：排在这个头部最右（主窗口不传） */
   actions?: React.ReactNode
 }) {
@@ -49,8 +54,17 @@ export default function MusicConsole({
     videoMuted,
     setVideoVolume,
     setVideoMuted,
+    activeVolume,
+    activeMuted,
+    setActiveVolume,
+    setActiveMuted,
     videoSeekTo,
   } = useMusicPlayer()
+  // 没传就跟着当前条目走：视频 → 视频音量，歌 → 歌的音量
+  const vol = Number.isFinite(Number(volume)) ? Number(volume) : activeVolume
+  const setVol = onVolume || setActiveVolume
+  const muted = Boolean(video) && (Number.isFinite(Number(volume)) ? videoMuted : activeMuted)
+  const toggleMute = () => (Number.isFinite(Number(volume)) ? setVideoMuted(!videoMuted) : setActiveMuted(!activeMuted))
   const cur = state.current
   // 只预告「下一首」，不预告两首：右侧栏高度是抢来的 —— 多摆一条歌名，
   // 观众榜就少一行。队列看全了去「点歌」页。
@@ -143,10 +157,24 @@ export default function MusicConsole({
         </div>
 
         <div className="mconsole__vol">
-          <Icon name="voice" size={16} />
+          {/* 在播视频时这颗喇叭能一键静音（视频才有静音这一档），播歌时只是个图标 */}
+          {video ? (
+            <button
+              type="button"
+              className="icon-btn"
+              onClick={toggleMute}
+              title={muted ? '取消静音' : '静音'}
+              aria-label={muted ? '取消静音' : '静音'}
+            >
+              <Icon name={muted || vol === 0 ? 'volMute' : 'vol'} size={16} />
+            </button>
+          ) : (
+            <Icon name="voice" size={16} />
+          )}
           <div style={{ flex: 1 }}>
-            <Slider value={volume} min={0} max={1} step={0.05} onChange={onVolume} />
+            <Slider value={muted ? 0 : vol} min={0} max={1} step={0.05} onChange={setVol} />
           </div>
+          <span className="mconsole__volval">{muted ? 0 : Math.round(vol * 100)}%</span>
         </div>
 
         {upcoming.length > 0 && (

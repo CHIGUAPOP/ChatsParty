@@ -164,6 +164,9 @@ class OverlayServer {
           const viewers = this.viewersProvider ? this.viewersProvider() : null
           // 在线观众同理：补一帧，否则中途接上的 OBS 要空着等下一次轮询
           if (viewers) ws.send(JSON.stringify({ type: 'viewers', payload: viewers }))
+          // 表情图册：页面要它才能把「[表情名]」画成图片，晚连上来也得有
+          const emoteBook = this.emoticonProvider ? this.emoticonProvider() : null
+          if (emoteBook) ws.send(JSON.stringify({ type: 'emoticons', payload: emoteBook }))
         } catch {
           /* noop */
         }

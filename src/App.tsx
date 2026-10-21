@@ -3,6 +3,7 @@ import { api, AppConfig, LiveEvent, LoginInfo } from './lib/api'
 import { MusicPlayerProvider } from './lib/music-engine'
 import { applyMotion, applyScheme, buildScheme } from './lib/theme'
 import { setResolvedFace } from './lib/faces'
+import { useEmoticonBookSync } from './lib/emoticons'
 import { Icon, Snackbar } from './components/ui'
 import ConnectPage from './pages/ConnectPage'
 import DanmakuPage from './pages/DanmakuPage'
@@ -72,6 +73,9 @@ export default function App() {
   React.useEffect(() => {
     api.bilibili.loginInfo().then(setLoginInfo)
   }, [])
+
+  // 表情图册：主进程那边按「登录成功 / 进房间 / 每 30 分钟」推，这里只负责收下
+  useEmoticonBookSync()
 
   React.useEffect(() => {
     const offs = [

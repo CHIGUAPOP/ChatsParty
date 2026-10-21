@@ -27,6 +27,11 @@ const api = {
     onError: (cb) => on('live:error', cb),
     onFace: (cb) => on('live:face', cb),
   },
+  // 表情图册：弹幕里的「[表情名]」→ 图片地址。图册由主进程统一维护，渲染层只读
+  emoticons: {
+    get: () => ipcRenderer.invoke('emoticons:get'),
+    onChanged: (cb) => on('emoticons:changed', cb),
+  },
   // 在线观众（B站高能榜）。榜单只在房间连上之后才有内容
   viewers: {
     state: () => ipcRenderer.invoke('viewers:state'),
@@ -88,6 +93,8 @@ const api = {
     onTick: (cb) => on('music:tick', cb),
     remote: (cmd) => ipcRenderer.send('music:remote', cmd),
     onRemote: (cb) => on('music:remote', cb),
+    // 清晰度改了主进程喊一嗓子：渲染层丢掉本地缓存的流，按新清晰度重取一条
+    onReload: (cb) => on('music:reload', cb),
     play: () => ipcRenderer.invoke('music:play'),
     next: () => ipcRenderer.invoke('music:next'),
     remove: (index) => ipcRenderer.invoke('music:remove', index),
