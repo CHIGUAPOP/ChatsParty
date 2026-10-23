@@ -149,6 +149,14 @@ export default function VoicePage({ config, patch, notify }: Props) {
     ellipsis: t.interjection?.ellipsis === true,
   }
   const setInterjection = (p: Record<string, unknown>) => patch({ tts: { interjection: p } })
+  /** 队列堆积时加速朗读那组配置。整块可选，补丁只带改动的那个字段（store 是深合并） */
+  const cu = {
+    enabled: t.catchUp?.enabled !== false,
+    threshold: Number(t.catchUp?.threshold) || 5,
+    rate: Number(t.catchUp?.rate) || 1.5,
+    holdSec: Number(t.catchUp?.holdSec ?? 30),
+  }
+  const setCatchUp = (p: Record<string, unknown>) => patch({ tts: { catchUp: p } })
   /** 合成失败时的备用嗓子。整块可选，补丁只带改动的那个字段（store 是深合并） */
   const fb = {
     enabled: t.fallback?.enabled !== false,
@@ -447,6 +455,50 @@ export default function VoicePage({ config, patch, notify }: Props) {
             rows={2}
           />
         </div>
+      </Card>
+
+      <Card
+        title="队列堆积时加速朗读"
+        desc="弹幕刷起来时播报是追不上的：一条念完要几秒，等念到的时候那句话早就滚过去了。待念的攒到设定条数就按下面的倍率快放，读完再等一会儿没人说话才回原速。改的是播放速度，不是合成的语速 —— 音色不变，也不会升调。"
+      >
+        <Row label="启用" hint="关掉就永远按上面「语速」念，不管堆了多少条">
+          <Switch value={cu.enabled} onChange={(v) => setCatchUp({ enabled: v })} />
+        </Row>
+        <Row label={`堆到 ${cu.threshold} 条开始加速`} hint="含正在念的那一条">
+          <div style={{ width: 200 }}>
+            <Slider
+              value={cu.threshold}
+              min={2}
+              max={20}
+              step={1}
+              onChange={(v) => setCatchUp({ threshold: v })}
+              suffix=" 条"
+            />
+          </div>
+        </Row>
+        <Row label={`加速倍率 ${cu.rate.toFixed(2)}×`} hint="只加快播放，音调不变">
+          <div style={{ width: 200 }}>
+            <Slider
+              value={cu.rate}
+              min={1}
+              max={2.5}
+              step={0.05}
+              onChange={(v) => setCatchUp({ rate: v })}
+            />
+          </div>
+        </Row>
+        <Row label={`读完后再等 ${cu.holdSec} 秒`} hint="这段时间内没有新的要念，才切回原速">
+          <div style={{ width: 200 }}>
+            <Slider
+              value={cu.holdSec}
+              min={0}
+              max={120}
+              step={5}
+              onChange={(v) => setCatchUp({ holdSec: v })}
+              suffix=" 秒"
+            />
+          </div>
+        </Row>
       </Card>
 
       <Card

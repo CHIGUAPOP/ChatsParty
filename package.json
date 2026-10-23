@@ -1,7 +1,7 @@
 {
   "name": "chatsparty",
   "productName": "ChatsParty",
-  "version": "1.3.1",
+  "version": "1.3.2",
   "description": "B站直播弹幕姬 · MiMo TTS 语音播报 · MD3 动态配色 · OBS 叠加层",
   "main": "electron/main.cjs",
   "author": "chatsparty",
@@ -17,7 +17,7 @@
     "test": "node scripts/smoke.cjs",
     "e2e:danmaku": "electron scripts/e2e-danmaku.cjs",
     "e2e:lyric": "electron scripts/e2e-lyric-switch.cjs",
-    "e2e:tts": "electron scripts/e2e-tts-name.cjs",
+    "e2e:tts": "electron scripts/e2e-tts-catchup.cjs",
     "e2e:tone": "electron scripts/e2e-tone.cjs",
     "e2e:tray": "electron scripts/e2e-tray.cjs",
     "e2e:fallback": "electron scripts/e2e-fallback.cjs",

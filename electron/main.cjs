@@ -22,6 +22,7 @@ const { shouldSpeakNow, speakableName } = require('./speech-rules.cjs')
 const { createPickQueue } = require('./voice-pick.cjs')
 const LP = require('./launchpad.cjs')
 const { createSpeechControl } = require('./speech-control.cjs')
+const { createCatchUp, normalizeCatchUp } = require('./catch-up.cjs')
 const { createTtsCache } = require('./tts-cache.cjs')
 const VW = require('./viewers.cjs')
 const NCM = require('./netease.cjs')
@@ -2469,12 +2470,50 @@ function ttsCfg(t) {
   }
 }
 
+/* ---------------------- 队列堆积时加速朗读（追播） ---------------------- */
+
+/**
+ * 弹幕刷起来的时候播报一定追不上：一条念完要几秒，队列越堆越长，等念到的时候
+ * 那句话早就滚出屏幕了。堆到 threshold 条就切「追播」。
+ *
+ * 为什么在**播放端**加速而不是调合成语速：语速是合成参数，改它等于换了一份音频 ——
+ * 缓存全废、音色味道也变了，而且中途改还会让同一个人前后两句话判若两人。
+ * `playbackRate` 快放是变速不变调的（Chromium 默认 preservesPitch），耳朵听到的
+ * 还是同一个声音，只是说得快一些。
+ *
+ * 判定与静默期的那套时序在 `catch-up.cjs` 里（纯状态机，smoke 能注入假定时器跑）。
+ */
+const catchUpCtl = createCatchUp()
+
+function catchUpCfg() {
+  return normalizeCatchUp(store.get().tts?.catchUp)
+}
+
+/** 这一条该用多快的速度播（队列里还没念的条数 + 正在念的这条 = backlog） */
+function speechRate() {
+  return catchUpCtl.rateFor(speech.queue.length, catchUpCfg())
+}
+
+/** 一条处理完了（含被丢弃的）：队列空了才开始数静默期 */
+function afterSpeech() {
+  catchUpCtl.afterSpeech(speech.queue.length, catchUpCfg())
+}
+
+/** 又有东西要念了：静默期从头算 */
+function noteSpeechDemand() {
+  catchUpCtl.noteDemand()
+}
+
 function pumpSpeech() {
+  // 队列里还有东西等着念 —— 静默期重新起算，否则读空后 30 秒一到就回原速，
+  // 哪怕这期间已经来了七八条新弹幕
+  if (speech.queue.length) noteSpeechDemand()
   if (speech.busy || !speech.queue.length) return
   speech.setBusy(true)
   const item = speech.queue.shift()
   runSpeech(item).finally(() => {
     speech.setBusy(false)
+    afterSpeech()
     setTimeout(pumpSpeech, 50)
   })
 }
@@ -2685,8 +2724,10 @@ async function runSpeech(item) {
     rememberFishModel(usedCfg, audio)
     lastSpeakAt = Date.now()
 
+    // 堆了几条就先问一句「这条该多快」—— 倍速只在这一刻定，播到一半不改
+    const rate = speechRate()
     const done = speech.waitPlayback()
-    send('tts:play', { ...audio, text: item.text, meta: item.meta, volume: t.volume })
+    send('tts:play', { ...audio, rate, text: item.text, meta: item.meta, volume: t.volume })
     speech.markPlaying()
     send('tts:state', { state: 'playing', text: item.text })
     await done
@@ -3878,6 +3919,26 @@ function bootstrap() {
         /** 走真退出那条路（托盘菜单里的「退出」）。调了它就准备收尾 */
         quit: () => quitApp(),
       },
+      /**
+       * 队列堆积加速的测试口。
+       * 时序本身在 catch-up.cjs 里有假时钟单测，这里暴露的是**接线后的真状态** ——
+       * 「队列读空 → 静默期 → 回原速」这条链只有在真进程里才跑得通。
+       */
+      catchUp: {
+        cfg: () => catchUpCfg(),
+        active: () => catchUpCtl.active,
+        hasHold: () => catchUpCtl.hasHold(),
+        reset: () => catchUpCtl.reset(),
+      },
+      /** 所有窗口的真实状态。排查「主窗口看不见」时唯一可信的来源 —— 进程表看不出来 */
+      windows: () =>
+        BrowserWindow.getAllWindows().map((w) => ({
+          title: w.getTitle(),
+          visible: w.isVisible(),
+          minimized: w.isMinimized(),
+          bounds: w.getBounds(),
+          destroyed: w.isDestroyed(),
+        })),
       currentProfileOf,
       /**
        * 表情图册的测试口。

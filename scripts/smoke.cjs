@@ -452,6 +452,115 @@ function checkMusicFixes() {
   ok('点视频那条路同样提示', (mainSrc.match(/await notifyMusicCooldown\(id,/g) || []).length >= 2)
 }
 
+/** 假定时器：把「读完等 30 秒」这段时序压进一毫秒跑完，不用真等 */
+function fakeClock() {
+  let now = 0
+  let seq = 0
+  const timers = new Map()
+  return {
+    setTimeout(fn, ms) {
+      const id = ++seq
+      timers.set(id, { at: now + ms, fn })
+      return id
+    },
+    clearTimeout(id) {
+      timers.delete(id)
+    },
+    tick(ms) {
+      now += ms
+      for (const [id, t] of [...timers]) {
+        if (t.at <= now) {
+          timers.delete(id)
+          t.fn()
+        }
+      }
+    },
+  }
+}
+
+/**
+ * [20c] 队列堆积时加速朗读
+ *
+ * 这套时序真实跑一次要「攒 5 条弹幕 → 等念完 → 再等 30 秒」，还要卡在刚读完那一刻，
+ * 靠手点是复现不了的。状态机抽在 catch-up.cjs，这里注入假定时器把边界全跑一遍。
+ *
+ * 另外两处也钉一下：倍速必须走**播放端**（改合成语速会让缓存全废、音色也变），
+ * 以及外观页那三项已经按用户要求删掉，别再被谁加回来。
+ */
+function checkCatchUp() {
+  console.log('\n[20c] 队列堆积加速朗读')
+  const root = path.join(__dirname, '..')
+  const { createCatchUp, normalizeCatchUp } = require('../electron/catch-up.cjs')
+  const mainSrc = fs.readFileSync(path.join(root, 'electron', 'main.cjs'), 'utf8')
+  const storeSrc = fs.readFileSync(path.join(root, 'electron', 'store.cjs'), 'utf8')
+  const appSrc = fs.readFileSync(path.join(root, 'src', 'App.tsx'), 'utf8')
+  const appearance = fs.readFileSync(path.join(root, 'src', 'pages', 'AppearancePage.tsx'), 'utf8')
+
+  // ① 默认值与非法值兜底
+  const def = normalizeCatchUp(undefined)
+  ok('默认堆到 5 条开始加速', def.threshold === 5)
+  ok('默认倍率 1.5', def.rate === 1.5)
+  ok('默认读完等 30 秒', def.holdMs === 30000)
+  ok('默认启用', def.enabled === true)
+  ok('倍率上限夹到 3（配置文件写坏了不该变成 10 倍速）', normalizeCatchUp({ rate: 99 }).rate === 3)
+  ok('倍率下限夹到 1', normalizeCatchUp({ rate: 0.2 }).rate === 1)
+  ok('阈值下限 2（堆 1 条加速没有意义）', normalizeCatchUp({ threshold: 1 }).threshold === 2)
+  ok('阈值 0 当作没填，回落默认 5', normalizeCatchUp({ threshold: 0 }).threshold === 5)
+  ok('关掉就是原速', normalizeCatchUp({ enabled: false }).enabled === false)
+
+  // ② 状态机：进出加速
+  const c1 = fakeClock()
+  const cu = createCatchUp(c1)
+  ok('没堆起来时原速', cu.rateFor(3, def) === 1) // 3 + 1 = 4 < 5
+  ok('堆到 5 条开始加速', cu.rateFor(4, def) === 1.5) // 4 + 1 = 5
+  ok('队列变短也不立刻退出（否则一快一慢来回抖）', cu.rateFor(0, def) === 1.5)
+
+  // ③ 静默期
+  cu.afterSpeech(0, def)
+  ok('读空后挂上静默计时', cu.hasHold())
+  c1.tick(29000)
+  ok('29 秒时还在加速', cu.active)
+  c1.tick(1000)
+  ok('满 30 秒回原速', !cu.active)
+
+  // ④ 30 秒内又来需求 → 重新计时
+  const c2 = fakeClock()
+  const cu2 = createCatchUp(c2)
+  cu2.rateFor(9, def)
+  cu2.afterSpeech(0, def)
+  c2.tick(20000)
+  cu2.noteDemand() // 来了新弹幕
+  cu2.afterSpeech(0, def) // 这条也念完了，静默期从头算
+  c2.tick(29000)
+  ok('静默期被新需求重置过，29 秒仍在加速', cu2.active)
+  c2.tick(1000)
+  ok('重置后满 30 秒才回原速', !cu2.active)
+
+  // ⑤ 中途关掉开关
+  const c3 = fakeClock()
+  const cu3 = createCatchUp(c3)
+  cu3.rateFor(9, def)
+  ok('（前置）已在加速', cu3.active)
+  ok('关掉开关立刻回原速', cu3.rateFor(9, { ...def, enabled: false }) === 1 && !cu3.active)
+
+  // ⑥ 接线：倍速走播放端，不走合成语速
+  ok('倍速随 tts:play 下发', /send\('tts:play', \{ \.\.\.audio, rate, /.test(mainSrc))
+  ok('倍速由队列长度算出', /catchUpCtl\.rateFor\(speech\.queue\.length/.test(mainSrc))
+  ok('一条处理完才数静默期', /speech\.setBusy\(false\)\s*\n\s*afterSpeech\(\)/.test(mainSrc))
+  ok('有新需求就重置静默期', /if \(speech\.queue\.length\) noteSpeechDemand\(\)/.test(mainSrc))
+  ok('渲染层按倍速播放', /audio\.playbackRate = Number\.isFinite\(rate\)/.test(appSrc))
+  ok('变速不变调', /audio\.preservesPitch = true/.test(appSrc))
+  const ttsCfgAt = mainSrc.indexOf('function ttsCfg(')
+  const ttsCfgBody = ttsCfgAt > 0 ? mainSrc.slice(ttsCfgAt, mainSrc.indexOf('\n}', ttsCfgAt)) : ''
+  ok('加速不碰合成语速（ttsCfg 里没有 catchUp）', ttsCfgBody.length > 0 && !/catchUp/.test(ttsCfgBody))
+  ok('配置默认值已落盘结构', /catchUp: \{[\s\S]{0,200}threshold: 5/.test(storeSrc))
+
+  // ⑦ 外观页瘦身
+  ok('外观页不再有「当前种子色的色阶」', !appearance.includes('当前种子色的色阶'))
+  ok('外观页不再有动效卡片', !appearance.includes('title="动效"'))
+  ok('外观页不再有预览区', !appearance.includes('组件配色预览'))
+}
+
 function checkEmoticons() {
   return (async () => {
     console.log('\n[24c] 表情图册')
@@ -986,6 +1095,8 @@ async function testVoices() {
 
   console.log('\n[20b] 点歌链路修复')
   checkMusicFixes()
+
+  checkCatchUp()
 
   console.log('\n[21] 密钥形态诊断')
   testKeyShape()

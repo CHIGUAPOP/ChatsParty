@@ -195,6 +195,11 @@ export default function App() {
         const url = URL.createObjectURL(new Blob([bytes], { type: p.mime || 'audio/wav' }))
         const audio = new Audio(url)
         audio.volume = Number.isFinite(p.volume) ? p.volume : 0.9
+        // 队列堆积时主进程会叫我们播快一点（rate > 1）。playbackRate 是变速不变调的，
+        // 但得显式打开 preservesPitch —— 不然听感就是录音带快进，音调跟着一起飘。
+        const rate = Number(p.rate)
+        audio.playbackRate = Number.isFinite(rate) && rate > 0 ? Math.min(3, rate) : 1
+        audio.preservesPitch = true
         const finish = () => {
           if (current === audio) current = null
           URL.revokeObjectURL(url)

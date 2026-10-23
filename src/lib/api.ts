@@ -93,6 +93,19 @@ export interface AppConfig {
       /** 触发后多久之内不再去撞原平台（ms） */
       cooldownMs?: number
     }
+    /**
+     * 队列堆积时加速朗读。堆到 threshold 条就用 rate 倍速播（播放端变速不变调，
+     * 不改合成语速）；队列读空后再等 holdSec 秒没有新需求才回原速。
+     */
+    catchUp?: {
+      enabled?: boolean
+      /** 待念条数（含正在念的这条）到这个数就开始加速 */
+      threshold?: number
+      /** 加速倍率，1.0 等于不加速 */
+      rate?: number
+      /** 读空后再等多少秒没有新需求就回原速 */
+      holdSec?: number
+    }
   }
   theme: { seed: string; mode: 'light' | 'dark'; contrast: number; motion?: 'standard' | 'expressive' }
   overlay: {
@@ -515,7 +528,17 @@ interface Bridge {
     skip: () => Promise<{ skipped: boolean; pending: boolean; queued: number }>
     clear: () => Promise<{ cleared: number }>
     queue: () => Promise<{ queued: number; busy: boolean; playing: boolean; state: string; text: string }>
-    onPlay: (cb: (p: { base64: string; mime: string; text: string; meta: unknown; volume: number }) => void) => () => void
+    onPlay: (
+      cb: (p: {
+        base64: string
+        mime: string
+        text: string
+        meta: unknown
+        volume: number
+        /** 播放倍速：队列堆积时主进程会下发 >1 的值（变速不变调） */
+        rate?: number
+      }) => void,
+    ) => () => void
     onState: (cb: (s: { state: string; text: string }) => void) => () => void
     onError: (cb: (e: { message: string; text: string }) => void) => () => void
     /** 不是失败，是「换了个嗓子在念」这类需要主播知道一声的提示 */
