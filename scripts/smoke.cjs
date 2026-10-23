@@ -561,6 +561,38 @@ function checkCatchUp() {
   ok('外观页不再有预览区', !appearance.includes('组件配色预览'))
 }
 
+function checkKeyless() {
+  console.log('\n[20d] 没填 Key 时不发合成请求')
+  const root = path.join(__dirname, '..')
+  const { missingKey, PROVIDERS } = require('../electron/tts.cjs')
+  const mainSrc = fs.readFileSync(path.join(root, 'electron', 'main.cjs'), 'utf8')
+
+  ok(
+    '云平台都标了 needsKey',
+    PROVIDERS.mimo.needsKey === true && PROVIDERS.openai.needsKey === true && PROVIDERS.fish.needsKey === true,
+  )
+  ok('免费嗓子不需要 Key', PROVIDERS.edge.needsKey === false && PROVIDERS.system.needsKey === false)
+  ok('默认配置（mimo + 空 Key）判为缺 Key', missingKey({ provider: 'mimo', apiKey: '' }) === true)
+  ok('纯空白也算没填', missingKey({ provider: 'mimo', apiKey: '   ' }) === true)
+  ok('填了 Key 就不算', missingKey({ provider: 'mimo', apiKey: 'sk-x' }) === false)
+  ok('Edge 从来不算缺 Key', missingKey({ provider: 'edge', apiKey: '' }) === false)
+  ok('自定义兼容服务不拦（本地常不校验 Key）', missingKey({ provider: 'custom', apiKey: '' }) === false)
+
+  // 位置很关键：必须在真正发请求之前拦下，否则等于没修。
+  // 比的是「真正调用的那一行」（run(cfg)），不能比 run 闭包里那行 ——
+  // 闭包是先定义、后执行的，源码顺序反着来才对
+  const iGuard = mainSrc.indexOf('if (missingKey(cfg))')
+  const iCall = mainSrc.indexOf('const audio = await run(cfg)')
+  ok('拦截点在发请求之前', iGuard > 0 && iCall > 0 && iGuard < iCall, { iGuard, iCall })
+  ok(
+    '播报链路先判一次（连 loading 都不发）',
+    /if \(missingKey\(usedCfg\) && t\.fallback\?\.enabled === false\)/.test(mainSrc),
+  )
+  ok('空 Key 的日志只记一次', /keylessNoticed/.test(mainSrc))
+  ok('回退提示认得出「还没填 API Key」', /'no-key'\) return '还没填 API Key'/.test(mainSrc))
+  ok('回退提示按原因去重（冷却配 0 也不刷屏）', /ttsFallback\.reason !== reason/.test(mainSrc))
+}
+
 function checkEmoticons() {
   return (async () => {
     console.log('\n[24c] 表情图册')
@@ -1097,6 +1129,8 @@ async function testVoices() {
   checkMusicFixes()
 
   checkCatchUp()
+
+  checkKeyless()
 
   console.log('\n[21] 密钥形态诊断')
   testKeyShape()

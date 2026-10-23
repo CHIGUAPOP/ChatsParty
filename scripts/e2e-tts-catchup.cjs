@@ -118,6 +118,8 @@ const HOOK = `(() => {
   if (window.__ttsRateHook) return true
   window.__ttsRateHook = true
   window.__ttsPlay = []
+  window.__ttsErr = []
+  window.__ttsNotice = []
   window.__audios = []
   const Orig = window.Audio
   window.Audio = function (...a) {
@@ -126,6 +128,8 @@ const HOOK = `(() => {
     return el
   }
   window.chatsparty.tts.onPlay((p) => window.__ttsPlay.push({ rate: p.rate, text: p.text }))
+  window.chatsparty.tts.onError((e) => window.__ttsErr.push(e && e.message))
+  window.chatsparty.tts.onNotice((n) => window.__ttsNotice.push(n && n.message))
   return true
 })()`
 
@@ -136,7 +140,7 @@ const FIRST_AUDIO_RATE = `(() => {
 })()`
 
 /** 清掉上一阶段的记录，只观察下一批 */
-const CLEAR = `(() => { window.__ttsPlay.length = 0; window.__audios.length = 0; return true })()`
+const CLEAR = `(() => { window.__ttsPlay.length = 0; window.__audios.length = 0; window.__ttsErr.length = 0; window.__ttsNotice.length = 0; return true })()`
 
 async function main() {
   const win = await waitFor(() => mainWindow(), 20000)
@@ -159,6 +163,8 @@ async function main() {
     tts: {
       enabled: true,
       volume: 0,
+      // 合成是注入的假实现，但配置里必须有 Key —— 否则会被「空 Key 不发请求」那道判断拦下
+      apiKey: 'e2e-fake-key',
       // 关掉一切「不该在这条链路里」的干扰：间隔、同人冷却、长度截断
       minIntervalMs: 0,
       perUserCooldownMs: 0,
@@ -232,6 +238,37 @@ async function main() {
   }
   const offPlay = await waitFor(() => run(win, 'window.__ttsPlay.length ? window.__ttsPlay[0] : null'), 10000)
   ok('关掉开关后即使堆 5 条也是原速', offPlay && offPlay.rate === 1, offPlay && offPlay.rate)
+
+  await waitFor(() => api.speech.queue.length === 0 && !api.speech.busy, 20000)
+
+  console.log('[4] 空 Key + 关掉备用嗓子 → 不发请求、不报错、队列照常消化')
+  // 合成器换成计数器：它被调用一次就说明还是去打请求了
+  let synthCalls = 0
+  api.ttsFallback.setSynthesizer(async () => {
+    synthCalls += 1
+    return { base64: CLIP_B64, mime: 'audio/wav', latency: 1 }
+  })
+  api.ttsFallback.reset()
+  api.store.patch({ tts: { apiKey: '', fallback: { enabled: false }, minIntervalMs: 0 } })
+  await run(win, CLEAR)
+  api.music.danmaku('没填密钥的一条', { uid: 94000, username: '丁一' })
+  const drained4 = await waitFor(() => api.speech.queue.length === 0 && !api.speech.busy, 8000)
+  ok('队列没有卡住', Boolean(drained4), { queued: api.speech.queue.length, busy: api.speech.busy })
+  ok('一次合成都没发起（不再白打 401）', synthCalls === 0, synthCalls)
+  ok('没有下发播放', (await run(win, 'window.__ttsPlay.length')) === 0)
+  ok('没有弹播报失败', (await run(win, 'window.__ttsErr.length')) === 0, await run(win, 'window.__ttsErr'))
+
+  console.log('[5] 空 Key + 打开备用嗓子 → 直接换免费嗓子念，不撞原平台')
+  synthCalls = 0
+  api.store.patch({ tts: { apiKey: '', fallback: { enabled: true, provider: 'edge', cooldownMs: 60000 } } })
+  await run(win, CLEAR)
+  api.music.danmaku('备用嗓子顶上的一条', { uid: 94100, username: '丁二' })
+  const fbPlay = await waitFor(() => run(win, 'window.__ttsPlay[0] || null'), 10000)
+  ok('音量出来了', Boolean(fbPlay), fbPlay)
+  const fbNotice = await waitFor(() => run(win, 'window.__ttsNotice[0] || null'), 5000)
+  ok('提示了一次「还没填 API Key」', String(fbNotice || '').includes('还没填 API Key'), fbNotice)
+  // 备用嗓子走的是同一条合成口，所以这里 synthCalls 是 1 而不是 0；关键是原平台没被撞
+  ok('只合成了一次（没有先撞原平台再换）', synthCalls === 1, synthCalls)
 
   await waitFor(() => api.speech.queue.length === 0 && !api.speech.busy, 20000)
   console.log(`\n结果：${pass} 通过 / ${fail} 失败`)

@@ -73,6 +73,7 @@ const PROVIDERS = {
     name: '小米 MiMo',
     protocol: 'chat-completions',
     baseUrl: 'https://api.xiaomimimo.com/v1',
+    needsKey: true,
     models: ['mimo-v2.5-tts', 'mimo-v2.5-tts-voicedesign', 'mimo-v2.5-tts-voiceclone'],
     voices: [
       { id: 'mimo_default', label: 'MiMo-默认' },
@@ -93,6 +94,7 @@ const PROVIDERS = {
     name: 'OpenAI',
     protocol: 'audio-speech',
     baseUrl: 'https://api.openai.com/v1',
+    needsKey: true,
     models: ['gpt-4o-mini-tts', 'tts-1', 'tts-1-hd'],
     voices: ['alloy', 'ash', 'ballad', 'coral', 'echo', 'sage', 'shimmer', 'verse'].map((v) => ({
       id: v,
@@ -304,6 +306,22 @@ const FALLBACK_KINDS = new Set(['credit', 'network', 'server'])
 
 function canFallback(err) {
   return FALLBACK_KINDS.has(classifyFailure(err))
+}
+
+/**
+ * 这份配置是「要 Key 的云平台但没填 Key」吗。
+ *
+ * 为什么必须单独判一次、而不是让它去请求然后收 401：
+ * 空 Key 的 401 被归到 config 类，而 config 类**故意不自动回退**（坏 Key 不能静默掩盖）。
+ * 于是一个压根没配语音的人，每来一条弹幕都会白发一次请求、刷一条警告 —— 白白耗流量。
+ *
+ * 只认 `needsKey === true` 的平台（mimo / openai / fish）。custom 不拦：
+ * 自建或本地兼容服务经常压根不校验 Key，猜错就把能用的配置拦死了。
+ */
+function missingKey(cfg) {
+  const p = PROVIDERS[cfg && cfg.provider]
+  if (!p || p.needsKey !== true) return false
+  return !String((cfg && cfg.apiKey) || '').trim()
 }
 
 /* -------------------- 免费 / 本地提供方 -------------------- */
@@ -591,5 +609,6 @@ module.exports = {
   FISH_BASE,
   classifyFailure,
   canFallback,
+  missingKey,
   FALLBACK_KINDS,
 }

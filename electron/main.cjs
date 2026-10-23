@@ -10,7 +10,7 @@ const { BilibiliAPI } = require('./bilibili/api.cjs')
 const BVIDEO = require('./bilibili/video.cjs')
 const { QrLogin, collectCredentials } = require('./bilibili/auth.cjs')
 const { LiveClient } = require('./bilibili/live.cjs')
-const { PROVIDERS, synthesize, listVoices, probeFish, canFallback, classifyFailure } = require('./tts.cjs')
+const { PROVIDERS, synthesize, listVoices, probeFish, canFallback, classifyFailure, missingKey } = require('./tts.cjs')
 /**
  * 真正的合成入口。默认就是 tts.cjs 那份，**只有 e2e 会替换它**（注入超时 / 402），
  * 生产代码一律走 synthesize。
@@ -2593,6 +2593,7 @@ function fallbackLabel(reason) {
   if (reason === 'credit') return '额度用完或被限流'
   if (reason === 'network') return '连不上平台（超时或断网）'
   if (reason === 'server') return '平台自己出错'
+  if (reason === 'no-key') return '还没填 API Key'
   return '合成失败'
 }
 
@@ -2604,8 +2605,9 @@ function providerLabel(id) {
 function enterFallback(provider, reason, err) {
   const t = store.get().tts || {}
   const cd = Number(t.fallback?.cooldownMs) || 0
-  if (!ttsFallback.until) {
-    // 只在「刚切过去」那一刻说一次，不然每条弹幕弹一次提示，等于刷屏
+  // 同一个原因只说一次。光看 until 不够：冷却时长配成 0 时它一直是 0，
+  // 就变成每条弹幕弹一次提示（空 Key 这种「会一直存在」的原因尤其明显）
+  if (ttsFallback.reason !== reason) {
     send('tts:notice', {
       message:
         `${fallbackLabel(reason)}，${cd > 0 ? `${Math.round(cd / 60000)} 分钟内` : '暂时'}先用${providerLabel(provider)}念。`,
@@ -2659,6 +2661,25 @@ async function synthesizeWithCache(cfg, text, style, opts = {}) {
   const online = cfg && cfg.provider !== 'edge' && cfg.provider !== 'system'
   const fbEnabled = online && opts.allowFallback !== false && t.fallback?.enabled !== false
 
+  // 没填 Key 的云平台：连请求都不要发。空 Key 换来的 401 属于 config 类，
+  // 而 config 类**故意不自动回退**（坏 Key 不能静默掩盖）—— 于是压根没配语音的人，
+  // 每来一条弹幕都会白发一次请求、刷一条警告。这里直接把这条路掐掉：
+  // 开了备用嗓子就当场换过去（它本来就不需要 Key），没开就干脆不出声（见 runSpeech）。
+  if (missingKey(cfg)) {
+    if (fbEnabled) {
+      const out = await runFallbackChain(t, run)
+      if (out) {
+        enterFallback(out.fallbackProvider, 'no-key', { message: 'API Key 为空，跳过原平台' })
+        return { ...out, fallbackReason: 'no-key' }
+      }
+      throw new Error('没填 API Key，备用嗓子也没能出声')
+    }
+    const e = new Error(`还没填「${PROVIDERS[cfg.provider]?.name || '语音平台'}」的 API Key`)
+    // 调用方靠 code 认它（试听 / 语音测试要把它原样提示出来）
+    e.code = 'NO_KEY'
+    throw e
+  }
+
   if (fbEnabled && fallbackActive()) {
     const out = await runFallbackChain(t, run)
     if (out) return { ...out, fallbackReason: ttsFallback.reason || 'credit' }
@@ -2695,6 +2716,14 @@ async function runFallbackChain(t, run) {
   return null
 }
 
+/** 空 Key 的提示只记一次（不然每条弹幕都刷一行，日志里全是它） */
+const keylessNoticed = new Set()
+function noteKeylessSpeech(provider) {
+  if (keylessNoticed.has(provider)) return
+  keylessNoticed.add(provider)
+  log?.info('[tts] 没填 API Key，弹幕播报先跳过（备用嗓子也没开）', provider)
+}
+
 async function runSpeech(item) {
   const t = store.get().tts || {}
   // 上一轮留下的跳过标记不该影响这一条
@@ -2706,14 +2735,22 @@ async function runSpeech(item) {
     speech.finish()
     return
   }
+  // 有人绑了自己的音色就用他那份配置，否则回落全局默认
+  const usedCfg = item.profile ? profileCfg(item.profile) : ttsCfg(t)
+  // 没填 Key、又没开备用嗓子：这一句根本没人能念。连请求都不发 ——
+  // 否则每条弹幕都要白打一次 401、刷一条警告（日志里那串「这把 Key 无效」就是它）。
+  // 静默跳过而不是报错：对压根没打算用在线语音的人来说，报错本身才是噪音。
+  if (missingKey(usedCfg) && t.fallback?.enabled === false) {
+    noteKeylessSpeech(usedCfg.provider)
+    speech.finish()
+    return
+  }
   const gap = Number(t.minIntervalMs) || 700
   const wait = Math.max(0, gap - (Date.now() - lastSpeakAt))
   if (wait) await new Promise((r) => setTimeout(r, wait))
 
   send('tts:state', { state: 'loading', text: item.text })
   try {
-    // 有人绑了自己的音色就用他那份配置，否则回落全局默认
-    const usedCfg = item.profile ? profileCfg(item.profile) : ttsCfg(t)
     const audio = await synthesizeWithCache(usedCfg, item.text, item.style)
     // 合成期间用户点了跳过 —— 这条就别播了（标记在这里消费掉，不会误伤下一条）
     if (speech.consumeSkip()) {
