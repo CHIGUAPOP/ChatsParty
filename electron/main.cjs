@@ -81,17 +81,47 @@ let musicCurrent = null
 let musicLastTick = null
 
 /**
+ * 队列条目的编号，**只增不减**。
+ *
+ * 身份判定不能只看 `kind:id`：同一首歌被两个人先后点了、或者同一个人隔一会儿
+ * 又点一次，两条条目的 id 一模一样 —— 渲染层推进 effect 依赖的是
+ * `state.current?.id`，id 没变 effect 就不重跑，第二条永远不会启动
+ * （队列里明明还有一条，画面却停在最后一帧上不动）。
+ * 给每条入队的东西一个真正的唯一编号，这种「重复点同一首」才走得通。
+ */
+let musicQidSeq = 0
+
+/**
  * 当前视频条目已解析的整条播放地址（key → url）。
  * 叠加层要在 OBS 里直接放画面，而 bilivideo CDN 认 Referer —— OBS 浏览源
  * 发出的请求我们管不着，只能让流从本进程的 overlay 服务代理出去（见
  * overlay.cjs 的 /stream/video 路由）。e2e 下 videoAudioProvider 返回
  * data: URL，叠加层对它直连（data: 没有 Referer 一说）。
  */
+/**
+ * 视频流地址缓存。**必须带过期时间**：B 站这条 URL 自带签名时效（约 2 小时），
+ * 以前缓存永不过期 —— 同一个视频隔很久再点，就是拿着过期地址去 403，
+ * 用户看到的是「点了没反应 / 卡在一帧不动」。这里按 90 分钟作废，留点余量。
+ */
+const STREAM_TTL_MS = 90 * 60 * 1000
+/** key -> { url, at } */
 const musicStreamCache = new Map()
 /** 实际拿到的清晰度（qn 码）。要 1080P 也可能被 B 站夹成 720P，界面得显示真拿到的那档 */
 const musicStreamQuality = new Map()
 /** 防并发重解：同一 key 的解析在途时不再起第二份 */
 const musicStreamInflight = new Map()
+
+/** 取缓存里的流地址，过期就地丢掉。没有/过期都返回 null */
+function cachedStream(key) {
+  const hit = musicStreamCache.get(key)
+  if (!hit) return null
+  if (Date.now() - hit.at > STREAM_TTL_MS) {
+    musicStreamCache.delete(key)
+    musicStreamQuality.delete(key)
+    return null
+  }
+  return hit.url || null
+}
 
 /** 配置里请求的清晰度（qn）。认不出的值退到默认档 720P */
 function videoQualityWanted() {
@@ -102,9 +132,27 @@ function musicKeyOf(v) {
   return `${v && v.kind === 'video' ? 'video' : 'song'}:${(v && v.id) ?? 0}`
 }
 
+/**
+ * 队列条目的**身份串**（和渲染层 `keyOf` 同一口径：qid 优先，老数据回落 kind:id）。
+ *
+ * 注意它跟 `musicKeyOf` 不是一回事，别混用：
+ *  - `musicKeyOf` 按「内容」认（kind:id），给流缓存用 —— 同一条视频点两次该共用一条流；
+ *  - 这个按「队列里的这一条」认（带 qid），给心跳比对用 —— 同一条视频点两次是两条。
+ *
+ * 以前叠加层和 e2e 都自己拼 `'video:' + id` 去比心跳，一改口径就全对不上
+ * （心跳对不上 → OBS 中途连上时不补进度；e2e 直接等不到那帧）。统一从快照拿。
+ */
+function musicItemKey(it) {
+  if (!it) return ''
+  const k = it.kind === 'video' ? 'video' : 'song'
+  const q = Number(it.qid) || 0
+  return q > 0 ? `${k}#${q}` : `${k}:${it.id ?? 0}`
+}
+
 async function resolveVideoStream(v) {
   const key = musicKeyOf(v)
-  if (musicStreamCache.has(key)) return musicStreamCache.get(key)
+  const cached = cachedStream(key)
+  if (cached) return cached
   if (musicStreamInflight.has(key)) return musicStreamInflight.get(key)
   const p = (async () => {
     try {
@@ -116,7 +164,7 @@ async function resolveVideoStream(v) {
       // 渲染层那条路（music:videoAudio）返回 { url, quality }，这里统一取 url
       const url = r && typeof r === 'object' ? r.url : r
       if (typeof url === 'string' && url) {
-        musicStreamCache.set(key, url)
+        musicStreamCache.set(key, { url, at: Date.now() })
         const q = Number(r && r.quality) || 0
         if (q) musicStreamQuality.set(key, q)
       }
@@ -135,7 +183,7 @@ async function resolveVideoStream(v) {
 function ensureCurrentStream() {
   if (!musicCurrent || musicCurrent.kind !== 'video') return
   const key = musicKeyOf(musicCurrent)
-  if (musicStreamCache.has(key) || musicStreamInflight.has(key)) return
+  if (cachedStream(key) || musicStreamInflight.has(key)) return
   resolveVideoStream(musicCurrent).then((url) => {
     // 解析期间可能已经切了条目 —— key 对不上就别把旧流推出去
     if (url && musicCurrent && musicKeyOf(musicCurrent) === key) pushMusicState()
@@ -145,12 +193,14 @@ function ensureCurrentStream() {
 function musicSnapshot() {
   const isVideo = Boolean(musicCurrent && musicCurrent.kind === 'video')
   const key = musicKeyOf(musicCurrent)
-  const stream = isVideo ? musicStreamCache.get(key) || null : null
+  const stream = isVideo ? cachedStream(key) : null
   // 实际拿到的清晰度（不是用户选的那档）—— 界面拿它显示「这条现在是 720P」
   const streamQuality = isVideo ? Number(musicStreamQuality.get(key)) || 0 : 0
   return {
     items: musicQueue.slice(),
     current: musicCurrent,
+    /** 当前条目的身份串（心跳 `tick.key` 就是它）。别让外面自己拼 `'video:'+id` */
+    itemKey: musicItemKey(musicCurrent),
     queued: musicQueue.length,
     tick: musicLastTick,
     stream,
@@ -374,8 +424,11 @@ function musicEnqueue(song, requester) {
   const m = cfg.music || {}
   const max = Number(m.maxQueue) || 20
   if (musicQueue.length >= max) return { ok: false, reason: 'full' }
+  // 每条都盖上唯一编号（qid）：重复点同一首歌也必须是两条不同的条目
+  const qid = ++musicQidSeq
   if (song?.kind === 'video') {
     musicQueue.push({
+      qid,
       kind: 'video',
       // 视频的 id 用 cid（同一稿件的不同分 P cid 不同，天然唯一）
       id: Number(song.cid) || Number(song.id) || 0,
@@ -392,6 +445,7 @@ function musicEnqueue(song, requester) {
     })
   } else {
     musicQueue.push({
+      qid,
       kind: 'song',
       id: Number(song.id),
       name: song.name || '',
@@ -424,6 +478,25 @@ const userLastSpeak = new Map()
 
 // { 观众标识: 上次点歌时间 }，防止一个人把歌单刷满
 const musicCooldown = new Map()
+/** { 观众标识: 上次「点太快」提示时间 }。被挡下来也要说一声，但提示本身得限流 */
+const musicNotice = new Map()
+
+/**
+ * 点歌被节流挡下来时说一声。
+ *
+ * 以前是纯 return：观众发完「点歌 晴天」看不到任何反馈，只当自己没发出去，
+ * 于是反复重发 —— 反而把冷却刷得更长。提示自己也要限流（10 秒一条），
+ * 否则刷屏的人能把回执刷满。
+ */
+async function notifyMusicCooldown(id, waitMs) {
+  const cfg = store.get()
+  if (cfg.music?.replyInChat === false) return
+  const now = Date.now()
+  if (now - (musicNotice.get(id) || 0) < 10000) return
+  musicNotice.set(id, now)
+  const left = Math.max(1, Math.ceil(waitMs / 1000))
+  await replyChat(`点太快啦，${left} 秒后再点吧`, { force: true })
+}
 
 const faceQueue = []
 let faceBusy = 0
@@ -1402,7 +1475,9 @@ function dispatchEvent(ev) {
   if (enriched.face) ensureFace(enriched.face)
   send('live:event', enriched)
   if (overlay) overlay.broadcast('event', enriched)
-  maybeSpeak(enriched)
+  // 点歌先处理：它跟「要不要出声」没关系，不该被播报开关连坐（见 handleMusicCommand）
+  const isMusicCmd = handleMusicCommand(enriched)
+  maybeSpeak(enriched, { skipMusic: isMusicCmd })
 }
 
 /* --------------------------- 音色绑定与命令 --------------------------- */
@@ -1417,6 +1492,45 @@ function clipReply(s, n = REPLY_MAX) {
 function musicTriggerWord(cfg) {
   const list = Array.isArray(cfg?.music?.commands) ? cfg.music.commands.filter((x) => String(x || '').trim()) : []
   return list[0] || '点歌'
+}
+
+/**
+ * 拼一条回执：中间那段（歌名/关键词）太长就截成「前半…」，**尾巴必须保住**。
+ *
+ * `clipReply` 是齐头截断，于是「已点歌：某首名字很长的歌 - 某歌手（第 3 位）」
+ * 被切到 20 字时，「（第 3 位）」正好被切掉 —— 观众最想知道的那条信息没了。
+ */
+function replyMsg(head, mid, tail, max = REPLY_MAX) {
+  const h = String(head || '')
+  const t = String(tail || '')
+  const room = Math.max(0, max - h.length - t.length)
+  let m = String(mid || '').replace(/\s+/g, ' ').trim()
+  if (m.length > room) m = room <= 1 ? '' : m.slice(0, room - 1) + '…'
+  return h + m + t
+}
+
+/**
+ * 点歌指令：**功能**，不是播报。
+ *
+ * 原来这段写在 maybeSpeak（播报）里，`tts.enabled=false` 那一行 return 顺带把点歌
+ * 也一起吃掉了 —— 主播一关语音播报，观众点歌就彻底没反应（不排队、不回执、不报错）。
+ * 实测：关掉 tts 后发「点歌 晴天」，队列始终为空。所以挪到事件派发主链路上来。
+ *
+ * @returns {boolean} 这条弹幕是不是点歌指令（是的话就不再进播报队列）
+ */
+function handleMusicCommand(ev) {
+  if (ev.type !== 'danmaku') return false
+  const cfg = store.get()
+  if (!cfg.music?.enabled) return false
+  const kw = NCM.parseMusicCommand(ev.content, cfg.music.commands)
+  if (kw === null) return false
+  if (kw) {
+    handleMusicRequest(ev, kw).catch((e) => console.warn('[music] 点歌失败：', e.message))
+  } else if (cfg.music?.replyInChat !== false) {
+    // 用主播自己设的触发词，别教一个已经被改掉的旧词
+    replyChat(`想点什么歌？发「${musicTriggerWord(cfg)} 歌名」`, { force: true })
+  }
+  return true
 }
 
 /**
@@ -1620,10 +1734,18 @@ function sendLibraryChanged() {
 let replyChain = Promise.resolve()
 
 /** 往直播间发命令回执。串行 + 节流，避免连发触发 B站刷屏风控。 */
-function replyChat(text) {
+/**
+ * 发一条回执弹幕（串行队列 + 至少隔 2 秒，避免连续发触发 B 站刷屏风控）。
+ *
+ * `force` 表示「这条和语音策略无关，调用方自己已经判过该不该发」。
+ * 点歌回执就属于这种：它归「点歌 → 弹幕里回执」那个开关管，不该被语音页的
+ * 「用弹幕回执回复观众」连带关掉 —— 以前两个开关是耦合的，用户看到的就是
+ * 「点歌回执明明开着却一条都没有」。
+ */
+function replyChat(text, { force = false } = {}) {
   replyChain = replyChain.then(async () => {
     const cfg = store.get()
-    if (!cfg.voicePolicy?.replyInChat) return
+    if (!force && !cfg.voicePolicy?.replyInChat) return
     const roomId = cfg.room?.realRoomId || Number(cfg.room?.roomId)
     if (!roomId || !session || !api) return
     try {
@@ -1956,7 +2078,11 @@ async function handleMusicRequest(ev, keyword) {
   // 拿去网易云搜歌名必然搜不到。链接可能很长，长度限制对视频不适用。
   const bvid = BVIDEO.parseBvid(kw)
   if (bvid) return handleVideoRequest(ev, bvid)
-  if (kw.length > (Number(m.maxKeywordLength) || 30)) return
+  if (kw.length > (Number(m.maxKeywordLength) || 30)) {
+    // 也是静默丢弃过的：观众不知道是「太长」还是「没发出去」
+    if (m.replyInChat !== false) await replyChat('歌名太长啦，短一点试试', { force: true })
+    return
+  }
 
   const name = ev.username || '观众'
   // 一个人刷屏点歌会把歌单塞满 —— 按人节流
@@ -1964,31 +2090,33 @@ async function handleMusicRequest(ev, keyword) {
   const now = Date.now()
   const prev = musicCooldown.get(id) || 0
   const cd = Number(m.perUserCooldownMs) || 30000
-  if (now - prev < cd) return
+  if (now - prev < cd) {
+    await notifyMusicCooldown(id, cd - (now - prev))
+    return
+  }
   musicCooldown.set(id, now)
   for (const [k, v] of musicCooldown) if (now - v > 600000) musicCooldown.delete(k)
+  for (const [k, v] of musicNotice) if (now - v > 600000) musicNotice.delete(k)
 
   try {
     const songs = await NCM.searchMusic(kw, { limit: 5, cookie: m.cookie, mode: net.resolveMode('netease', cfg) })
-    // 优先能播的；全都不能播就回一句，别塞进队列白等。
-    // 这里要分清两种「点不了」：压根没搜到 vs 搜到了但受会员/付费限制 —— 后者用户换个版本就能解决
-    const pick = songs.find((s) => s.playable) || null
-    if (!pick) {
-      if (m.replyInChat !== false) {
-        const msg = songs.length
-          ? `搜到了「${songs[0].name}」，但它需要会员或付费 —— 换个版本试试`
-          : `没找到「${kw}」这首歌，换个名字试试`
-        await replyChat(msg)
-      }
+    if (!songs.length) {
+      if (m.replyInChat !== false) await replyChat(replyMsg('没找到「', kw, '」，换个名字试试'), { force: true })
       return
     }
+    // 优先挑「看着能播」的那首；一首都没有就照第一首试。
+    // **不能用 playable 判死**：搜索走匿名通道，返回的 pl 反映不了会员身份，
+    // 而匿名实测也能拿到 VIP 歌的 128k。真播不了 songUrl 会自己降级重试，
+    // 真拿不到才抛，那时再回执（见下面的 catch）—— 比在这儿凭空否定准得多。
+    const pick = songs.find((s) => s.playable) || songs[0]
     const r = musicEnqueue(pick, name)
     if (!r.ok) {
-      if (m.replyInChat !== false) await replyChat('歌单满了，等主播放完几首再来')
+      if (m.replyInChat !== false) await replyChat('歌单满了，等主播放完几首再来', { force: true })
       return
     }
     if (m.replyInChat !== false) {
-      await replyChat(`已点歌：${pick.name} - ${pick.artists}（第 ${r.position} 位）`)
+      // 尾巴「（第 N 位）」必须留住 —— 齐头截断会正好把它切掉
+      await replyChat(replyMsg('已点歌：', pick.name, `（第 ${r.position} 位）`), { force: true })
     }
     // 念一句，主播不用盯着屏幕也知道有人点了歌
     if (m.announce !== false && cfg.tts?.enabled) {
@@ -2002,7 +2130,7 @@ async function handleMusicRequest(ev, keyword) {
     }
   } catch (e) {
     console.warn('[music] 点歌失败：', e.message)
-    if (m.replyInChat !== false) await replyChat('点歌服务这会儿不太顺，稍后再试')
+    if (m.replyInChat !== false) await replyChat('点歌服务这会儿不太顺，稍后再试', { force: true })
   }
 }
 
@@ -2018,9 +2146,13 @@ async function handleVideoRequest(ev, bvid) {
   const now = Date.now()
   const prev = musicCooldown.get(id) || 0
   const cd = Number(m.perUserCooldownMs) || 30000
-  if (now - prev < cd) return
+  if (now - prev < cd) {
+    await notifyMusicCooldown(id, cd - (now - prev))
+    return
+  }
   musicCooldown.set(id, now)
   for (const [k, v] of musicCooldown) if (now - v > 600000) musicCooldown.delete(k)
+  for (const [k, v] of musicNotice) if (now - v > 600000) musicNotice.delete(k)
 
   try {
     // 带上登录身份查：会员专属视频游客查不到
@@ -2028,11 +2160,11 @@ async function handleVideoRequest(ev, bvid) {
     const v = await BVIDEO.videoInfo(bvid, { session, mode: net.resolveMode('bilibili', cfg) })
     const r = musicEnqueue({ kind: 'video', ...v }, name)
     if (!r.ok) {
-      if (m.replyInChat !== false) await replyChat('播放列表满了，等主播放完几个再来')
+      if (m.replyInChat !== false) await replyChat('播放列表满了，等主播放完几个再来', { force: true })
       return
     }
     if (m.replyInChat !== false) {
-      await replyChat(`已点视频：${v.title}${v.up ? `（UP：${v.up}）` : ''}（第 ${r.position} 位）`)
+      await replyChat(replyMsg('已点视频：', v.title, `（第 ${r.position} 位）`), { force: true })
     }
     if (m.announce !== false && cfg.tts?.enabled) {
       if (speech.queue.length > 24) speech.queue.shift()
@@ -2045,7 +2177,7 @@ async function handleVideoRequest(ev, bvid) {
     }
   } catch (e) {
     console.warn('[video] 点视频失败：', e.message)
-    if (m.replyInChat !== false) await replyChat(`这个视频点不了：${e.message}`)
+    if (m.replyInChat !== false) await replyChat(`这个视频点不了：${e.message}`, { force: true })
   }
 }
 
@@ -2217,7 +2349,7 @@ function buildSpeechText(ev, t) {
   }
 }
 
-function maybeSpeak(ev) {
+function maybeSpeak(ev, { skipMusic = false } = {}) {
   const cfg = store.get()
   const t = cfg.tts || {}
   const policy = cfg.voicePolicy || {}
@@ -2228,19 +2360,10 @@ function maybeSpeak(ev) {
   if (ev.type === 'enter' && !t.readEnter) return
   if (ev.type === 'live' || ev.type === 'offline' || ev.type === 'other') return
 
-  // 点歌弹幕不进播报队列（「点歌 七里香」被念出来很怪），单独处理
-  if (ev.type === 'danmaku' && cfg.music?.enabled) {
-    const kw = NCM.parseMusicCommand(ev.content, cfg.music.commands)
-    if (kw !== null) {
-      if (kw) {
-        handleMusicRequest(ev, kw).catch((e) => console.warn('[music] 点歌失败：', e.message))
-      } else if (cfg.music?.replyInChat !== false) {
-        // 用主播自己设的触发词，别教一个已经被改掉的旧词
-        replyChat(`想点什么歌？发「${musicTriggerWord(cfg)} 歌名」`)
-      }
-      return
-    }
-  }
+  // 点歌弹幕不进播报队列（「点歌 七里香」被念出来很怪）。
+  // **只负责跳过，真正的点歌在 dispatchEvent → handleMusicCommand 里做** ——
+  // 这段以前自带点歌处理，于是 tts.enabled=false 时点歌整个失效。
+  if (skipMusic) return
 
   // 命令弹幕不进播报队列，先处理掉；顺便做冷却，防止连刷把 API 打满
   if (policy.enabled && ev.type === 'danmaku') {
@@ -3499,7 +3622,7 @@ async function ensureOverlay(port) {
     overlay.musicProvider = () => musicSnapshot()
     // 叠加层 <video> 播视频走本服务的流代理（CDN 防盗链），这里供真地址。
     // 缓存在 musicAdvance 换条目时整包作废，不会有旧 key 的遗物流。
-    overlay.streamProvider = (key) => musicStreamCache.get(String(key || '')) || null
+    overlay.streamProvider = (key) => cachedStream(String(key || ''))
     overlay.lyricProvider = () => snapshotLyric()
     // 音色选择面板：OBS 中途连上时补发当前那一条，不然要等下一个观众搜才出现
     overlay.voicePickProvider = () => pickQueue.snapshot()
@@ -3708,9 +3831,10 @@ function bootstrap() {
     // 只在 CP_E2E=1 时存在，正常启动不会走到这里。
     const replies = []
     const rawReply = replyChat
-    replyChat = (text) => {
+    // 第二个参数（{ force }）必须透传：点歌回执靠它绕过语音策略那道门
+    replyChat = (text, opts) => {
       replies.push(String(text))
-      return rawReply(text)
+      return rawReply(text, opts)
     }
     global.__cpE2E = {
       dispatchEvent,
@@ -3785,6 +3909,46 @@ function bootstrap() {
           }
         },
       },
+      /**
+       * 点歌链路的测试口。
+       *
+       * 这里有两个只能靠**真跑一遍**才看得见的毛病：
+       * ① 关掉语音播报后点歌彻底失效（点歌曾住在 maybeSpeak 里）；
+       * ② 同一首被点两次时第二条卡住不播（推进 effect 只认 id）。
+       * 前者要真发一条弹幕走完整链路，后者要把播放器真跑起来，所以给两个替换口：
+       * 搜歌和取歌链接。e2e 用全零 wav 当音源 —— 能解码、有真时长、一点声音都没有。
+       */
+      music: (() => {
+        const orig = { search: NCM.searchMusic, url: NCM.songUrl }
+        return {
+          snapshot: () => musicSnapshot(),
+          /** 假装观众发了条弹幕，走的是真正的 dispatchEvent（点歌 → 入队 → 播报） */
+          danmaku: (content, opts) =>
+            dispatchEvent({
+              type: 'danmaku',
+              uid: Number(opts?.uid) || 1,
+              username: opts?.username || 'e2e观众',
+              content: String(content || ''),
+              ...(opts || {}),
+            }),
+          setSearch: (fn) => {
+            if (typeof fn === 'function') NCM.searchMusic = fn
+          },
+          setUrl: (fn) => {
+            if (typeof fn === 'function') NCM.songUrl = fn
+          },
+          /** 还原真实实现（联网那份） */
+          resetSource: () => {
+            NCM.searchMusic = orig.search
+            NCM.songUrl = orig.url
+          },
+          next: () => {
+            musicAdvance()
+            pushMusicState()
+            return musicSnapshot()
+          },
+        }
+      })(),
       /** 音色选择面板的队列。断言「台上画的那一帧」和「主进程排的队」是不是同一件事 */
       pickQueue,
       pickSnapshot: () => pickQueue.snapshot(),

@@ -1354,10 +1354,12 @@
             v.playsInline = true
             v.setAttribute('playsinline', '')
             v.preload = 'auto'
-            // 中途才连上 / 重排时快照里带着进度底 —— 先对齐再播
+            // 中途才连上 / 重排时快照里带着进度底 —— 先对齐再播。
+            // 身份串用快照给的 itemKey：以前这里是 'video:' + id，一改口径就永远对不上，
+            // 表现是「OBS 中途接上时视频从 0 开始，跟应用里不同步」。
             const tick = musicState.tick
             videoPlaying = tick ? Boolean(tick.playing) : true
-            if (tick && String(tick.key || '') === vkey && Number(tick.pos) > 0) {
+            if (tick && String(tick.key || '') === String(musicState.itemKey || '') && Number(tick.pos) > 0) {
               v.addEventListener(
                 'loadedmetadata',
                 () => {

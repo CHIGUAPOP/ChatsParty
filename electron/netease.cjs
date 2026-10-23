@@ -321,9 +321,13 @@ function normalizeSong(s, loggedIn = false) {
     picUrl: album.picUrl || album.pic || '',
     duration: s.duration || s.dt || 0,
     durationText: fmtDuration(s.duration || s.dt || 0),
-    // 搜索走的是匿名通道，返回的 pl 反映不了会员身份 ——
-    // 填了 Cookie 就一律放行，真正的判定留给「取链接」那一步（它会走 weapi）
+    // 搜索走的是匿名通道，返回的 pl 反映不了会员身份。
+    // 这里只用来「优先挑哪首」，**不能拿来判死**：实测匿名也能拿到 VIP 歌的 128k，
+    // 早先拿 playable 当否决条件，结果能播的歌被回执成「需要会员」。
+    // 真正的判定在 songUrl（它会逐级降码率重试，拿不到才抛）。
     playable: pl > 0 || s.fee === 0 || loggedIn,
+    /** 大概率要会员/付费 —— 界面标一下即可，别据此拦 */
+    restricted: !(pl > 0 || s.fee === 0 || loggedIn),
     maxBr: pl || 0,
     fee: s.fee ?? 0,
   }
@@ -378,8 +382,10 @@ async function songUrl(id, opts = {}) {
         // 秒。过期就重新取一次
         expiresIn: Number(item.expi) || 1200,
         md5: item.md5 || '',
-        // 实际拿到的音质比想要的低，界面上要能看出来
-        downgraded: br !== want,
+        // 实际拿到的码率比想要的低，界面上要能看出来。
+        // 必须比服务端**真实返回**的 item.br —— 拿本次请求的 br 比的话，
+        // 降级请求（320k 拿不到 → 降成 128k 那次）永远比出「没降级」
+        downgraded: Number(item.br || br) > 0 && Number(item.br || br) < want,
       }
     }
   }

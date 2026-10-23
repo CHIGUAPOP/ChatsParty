@@ -422,8 +422,9 @@ export default function MusicPage({ config, patch, notify }: Props) {
           </div>
         ) : (
           <div className="music-results">
+            {/* key 用 qid：同一条被点两次时 kind+id+at 可能撞上，React 会当成同一行 */}
             {state.items.map((it, i) => (
-              <div key={`${it.kind || 'song'}-${it.id}-${it.at}`} className="music-result">
+              <div key={it.qid ? `q${it.qid}` : `${it.kind || 'song'}-${it.id}-${it.at}`} className="music-result">
                 <span className="music-result__no">{i + 1}</span>
                 <div className="music-result__main">
                   <span className="music-result__name">{it.name}</span>

@@ -448,7 +448,9 @@ async function main() {
               // 流和心跳底都要齐：流解析是异步的、心跳 400ms 一拍，
               // 太早的那帧可能只齐一半 —— 不齐就当没收到，waitFor 会重连重试
               const t = msg.payload.tick
-              if (msg.payload.stream && t && String(t.key) === 'video:103') done(msg.payload)
+              // 身份串用快照里的 itemKey（qid 优先），别自己拼 'video:103' ——
+              // 渲染层 keyOf 的口径一变，这里就会永远等不到那帧
+              if (msg.payload.stream && t && String(t.key) === String(msg.payload.itemKey)) done(msg.payload)
             }
           } catch {
             /* noop */
@@ -474,7 +476,10 @@ async function main() {
     Boolean(ovSnap && /^data:/i.test(ovSnap.snap.stream)),
     ovSnap && typeof ovSnap.snap.stream === 'string' ? ovSnap.snap.stream.slice(0, 30) : null,
   )
-  ok('叠加层快照带着播放心跳底', Boolean(ovSnap && ovSnap.snap.tick && ovSnap.snap.tick.key === 'video:103'))
+  ok(
+    '叠加层快照带着播放心跳底',
+    Boolean(ovSnap && ovSnap.snap.tick && ovSnap.snap.tick.key === ovSnap.snap.itemKey),
+  )
 
   // 真开一个窗口加载叠加层页面（OBS 浏览源的替身），验 <video> 真在出画面
   if (ovSnap) {

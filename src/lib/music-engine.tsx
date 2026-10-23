@@ -111,6 +111,11 @@ let audioEl: HTMLAudioElement | null = null
 let playingId: string | number = 0
 /** 音频元素里装的是队列哪一条（keyOf）。跟 playingId 一起构成「真的在播这首」的证据 */
 let audioKey = ''
+/**
+ * 手上这条音频地址什么时候过期（毫秒时间戳）。网易云给 20 分钟有效期，
+ * 过期后再播只会 error —— 所以「暂停久了接着放」必须先重取一条（见 playCurrent）。
+ */
+let audioExpiresAt = 0
 
 /* ---------------- B 站视频：原生 <video> 单例 ---------------- */
 
@@ -131,8 +136,24 @@ function getVideoElement(): HTMLVideoElement {
   return videoEl
 }
 
-/** 流地址缓存：暂停/继续、跨页面重挂、浮窗开开关关，都不用重复取 */
-let streamCache = new Map<string, string>()
+/**
+ * 流地址缓存：暂停/继续、跨页面重挂、浮窗开开关关，都不用重复取。
+ *
+ * **必须带过期时间**：B 站流 URL 自带签名时效（约 2 小时）。以前这份缓存永不过期，
+ * 同一个视频隔很久再点第二次，就是拿着过期地址去 403 —— 用户看到的是
+ * 「点了没反应 / 画面卡住」。按 90 分钟作废，留余量。
+ */
+const STREAM_TTL_MS = 90 * 60 * 1000
+const streamCache = new Map<string, { url: string; at: number }>()
+function cachedStream(key: string): string | null {
+  const hit = streamCache.get(key)
+  if (!hit) return null
+  if (Date.now() - hit.at > STREAM_TTL_MS) {
+    streamCache.delete(key)
+    return null
+  }
+  return hit.url
+}
 
 /**
  * 取「能直接喂 <video> 的整条播放地址」（platform=html5 的 mp4，音视频混流）。
@@ -166,9 +187,26 @@ export function __setVideoStreamLoader(fn: (bvid: string, cid: number) => Promis
 function kindOf(item?: { kind?: string } | null): 'video' | 'song' {
   return item?.kind === 'video' ? 'video' : 'song'
 }
-function keyOf(item: { id?: number; kind?: string } | null | undefined): string {
+
+/**
+ * 队列条目的身份。
+ *
+ * **必须用主进程盖的 `qid`**，不能只看 `kind:id`：同一首歌被两个人先后点了、
+ * 或者同一个人隔一会儿又点一次时，两条条目的 id 一模一样 —— 而推进 effect 的
+ * 依赖是「当前条目的编号」，编号不变它就不重跑，于是第二条永远不启动：
+ * 队列里明明还有一条，画面却停在最后一帧不动（实测复现过）。
+ * 老快照 / e2e 手工构造的条目可能没有 qid，回落 kind:id 照旧能用。
+ */
+function keyOf(item: { id?: number; kind?: string; qid?: number } | null | undefined): string {
   if (!item) return ''
-  return `${kindOf(item)}:${item.id ?? 0}`
+  const q = Number(item.qid) || 0
+  return q > 0 ? `${kindOf(item)}#${q}` : `${kindOf(item)}:${item.id ?? 0}`
+}
+
+/** 队列条目的编号：qid 优先，老数据退到 id。给 effect 依赖用 */
+function stampOf(item: { id?: number; qid?: number } | null | undefined): string | number {
+  if (!item) return 0
+  return Number(item.qid) || item.id || 0
 }
 
 /** 空歌词的固定引用。每渲染一次就新建一个数组的话，依赖它的 effect 会跟着每一帧重跑 */
@@ -367,11 +405,11 @@ export function MusicPlayerProvider({ config, notify, children }: Props) {
       videoKeyRef.current = itemKey
       setVideoBuffering(true)
       setVideoError('')
-      let url = streamCache.get(`${bvid}:${cid}`) || null
+      let url = cachedStream(`${bvid}:${cid}`)
       if (!url) {
         url = await streamLoader(bvid, cid)
         if (videoKeyRef.current !== itemKey) return // 等流的这几秒里已经换成别的了
-        if (url) streamCache.set(`${bvid}:${cid}`, url)
+        if (url) streamCache.set(`${bvid}:${cid}`, { url, at: Date.now() })
       }
       if (!url) {
         setVideoBuffering(false)
@@ -385,16 +423,31 @@ export function MusicPlayerProvider({ config, notify, children }: Props) {
       if (el.src !== url) {
         el.src = url
         setVideoReady(false)
-        if (startAt > 0) {
-          // 元数据没到时设 currentTime 会落到「默认起播位置」，到达后生效；
-          // 保险起见再记一笔，loadedmetadata 里兜底
-          try {
-            el.currentTime = startAt
-          } catch {
-            /* noop */
-          }
-          pendingSeekRef.current = startAt
+      }
+      /**
+       * 位置只认 `startAt`，**0 就是「从头」**。走到这儿的只有两种情况：
+       * 换了条目（startAt=0），或者播放权翻回来（startAt=镜像进度）。
+       *
+       * 「同一条视频被点了两次」是前一种，但流地址一模一样、src 不会重设，
+       * 元素还停在上一轮的结尾帧上 —— 不显式归零就只能靠浏览器「播完再 play = 重头」
+       * 那点默认行为兜着，实测会卡住不动。所以这里必须显式拨。
+       */
+      if (startAt > 0) {
+        // 元数据没到时设 currentTime 会落到「默认起播位置」，到达后生效；
+        // 保险起见再记一笔，loadedmetadata 里兜底
+        try {
+          el.currentTime = startAt
+        } catch {
+          /* noop */
         }
+        pendingSeekRef.current = startAt
+      } else if (el.currentTime > 0.5) {
+        try {
+          el.currentTime = 0
+        } catch {
+          /* 拨不了就算了，别为一次 seek 抛异常 */
+        }
+        pendingSeekRef.current = -1
       }
       el.volume = Math.min(1, Math.max(0, videoVolumeRef.current))
       el.muted = videoMutedRef.current
@@ -474,17 +527,28 @@ export function MusicPlayerProvider({ config, notify, children }: Props) {
   const playCurrent = React.useCallback(
     async (item: MusicQueueItem, autoPlay = true, startAt = 0) => {
       if (!item) return
-      if (playingId === keyOf(item) && audioKey === keyOf(item) && audioEl) {
+      const key = keyOf(item)
+      const sameInEl = playingId === key && audioKey === key && Boolean(audioEl)
+      /**
+       * 手上这条地址已经过期（网易云给 20 分钟有效期）。
+       * 暂停久一点再点播放，元素只会报 error —— 而 onerror 会把「地址过期」当成
+       * 「这首歌坏了」直接跳下一首，用户看到的是「刚点的歌没了」。
+       * 所以这里先重取一条，位置从元素停的地方接，别弹回开头。
+       */
+      const stale = sameInEl && Date.now() > audioExpiresAt - 5000
+      if (sameInEl && !stale) {
         // 已经装着这首了（页面重建 / 播放权刚翻回来），别重复取链；
         // 该放的话从暂停处接着放
-        if (autoPlay && audioEl.paused && audioEl.src) audioEl.play().catch(() => {})
+        if (autoPlay && audioEl && audioEl.paused && audioEl.src) audioEl.play().catch(() => {})
         return
       }
-      playingId = keyOf(item)
+      // 过期的这条要重取：起点用元素现在停的位置（startAt 是调用方给的，未必对）
+      const from = stale && audioEl ? Math.floor(audioEl.currentTime || 0) : startAt
+      playingId = key
       setLoading(true)
       setLrc([])
       setLrcIndex(-1)
-      setPosition(0)
+      setPosition(from)
       // 只有真的走到「创建播放器」这一步，才可能由 el.onerror 接管；取链接失败时它还该是 null
       let el: HTMLAudioElement | null = null
       try {
@@ -492,12 +556,13 @@ export function MusicPlayerProvider({ config, notify, children }: Props) {
         el = audioEl || new Audio()
         audioEl = el
         el.src = audio.url
-        audioKey = keyOf(item)
+        audioKey = key
+        audioExpiresAt = Date.now() + (Number(audio.expiresIn) || 1200) * 1000
         el.volume = volumeRef.current
         bindAudio(el)
-        if (startAt > 0) {
+        if (from > 0) {
           try {
-            el.currentTime = startAt
+            el.currentTime = from
           } catch {
             /* 元数据没到就先记着，播放器自己会落到那个位置 */
           }
@@ -632,8 +697,10 @@ export function MusicPlayerProvider({ config, notify, children }: Props) {
      */
     const resumeAt = itemChanged ? 0 : Math.floor(positionRef.current)
     playCurrent(cur, autoPlay, resumeAt)
+    // 依赖的是条目编号（qid），不是 id —— 同一首被点两次时 id 不变，
+    // 依赖 id 的话这个 effect 不会重跑，第二条就永远起不来
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ready, state.current?.id, ownsPlayback, loadVideo, playCurrent])
+  }, [ready, stampOf(state.current), ownsPlayback, loadVideo, playCurrent])
 
   /* 音量随时可调，不用等重启 */
   React.useEffect(() => {
@@ -775,7 +842,7 @@ export function MusicPlayerProvider({ config, notify, children }: Props) {
     return () => window.clearInterval(t)
     // playing 也在依赖里：播停切换的下一拍就推一次，别让对面等 400ms
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ownsPlayback, state.current?.id, playing])
+  }, [ownsPlayback, stampOf(state.current), playing])
 
   /* 非拥有者：镜像拥有者的心跳 —— 界面上的进度/播停照样是活的 */
   React.useEffect(() => {

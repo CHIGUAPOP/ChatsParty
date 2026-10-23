@@ -168,9 +168,10 @@ async function main() {
 
   console.log('[1] 队列空时点一首 → 从头播')
   await enqueue(9001, 30)
+  // 条件要跟断言一致（ready>=2 且没暂停），不然会「等到 ready=1 就返回、然后断言 ready>=2 红」
   const a = await waitFor(async () => {
     const r = await run(win, AUDIO)
-    return r && r.ready >= 1 ? r : null
+    return r && r.ready >= 2 && r.paused === false ? r : null
   }, 15000)
   ok('歌真的在播（元素就绪且没暂停）', Boolean(a && a.ready >= 2 && a.paused === false), a)
   ok('第一首从 0 开始', Boolean(a && a.currentTime < 1.5), a && a.currentTime)

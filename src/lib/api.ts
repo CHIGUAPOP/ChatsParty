@@ -279,6 +279,12 @@ export interface MusicAccount {
  * 用 kind 区分：歌交给网易云取音频，视频交给内嵌的 B 站官方播放器。
  */
 export interface MusicQueueItem {
+  /**
+   * 队列条目的唯一编号（主进程入队时盖章，只增不减）。
+   * **判「换没换条目」必须用它，不能只用 id** —— 同一首歌被点两次时 id 一样，
+   * 用 id 判就会当成没换，第二条永远不启动。
+   */
+  qid?: number
   /** 'song' 是老数据（没有这个字段）的默认值 */
   kind?: 'song' | 'video'
   id: number
@@ -310,6 +316,12 @@ export interface VideoInfo {
 export interface MusicState {
   items: MusicQueueItem[]
   current: MusicQueueItem | null
+  /**
+   * 当前条目的身份串（主进程按 qid 生成，和引擎里 `keyOf` 同一口径）。
+   * 心跳 `tick.key` 就是它 —— 外面要判「这条心跳还属不属于当前条目」时用它，
+   * 别自己拼 `'video:' + id`（口径一改就对不上）。
+   */
+  itemKey?: string
   queued: number
   /**
    * 最后一条播放心跳（拥有播放权的窗口每 400ms 推一次，主进程存底）。

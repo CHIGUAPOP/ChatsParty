@@ -235,8 +235,11 @@ function checkMusicOverlay() {
   // 播放逻辑已经从 MusicPage 搬进常驻的 music-engine，闸门也就跟着搬过去了。
   const engine = read(path.join(root, 'src', 'lib', 'music-engine.tsx'))
   ok('状态没拉回来前不动播放器', /if \(!ready\) return/.test(engine))
-  // ownsPlayback 也在依赖里：播放权翻回来时（音乐浮窗关掉），这个窗口要把当前这条接上
-  ok('停止分支不会再抢在状态前面', /}, \[ready, state\.current\?\.id, ownsPlayback/.test(engine), '缺少 ready 依赖')
+  // ownsPlayback 也在依赖里：播放权翻回来时（音乐浮窗关掉），这个窗口要把当前这条接上。
+  // 依赖必须是**条目编号（qid）**，不能是裸 id：同一首被两个人先后点了、或者同一个人
+  // 隔一会儿又点一次时 id 完全一样，依赖 id 的话 effect 不重跑，第二条永远不启动。
+  ok('停止分支不会再抢在状态前面', /}, \[ready, stampOf\(state\.current\), ownsPlayback/.test(engine), '缺少 ready 依赖')
+  ok('换条目按 qid 判，不用裸 id 当依赖', !/\}, \[ready, state\.current\?\.id/.test(engine) && /qid/.test(engine))
 
   // 更要命的一个坑：播放器曾经住在 MusicPage 里，切走页面组件一卸载，
   // 订阅被摘、effect 停摆，一首歌放完没人接下一首 —— 必须切回点歌页才继续。
@@ -373,6 +376,82 @@ function checkMusicOverlay() {
  * 这里守住「名字归一 + 三路合并 + 直播优先」这三件事别被改回去，
  * 以及渲染端三处（主界面 / 悬浮窗共用 / OBS 叠加层）都必须带 no-referrer。
  */
+/**
+ * [20b] 点歌链路的修复（全是实测复现过的坑）
+ *
+ * 这几条坏起来都是**静默**的：点歌不排队、第二条不播、能播的歌被说成不能播、
+ * 回执里的「第几位」被截掉。界面上一片平静，不留神就以为「B 站又抽风了」。
+ * 所以把代码形状钉死，别让它们悄悄回来。
+ */
+function checkMusicFixes() {
+  console.log('\n[20b] 点歌链路修复')
+  const root = path.join(__dirname, '..')
+  const mainSrc = fs.readFileSync(path.join(root, 'electron', 'main.cjs'), 'utf8')
+  const ncmSrc = fs.readFileSync(path.join(root, 'electron', 'netease.cjs'), 'utf8')
+  const engine = fs.readFileSync(path.join(root, 'src', 'lib', 'music-engine.tsx'), 'utf8')
+
+  // ① 点歌不能住在播报里：tts.enabled=false 那一行 return 会把点歌一起吃掉。
+  // 实测过：关掉 TTS 发「点歌 晴天」，队列始终为空，连回执都没有。
+  const speakAt = mainSrc.indexOf('function maybeSpeak(')
+  const speakBody = speakAt > 0 ? mainSrc.slice(speakAt, mainSrc.indexOf('\n}\n', speakAt)) : ''
+  ok('播报函数里不再处理点歌', speakBody.length > 0 && !/handleMusicRequest|parseMusicCommand/.test(speakBody))
+  ok('点歌挪到事件派发主链路上', /const isMusicCmd = handleMusicCommand\(enriched\)/.test(mainSrc))
+  const cmdAt = mainSrc.indexOf('function handleMusicCommand(')
+  const cmdBody = cmdAt > 0 ? mainSrc.slice(cmdAt, mainSrc.indexOf('\n}\n', cmdAt)) : ''
+  ok('点歌处理不读 tts.enabled', cmdBody.length > 0 && !/tts/.test(cmdBody))
+  ok('点歌弹幕仍然不进播报队列（「点歌 七里香」不该被念出来）', /if \(skipMusic\) return/.test(mainSrc))
+
+  // ② 重复点同一首：身份必须靠递增编号，不能靠 id（id 相同 → effect 不重跑 → 卡住）
+  ok('入队时盖唯一编号 qid', /const qid = \+\+musicQidSeq/.test(mainSrc) && /\n\s+qid,/.test(mainSrc))
+  ok('渲染层按 qid 认条目（老数据回落 kind:id）', /const q = Number\(item\.qid\) \|\| 0/.test(engine))
+  ok('推进 effect 依赖 qid 而不是裸 id', /\[ready, stampOf\(state\.current\), ownsPlayback/.test(engine))
+  ok('同一条视频点了两次也从头播', /else if \(el\.currentTime > 0\.5\)/.test(engine))
+
+  // ③ 能播的歌不能被 playable 判死（匿名实测能拿到 VIP 歌的 128k）
+  ok('搜到就试第一首，不用 playable 判死', /songs\.find\(\(s\) => s\.playable\) \|\| songs\[0\]/.test(mainSrc))
+  ok('会员歌只标 restricted，不据此拦', /restricted:/.test(ncmSrc))
+
+  // ④ 降级标记要比「服务端真实返回的码率」，拿本次请求的 br 比永远比不出来
+  ok('降级按 item.br 判', /downgraded: Number\(item\.br \|\| br\)/.test(ncmSrc))
+  ok('不再拿请求参数当返回码率', !/downgraded: br !== want/.test(ncmSrc))
+
+  // ⑤ 回执 20 字一刀切会把尾巴切掉，而尾巴正是观众要的「第 N 位」
+  ok('回执有保尾的拼装函数', /function replyMsg\(/.test(mainSrc))
+  ok('点歌回执把「第 N 位」放在尾巴', /replyMsg\('已点歌：', pick\.name, `（第 \$\{r\.position\} 位）`\)/.test(mainSrc))
+  ok('点视频回执同样保尾', /replyMsg\('已点视频：', v\.title/.test(mainSrc))
+
+  // ⑥ 两个「回执」开关不该互相牵连：点歌回执归点歌那个开关管
+  ok('replyChat 支持 force（跳过语音策略那道门）', /function replyChat\(text, \{ force = false \} = \{\}\)/.test(mainSrc))
+  ok('点歌/点视频回执都带 force', (mainSrc.match(/\{ force: true \}/g) || []).length >= 4)
+
+  // ⑦ 流地址有时效（B 站约 2 小时），缓存必须过期，否则第二次点同一视频就是 403
+  ok('主进程流缓存带 TTL', /const STREAM_TTL_MS/.test(mainSrc) && /function cachedStream\(key\)/.test(mainSrc))
+  ok('渲染层流缓存带 TTL', /const STREAM_TTL_MS/.test(engine) && /function cachedStream\(key: string\)/.test(engine))
+
+  // ⑧ 条目身份串必须由主进程统一下发：叠加层和 e2e 以前自己拼 'video:' + id，
+  //    口径一改（qid）就永远对不上 —— OBS 中途接上时视频不从当前进度接，e2e 等不到帧
+  const overlayHtml = fs.readFileSync(path.join(root, 'overlay', 'index.html'), 'utf8')
+  ok('快照下发 itemKey', /itemKey: musicItemKey\(musicCurrent\)/.test(mainSrc) && /function musicItemKey\(/.test(mainSrc))
+  ok('叠加层按 itemKey 比心跳', /musicState\.itemKey/.test(overlayHtml) && !/tick\.key \|\| ''\) === vkey/.test(overlayHtml))
+  ok(
+    '主进程/渲染层身份串同构（qid 优先拼 #）',
+    /return q > 0 \? `\$\{k\}#\$\{q\}`/.test(mainSrc) && /return q > 0 \? `\$\{kindOf\(item\)\}#\$\{q\}`/.test(engine),
+  )
+
+  // ⑨ 网易云的播放地址只有 20 分钟。暂停久了再点播放，元素只会报 error，
+  //    而 onerror 会把「地址过期」当成坏链跳下一首 —— 用户看到的是「刚点的歌没了」
+  ok('音频地址记了过期时间', /let audioExpiresAt = 0/.test(engine) && /audioExpiresAt = Date\.now\(\) \+/.test(engine))
+  ok('过期后再播会先重取一条', /const stale = sameInEl && Date\.now\(\) > audioExpiresAt - 5000/.test(engine))
+  ok('重取时位置接着停下的地方（不弹回开头）', /const from = stale && audioEl \? Math\.floor/.test(engine))
+
+  // ⑩ 被节流/超长挡下来不能一声不吭：观众只看到自己那句「点歌 xxx」挂着，
+  //    以为没发出去，于是反复重发 —— 反而把冷却刷得更长
+  ok('点歌被节流会回一声', /async function notifyMusicCooldown/.test(mainSrc))
+  ok('提示本身也限流（10 秒一条）', /now - \(musicNotice\.get\(id\) \|\| 0\) < 10000/.test(mainSrc))
+  ok('歌名过长也会说一声', /歌名太长啦/.test(mainSrc))
+  ok('点视频那条路同样提示', (mainSrc.match(/await notifyMusicCooldown\(id,/g) || []).length >= 2)
+}
+
 function checkEmoticons() {
   return (async () => {
     console.log('\n[24c] 表情图册')
@@ -904,6 +983,9 @@ async function testVoices() {
 
   console.log('\n[20] 网易云点歌')
   await testNetease()
+
+  console.log('\n[20b] 点歌链路修复')
+  checkMusicFixes()
 
   console.log('\n[21] 密钥形态诊断')
   testKeyShape()
