@@ -1,10 +1,11 @@
 import React from 'react'
-import { api, AppConfig, LiveEvent, LoginInfo } from './lib/api'
+import { api, AppConfig, LiveEvent, LoginInfo, UpdateCheckResult } from './lib/api'
 import { MusicPlayerProvider } from './lib/music-engine'
-import { applyMotion, applyScheme, buildScheme } from './lib/theme'
+import { applyThemeConfig } from './lib/theme'
 import { setResolvedFace } from './lib/faces'
 import { useEmoticonBookSync } from './lib/emoticons'
 import { Icon, Snackbar } from './components/ui'
+import Onboarding from './components/Onboarding'
 import ConnectPage from './pages/ConnectPage'
 import DanmakuPage from './pages/DanmakuPage'
 import MusicPage from './pages/MusicPage'
@@ -41,6 +42,9 @@ export default function App() {
   // 播报状态：决定顶栏那个「跳过」胶囊出不出来。放在这一层是为了切页面也不丢
   const [speech, setSpeech] = React.useState<{ state: string; text: string }>({ state: 'idle', text: '' })
   const [queued, setQueued] = React.useState(0)
+  // 首次启动的新手引导。全新安装时主进程会把 general.onboardingSeen 置成 false
+  const [onboarding, setOnboarding] = React.useState(false)
+  const [update, setUpdate] = React.useState<UpdateCheckResult | null>(null)
 
   const notify = React.useCallback((message: string, error?: boolean) => {
     setToast({ message, error })
@@ -56,19 +60,53 @@ export default function App() {
   React.useEffect(() => {
     api.config.get().then((c) => {
       setConfig(c)
-      applyScheme(buildScheme(c.theme?.seed || '#6750A4', c.theme?.mode || 'dark'), c.theme?.mode || 'dark')
-      applyMotion(c.theme?.motion === 'standard' ? 'standard' : 'expressive')
+      paintTheme(c)
     })
   }, [])
 
+  /**
+   * 新手引导只认「明确写着的 false」。
+   * undefined 一律不弹 —— 老用户升级上来配置里没有这个键，不该突然被弹一脸；
+   * 全新安装时主进程在 load() 里把它置成 false，那才是真的要引导。
+   */
   React.useEffect(() => {
-    if (!config) return
-    applyScheme(buildScheme(config.theme?.seed || '#6750A4', config.theme?.mode || 'dark'), config.theme?.mode || 'dark')
-  }, [config?.theme?.seed, config?.theme?.mode])
+    if (config && config.general?.onboardingSeen === false) setOnboarding(true)
+  }, [config?.general?.onboardingSeen])
+
+  /**
+   * 检查更新：启动后延迟几秒查一次，这个进程内不再查第二次。
+   * 失败/跳过一律静默（连不上 GitHub 不是用户需要知道的事）。
+   * 用 ref 读配置，避免 effect 依赖 config 导致定时器被反复重置。
+   */
+  const cfgRef = React.useRef<AppConfig | null>(null)
+  cfgRef.current = config
+  React.useEffect(() => {
+    const t = window.setTimeout(async () => {
+      const c = cfgRef.current
+      if (!c || c.general?.autoCheckUpdate === false) return
+      try {
+        const r = await api.app.updateCheck({ reason: 'auto' })
+        if (r?.ok && r.hasUpdate && r.latest && r.latest !== c.general?.skipUpdateVersion) setUpdate(r)
+      } catch {
+        /* 连不上就放弃，不重试 */
+      }
+    }, 3000)
+    return () => window.clearTimeout(t)
+  }, [])
+
+  const openUpdate = React.useCallback(
+    async (u: UpdateCheckResult) => {
+      const r = await api.app
+        .openExternal(u.url || '')
+        .catch(() => ({ ok: false, message: '打不开下载页' }))
+      if (!r.ok) notify((r as any).message || '打不开下载页', true)
+    },
+    [notify],
+  )
 
   React.useEffect(() => {
-    applyMotion(config?.theme?.motion === 'standard' ? 'standard' : 'expressive')
-  }, [config?.theme?.motion])
+    if (config) paintTheme(config)
+  }, [config?.theme?.seed, config?.theme?.mode, config?.theme?.style, config?.theme?.motion])
 
   React.useEffect(() => {
     api.bilibili.loginInfo().then(setLoginInfo)
@@ -299,6 +337,17 @@ export default function App() {
           {popularity > 0 && (
             <span className="status-pill">人气 {popularity.toLocaleString('zh-CN')}</span>
           )}
+          {update && (
+            <button
+              type="button"
+              className="update-chip"
+              title={`当前 v${update.current}，最新 v${update.latest}。点击打开下载页`}
+              onClick={() => openUpdate(update)}
+            >
+              <Icon name="download" size={15} />
+              有新版本 v{update.latest}
+            </button>
+          )}
           {config.room?.title && (
             <span className="top-bar__subtitle" style={{ maxWidth: 320 }}>
               {config.room.title}
@@ -314,8 +363,19 @@ export default function App() {
           {page === 'voices' && <VoicesPage {...pageProps} />}
           {page === 'theme' && <AppearancePage {...pageProps} />}
           {page === 'obs' && <OverlayPage {...pageProps} />}
-          {page === 'about' && <AboutPage notify={notify} />}
+          {page === 'about' && <AboutPage {...pageProps} />}
           <Snackbar message={toast.message} error={toast.error} />
+          {/* 浮层向导盖在最上：它只在首次启动（或关于页手动重开）时出现 */}
+          {onboarding && (
+            <Onboarding
+              config={config as AppConfig}
+              patch={patch}
+              notify={notify}
+              loginInfo={loginInfo}
+              setLoginInfo={setLoginInfo}
+              onDone={() => setOnboarding(false)}
+            />
+          )}
         </div>
       </div>
     </div>
@@ -331,6 +391,14 @@ export default function App() {
       {content}
     </MusicPlayerProvider>
   )
+}
+
+/**
+ * 把主题配置刷到 <html> 上：配色（M2 还要收敛容器色）、动效、界面风格。
+ * 浮窗和主窗口共用同一份样式表与同一批令牌，所以设一次两边一起变。
+ */
+function paintTheme(c: AppConfig) {
+  applyThemeConfig(c.theme)
 }
 
 function statusLabel(s: string) {

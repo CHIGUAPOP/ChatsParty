@@ -2,6 +2,7 @@ import React from 'react'
 import { api, AppConfig, FloatPanel, FloatState, LiveEvent } from '../lib/api'
 import { MusicPlayerProvider } from '../lib/music-engine'
 import { setResolvedFace } from '../lib/faces'
+import { applyThemeConfig } from '../lib/theme'
 import { useEmoticonBookSync } from '../lib/emoticons'
 import { Icon, Slider, Snackbar, Switch, useDraftInput } from '../components/ui'
 import ViewersList from '../components/ViewersList'
@@ -40,6 +41,13 @@ export default function FloatShell({ panel }: { panel: FloatPanel }) {
 
   // 弹幕浮窗是独立的渲染进程，表情图册要自己订一份（主进程推给所有窗口）
   useEmoticonBookSync()
+
+  // 浮窗也要跟着主题走：配色与界面风格（M3 / M2）都刷一遍。
+  // 以前这里只读 config 的逻辑字段，颜色一直是样式表里那套写死的深紫，
+  // 主窗口换了主题色浮窗纹丝不动。
+  React.useEffect(() => {
+    if (config) applyThemeConfig(config.theme)
+  }, [config?.theme?.seed, config?.theme?.mode, config?.theme?.style, config?.theme?.motion])
 
   React.useEffect(() => {
     api.config.get().then(setConfig)

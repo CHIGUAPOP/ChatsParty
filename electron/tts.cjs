@@ -74,6 +74,8 @@ const PROVIDERS = {
     protocol: 'chat-completions',
     baseUrl: 'https://api.xiaomimimo.com/v1',
     needsKey: true,
+    /** 去哪申请 Key。新手引导要给出这条路，别让人自己去搜 */
+    consoleUrl: 'https://platform.xiaomimimo.com',
     models: ['mimo-v2.5-tts', 'mimo-v2.5-tts-voicedesign', 'mimo-v2.5-tts-voiceclone'],
     voices: [
       { id: 'mimo_default', label: 'MiMo-默认' },
@@ -95,6 +97,7 @@ const PROVIDERS = {
     protocol: 'audio-speech',
     baseUrl: 'https://api.openai.com/v1',
     needsKey: true,
+    consoleUrl: 'https://platform.openai.com/api-keys',
     models: ['gpt-4o-mini-tts', 'tts-1', 'tts-1-hd'],
     voices: ['alloy', 'ash', 'ballad', 'coral', 'echo', 'sage', 'shimmer', 'verse'].map((v) => ({
       id: v,
@@ -109,6 +112,7 @@ const PROVIDERS = {
     protocol: 'fish-tts',
     baseUrl: FISH_BASE,
     needsKey: true,
+    consoleUrl: 'https://fish.audio',
     supportsStylePrompt: false,
     canSearch: true,
     // 官方 openapi.json 里 /v1/tts 的 model 请求头枚举值。

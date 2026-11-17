@@ -133,6 +133,8 @@ const DEFAULTS = {
     contrast: 0,
     // 动效方案：standard = 克制（基线 M3 观感），expressive = M3E 弹簧 + 位移表达
     motion: 'expressive',
+    // 界面风格：m3 = Material 3（默认），m2 = Material 2（方角、重阴影、少染色）
+    style: 'm3',
   },
   overlay: {
     enabled: true,
@@ -385,6 +387,17 @@ const DEFAULTS = {
      * 窗口收起来，不是想停掉。真要退出就去托盘图标上点「退出」。
      */
     closeToTray: true,
+    /**
+     * 首次启动的新手引导走过了没有。
+     *
+     * 默认 true 是**故意的**：老用户升级上来配置文件已经在，不该突然被弹一脸向导。
+     * 只有全新安装（配置文件不存在）时 load() 才把它翻成 false，那才是真的要引导。
+     */
+    onboardingSeen: true,
+    /** 启动时查一次 GitHub Release 看有没有新版本 */
+    autoCheckUpdate: true,
+    /** 用户点了「这个版本先不提醒」记住的版本号 */
+    skipUpdateVersion: '',
   },
 }
 
@@ -456,7 +469,12 @@ class ConfigStore {
 
   load() {
     try {
-      if (!fs.existsSync(this.file)) return
+      if (!fs.existsSync(this.file)) {
+        // 全新安装：这是第一次打开，该弹引导。
+        // 老用户升级上来配置文件是存在的，走不到这里，也就不会被打扰。
+        this.data.general.onboardingSeen = false
+        return
+      }
       const raw = fs.readFileSync(this.file)
       const text = safeStorage.isEncryptionAvailable()
         ? safeStorage.decryptString(raw)

@@ -593,6 +593,79 @@ function checkKeyless() {
   ok('回退提示按原因去重（冷却配 0 也不刷屏）', /ttsFallback\.reason !== reason/.test(mainSrc))
 }
 
+function checkOnboardingUpdateStyle() {
+  console.log('\n[25] 新手引导 / 检查更新 / M2 风格')
+  const root = path.join(__dirname, '..')
+  const read = (...p) => fs.readFileSync(path.join(root, ...p), 'utf8')
+  const storeSrc = read('electron', 'store.cjs')
+  const mainSrc = read('electron', 'main.cjs')
+  const updateSrc = read('electron', 'update.cjs')
+  const appSrc = read('src', 'App.tsx')
+  const aboutSrc = read('src', 'pages', 'AboutPage.tsx')
+  const appearanceSrc = read('src', 'pages', 'AppearancePage.tsx')
+  const onbSrc = read('src', 'components', 'Onboarding.tsx')
+  const themeSrc = read('src', 'lib', 'theme.ts')
+  const floatSrc = read('src', 'float', 'FloatShell.tsx')
+  const cssSrc = read('src', 'styles.css')
+  const overlaySrc = read('overlay', 'index.html')
+  const U = require('../electron/update.cjs')
+
+  // ---- 新手引导 ----
+  ok('引导默认对老用户关闭（升级不打扰）', /onboardingSeen: true/.test(storeSrc))
+  ok(
+    '只有全新安装才翻成 false',
+    /if \(!fs\.existsSync\(this\.file\)\) \{[\s\S]{0,220}onboardingSeen = false/.test(storeSrc),
+  )
+  ok('只有明确 false 才弹（undefined 不打扰）', /onboardingSeen === false\) setOnboarding\(true\)/.test(appSrc))
+  ok('向导覆盖五步', /'welcome'[\s\S]{0,600}'done'/.test(onbSrc))
+  ok('单步可以跳过', onbSrc.includes('跳过这一步'))
+  ok('可以全部跳过', onbSrc.includes('全部跳过') && onbSrc.includes('finish'))
+  ok('走完/跳过都记成已看过', /general: \{ onboardingSeen: true \}/.test(onbSrc))
+  ok('引导里能去申请 Key', onbSrc.includes('consoleUrl') && onbSrc.includes('去申请'))
+  ok('引导里能直接切 Edge 免费嗓子', /provider: 'edge'/.test(onbSrc))
+  ok('关于页能重开引导', /onboardingSeen: false/.test(aboutSrc))
+
+  // ---- 检查更新 ----
+  ok('版本比较：1.10.0 比 1.9.9 新', U.compareVersion('1.10.0', '1.9.9') === 1)
+  ok('版本比较：v 前缀不影响', U.compareVersion('v1.3.3', '1.3.3') === 0)
+  ok('版本比较：旧版返回 -1', U.compareVersion('1.3.2', '1.3.3') === -1)
+  ok('预发布后缀不参与比较', U.compareVersion('1.4.0-beta.1', '1.3.9') === 1)
+  ok(
+    '下载地址优先用挂的 exe',
+    U.pickDownloadUrl({ assets: [{ name: 'x.exe', browser_download_url: 'E' }], html_url: 'H' }) === 'E',
+  )
+  ok('没有资产就退回 Release 页', U.pickDownloadUrl({ assets: [], html_url: 'H' }) === 'H')
+  ok(
+    '查的是本仓库 latest',
+    updateSrc.includes("REPO = 'CHIGUAPOP/ChatsParty'") && updateSrc.includes('/releases/latest'),
+  )
+  ok('带 User-Agent（GitHub 强制要求）', /'User-Agent': `ChatsParty\/\$\{current\}`/.test(updateSrc))
+  ok('网络失败不抛异常，返回 ok:false', /reason: 'network'/.test(updateSrc))
+  ok('版本号读 package.json 而不是 app.getVersion()', /checkLatest\(\{ current: pkg\.version \}\)/.test(mainSrc))
+  ok('未打包（源码运行）不自动检查', /if \(!app\.isPackaged\) return \{ ok: false, skipped: true, reason: 'dev'/.test(mainSrc))
+  ok('一个进程只查一次（窗口重载不重查）', /autoUpdateChecked = true/.test(mainSrc))
+  ok('关掉开关就不查', /autoCheckUpdate === false/.test(mainSrc))
+  ok('启动后查一次，不做轮询', /setTimeout\(async \(\) => \{[\s\S]{0,500}reason: 'auto'/.test(appSrc) && !appSrc.includes('setInterval(async'))
+  ok('关于页有手动检查', aboutSrc.includes('检查更新') && aboutSrc.includes("reason: 'manual'"))
+  ok('关于页有自动检查开关', aboutSrc.includes('autoCheckUpdate'))
+  ok('关于页说明源码运行不自动查', aboutSrc.includes('devMode') && aboutSrc.includes('从源码运行的'))
+
+  // ---- M2 风格 ----
+  ok('默认风格是 M3', /style: 'm3'/.test(storeSrc))
+  ok('M2 有独立的配色收敛', themeSrc.includes('toM2Scheme'))
+  ok('风格落到 data-style', /dataset\.style = style === 'm2'/.test(themeSrc))
+  ok('主窗口一次刷完配色/动效/风格', /applyThemeConfig\(c\.theme\)/.test(appSrc))
+  ok('浮窗也刷主题（以前是写死的深紫）', floatSrc.includes('applyThemeConfig(config.theme)'))
+  ok('外观页能切 M3 / M2', appearanceSrc.includes("value: 'm2'"))
+  ok('CSS 有 M2 覆盖块', cssSrc.includes("html[data-style='m2']"))
+  ok('M2 把中等圆角收到 4px', /html\[data-style='m2'\] \{[\s\S]{0,500}--md-sys-shape-corner-medium: 4px/.test(cssSrc))
+  ok('圆形元素没被压成方块', !/--md-sys-shape-corner-full: 4px/.test(cssSrc))
+  ok('叠加层有圆角系数', overlaySrc.includes('var(--cp-r, 1)'))
+  ok('叠加层接收风格', overlaySrc.includes("cfg.themeStyle === 'm2'"))
+  ok('叠加层能实时切换风格', /patch\.theme[\s\S]{0,160}broadcast\('config'/.test(mainSrc))
+  ok('叠加层配置带上风格', /themeStyle: c\.theme\?\.style === 'm2'/.test(mainSrc))
+}
+
 function checkEmoticons() {
   return (async () => {
     console.log('\n[24c] 表情图册')
@@ -1131,6 +1204,8 @@ async function testVoices() {
   checkCatchUp()
 
   checkKeyless()
+
+  checkOnboardingUpdateStyle()
 
   console.log('\n[21] 密钥形态诊断')
   testKeyShape()

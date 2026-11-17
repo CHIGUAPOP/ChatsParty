@@ -3897,3 +3897,541 @@ body {
   flex: 0 0 auto;
   white-space: nowrap;
 }
+
+/* ------------------------------ 新手引导浮层 ------------------------------ */
+/*
+ * 首次启动时的浮层。固定在窗口中央、压在所有内容之上；
+ * 用 surface-container-high 而不是纯黑，是为了和主界面属于同一套材质。
+ */
+.onb-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: color-mix(in srgb, var(--md-sys-color-scrim) 58%, transparent);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  animation: onb-fade var(--md-sys-motion-duration-medium) var(--md-sys-motion-easing-short);
+}
+
+@keyframes onb-fade {
+  from {
+    opacity: 0;
+  }
+}
+
+.onb {
+  width: min(660px, 100%);
+  max-height: min(86vh, 760px);
+  display: flex;
+  flex-direction: column;
+  background: var(--md-sys-color-surface-container-high);
+  color: var(--md-sys-color-on-surface);
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: var(--md-sys-shape-corner-extra-large);
+  box-shadow: 0 24px 64px rgb(0 0 0 / 45%);
+  overflow: hidden;
+  animation: onb-rise var(--md-sys-motion-duration-medium) var(--md-sys-motion-easing-medium);
+}
+
+@keyframes onb-rise {
+  from {
+    opacity: 0;
+    transform: translateY(calc(12px + var(--md-sys-motion-enter)));
+  }
+}
+
+.onb__head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 18px 20px 12px;
+}
+
+.onb__brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-weight: 600;
+  font-size: 15px;
+  letter-spacing: 0.1px;
+}
+
+.onb__brand img {
+  border-radius: var(--md-sys-shape-corner-small);
+}
+
+.onb__close {
+  margin-left: auto;
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: var(--md-sys-shape-corner-full);
+  background: transparent;
+  color: var(--md-sys-color-on-surface-variant);
+  cursor: pointer;
+  transition: background var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-short);
+}
+
+.onb__close:hover {
+  background: color-mix(in srgb, var(--md-sys-color-on-surface) 10%, transparent);
+}
+
+.onb__steps {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 20px 14px;
+}
+
+.onb__dot {
+  width: 7px;
+  height: 7px;
+  border-radius: var(--md-sys-shape-corner-full);
+  background: var(--md-sys-color-outline-variant);
+  transition: all var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-short);
+}
+
+.onb__dot.is-done {
+  background: var(--md-sys-color-primary);
+  opacity: 0.55;
+}
+
+.onb__dot.is-active {
+  width: 22px;
+  background: var(--md-sys-color-primary);
+  opacity: 1;
+}
+
+.onb__step-label {
+  margin-left: 8px;
+  font-size: 12px;
+  color: var(--md-sys-color-on-surface-variant);
+}
+
+.onb__body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  padding: 4px 24px 8px;
+}
+
+.onb__title {
+  margin: 6px 0 8px;
+  font-size: 22px;
+  line-height: 1.3;
+  font-weight: 600;
+}
+
+.onb__desc {
+  margin: 0 0 16px;
+  font-size: 13.5px;
+  line-height: 1.75;
+  color: var(--md-sys-color-on-surface-variant);
+}
+
+.onb__list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.onb__list li {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--md-sys-color-on-surface-variant);
+}
+
+.onb__list svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+  color: var(--md-sys-color-primary);
+}
+
+.onb__list b {
+  color: var(--md-sys-color-on-surface);
+  font-weight: 600;
+}
+
+.onb__ok {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 16px;
+  border-radius: var(--md-sys-shape-corner-medium);
+  background: var(--md-sys-color-primary-container);
+  color: var(--md-sys-color-on-primary-container);
+  font-size: 14px;
+}
+
+.onb__qr {
+  display: flex;
+  gap: 18px;
+  align-items: flex-start;
+}
+
+.onb__qr-side {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+.onb__qr-state {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.onb__choices {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.onb__choice {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+  padding: 14px 16px;
+  text-align: left;
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: var(--md-sys-shape-corner-medium);
+  background: var(--md-sys-color-surface-container);
+  color: var(--md-sys-color-on-surface);
+  cursor: pointer;
+  transition: border-color var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-short),
+    background var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-short);
+}
+
+.onb__choice:hover:not(:disabled) {
+  border-color: var(--md-sys-color-primary);
+  background: color-mix(in srgb, var(--md-sys-color-primary) 8%, var(--md-sys-color-surface-container));
+}
+
+.onb__choice:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.onb__choice--static {
+  cursor: default;
+}
+
+.onb__choice-head {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.onb__choice-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.onb__tag {
+  padding: 2px 8px;
+  border-radius: var(--md-sys-shape-corner-full);
+  background: var(--md-sys-color-secondary-container);
+  color: var(--md-sys-color-on-secondary-container);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.onb__choice-desc {
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--md-sys-color-on-surface-variant);
+}
+
+.onb__key {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--md-sys-color-outline-variant);
+}
+
+.onb__key-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.onb__hint {
+  margin: 16px 0 4px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--md-sys-color-on-surface-variant);
+}
+
+.onb__foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 14px 20px 18px;
+  border-top: 1px solid var(--md-sys-color-outline-variant);
+  background: var(--md-sys-color-surface-container);
+}
+
+.onb__skip-all {
+  border: 0;
+  background: none;
+  padding: 6px 4px;
+  color: var(--md-sys-color-on-surface-variant);
+  font-size: 12.5px;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  text-decoration-color: transparent;
+  transition: color var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-short);
+}
+
+.onb__skip-all:hover {
+  color: var(--md-sys-color-on-surface);
+  text-decoration-color: currentColor;
+}
+
+/* 顶栏的「有新版本」胶囊 */
+.update-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  border: 0;
+  border-radius: var(--md-sys-shape-corner-full);
+  background: var(--md-sys-color-primary-container);
+  color: var(--md-sys-color-on-primary-container);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: filter var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-short);
+}
+
+.update-chip:hover {
+  filter: brightness(1.12);
+}
+
+/* 关于页里展示 Release 说明的摘要块 */
+.about-notes {
+  margin: 12px 0 0;
+  padding: 12px 14px;
+  max-height: 220px;
+  overflow: auto;
+  scrollbar-gutter: stable;
+  border-radius: var(--md-sys-shape-corner-medium);
+  background: var(--md-sys-color-surface-container);
+  color: var(--md-sys-color-on-surface-variant);
+  font-family: inherit;
+  font-size: 12.5px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* ============================ Material 2 风格 ============================ */
+/*
+ * 只切 <html data-style="m2">。浮窗与主窗口共用这份样式表和同一批令牌，
+ * 所以主窗口一改，四个浮窗跟着改。
+ *
+ * 和 M3 的区别是三条，不是「把圆角调小」：
+ *   1. 形状：圆角收成 2/4/8dp，按钮是方角实心块（M3 是胶囊）
+ *   2. 层次：靠阴影（elevation）堆，不靠表面染色 —— 颜色映射在 theme.ts 的 toM2Scheme
+ *   3. 强调：彩色只留给主按钮和选中态，容器一律中性
+ */
+html[data-style='m2'] {
+  --md-sys-shape-corner-none: 0px;
+  --md-sys-shape-corner-extra-small: 2px;
+  --md-sys-shape-corner-small: 2px;
+  --md-sys-shape-corner-medium: 4px;
+  --md-sys-shape-corner-large: 4px;
+  --md-sys-shape-corner-extra-large: 8px;
+  /* full 不动：头像、开关滑块、圆点本来该是圆的 */
+
+  /* M2 的动效是「快进快出」，没有弹簧回弹与拉伸 */
+  --md-sys-motion-lift: 0px;
+  --md-sys-motion-press: 0.97;
+  --md-sys-motion-enter: 0px;
+  --md-sys-motion-stretch: 0px;
+  --md-sys-motion-easing-short: cubic-bezier(0.4, 0, 0.2, 1);
+  --md-sys-motion-easing-medium: cubic-bezier(0.4, 0, 0.2, 1);
+
+  /* M2 的两级阴影：1dp 给卡片和静态面，2dp 给可点的按钮 */
+  --cp-elev-1: 0 1px 3px rgb(0 0 0 / 12%), 0 1px 2px rgb(0 0 0 / 24%);
+  --cp-elev-2: 0 3px 6px rgb(0 0 0 / 16%), 0 3px 6px rgb(0 0 0 / 23%);
+  --cp-elev-4: 0 10px 20px rgb(0 0 0 / 19%), 0 6px 6px rgb(0 0 0 / 23%);
+}
+
+/* ---- 按钮：方角 + 2dp 阴影 + 更紧的内边距 ---- */
+html[data-style='m2'] .btn {
+  border-radius: 4px;
+  padding: 0 16px;
+  height: 36px;
+  letter-spacing: 0.3px;
+  box-shadow: var(--cp-elev-1);
+}
+
+html[data-style='m2'] .btn:hover:not(:disabled) {
+  box-shadow: var(--cp-elev-2);
+}
+
+html[data-style='m2'] .btn:active:not(:disabled) {
+  box-shadow: var(--cp-elev-1);
+}
+
+/* 文字按钮和描边按钮在 M2 里是平的，没有抬升 */
+html[data-style='m2'] .btn--text,
+html[data-style='m2'] .btn--outlined {
+  box-shadow: none;
+}
+
+/* ---- 卡片：一种表面色 + 1dp 阴影，去掉 M3 的描边 ---- */
+html[data-style='m2'] .card {
+  background: var(--md-sys-color-surface-container);
+  border: 0;
+  border-radius: 4px;
+  box-shadow: var(--cp-elev-1);
+}
+
+html[data-style='m2'] .card--filled,
+html[data-style='m2'] .card--outlined {
+  background: var(--md-sys-color-surface-container);
+  border: 0;
+  box-shadow: var(--cp-elev-1);
+}
+
+/* ---- 导航：M2 的选中态是「方块底 + 图标变色」，没有胶囊指示器 ---- */
+html[data-style='m2'] .nav-rail {
+  border-right: 1px solid var(--md-sys-color-outline-variant);
+  box-shadow: none;
+}
+
+html[data-style='m2'] .nav-rail__item {
+  border-radius: 4px;
+}
+
+html[data-style='m2'] .nav-rail__item.is-active {
+  background: color-mix(in srgb, var(--md-sys-color-primary) 14%, transparent);
+  color: var(--md-sys-color-primary);
+}
+
+/* M3 的胶囊指示器在 M2 里不存在 */
+html[data-style='m2'] .nav-rail__indicator {
+  display: none;
+}
+
+/* ---- 图标：M2 的 Material Icons 是 24dp 方框、实心填充，视觉上比 M3 略小略重 ---- */
+html[data-style='m2'] .nav-rail__icon {
+  width: 22px;
+  height: 22px;
+}
+
+html[data-style='m2'] .nav-rail__item.is-active .nav-rail__icon {
+  transform: none;
+}
+
+/* 圆形图标按钮保持圆形（M2 的 IconButton 也是圆的），但底色改成 hover 才出现 */
+html[data-style='m2'] .float-tbtn {
+  border-radius: 50%;
+  box-shadow: none;
+}
+
+html[data-style='m2'] .float-tbtn:hover {
+  box-shadow: var(--cp-elev-1);
+}
+
+/* ---- 胶囊类组件：M2 里没有胶囊，一律方角 ---- */
+html[data-style='m2'] .status-pill,
+html[data-style='m2'] .speech-chip,
+html[data-style='m2'] .update-chip,
+html[data-style='m2'] .onb__tag,
+html[data-style='m2'] .chip {
+  border-radius: 4px;
+}
+
+html[data-style='m2'] .speech-chip__btn {
+  border-radius: 2px;
+}
+
+/* ---- 输入框：M2 的 filled 输入框是「顶部圆角 + 底部横线」 ---- */
+html[data-style='m2'] .field__input,
+html[data-style='m2'] .field__select,
+html[data-style='m2'] .field__textarea {
+  border-radius: 4px 4px 0 0;
+}
+
+/* ---- 浮窗：M2 的浮层用 4~8dp 阴影把「浮起来」说清楚 ---- */
+html[data-style='m2'] .float-shell {
+  background: var(--md-sys-color-surface-container);
+  border-radius: 4px;
+  box-shadow: 0 8px 24px rgb(0 0 0 / 32%), 0 2px 6px rgb(0 0 0 / 24%);
+}
+
+html[data-style='m2'] .float-pop {
+  border-radius: 4px;
+  box-shadow: var(--cp-elev-4);
+}
+
+html[data-style='m2'] .float-content {
+  /* M2 的列表没有 M3 那种圆角容器感，标题下加一条分隔线更像 M2 的 Subheader */
+  padding: 0;
+}
+
+/* ---- 引导浮层与弹窗：M2 对话框是 8dp 圆角 + 24dp 阴影 ---- */
+html[data-style='m2'] .onb {
+  border-radius: 8px;
+  border: 0;
+  box-shadow: 0 24px 48px rgb(0 0 0 / 38%), 0 9px 12px rgb(0 0 0 / 22%);
+}
+
+html[data-style='m2'] .onb__tag {
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--md-sys-color-primary) 14%, transparent);
+  color: var(--md-sys-color-primary);
+}
+
+/* ---- 其他小面 ---- */
+html[data-style='m2'] .tip,
+html[data-style='m2'] .qr-box,
+html[data-style='m2'] .swatch {
+  border-radius: 4px;
+}
+
+html[data-style='m2'] .swatch {
+  border-radius: 2px;
+}
+
+html[data-style='m2'] .snackbar {
+  border-radius: 4px;
+  box-shadow: var(--cp-elev-4);
+}
+
+/* 开关：M2 的轨道是圆角矩形，滑块是圆的（滑块那个 full 在上面的令牌里没动） */
+html[data-style='m2'] .switch {
+  border-radius: 7px;
+}

@@ -1,7 +1,7 @@
 import React from 'react'
 import { AppConfig } from '../lib/api'
 import { PRESET_SEEDS } from '../lib/theme'
-import { Button, Card, Row, SectionTitle, Switch } from '../components/ui'
+import { Button, Card, Row, SectionTitle, Select, Switch } from '../components/ui'
 
 interface Props {
   config: AppConfig
@@ -87,6 +87,27 @@ export default function AppearancePage({ config, patch, notify }: Props) {
       </Card>
 
       <SectionTitle>显示</SectionTitle>
+      <Card
+        title="界面风格"
+        desc="两套完整的视觉体系，不只是换个圆角：配色怎么用、阴影多重、按钮什么形状都不一样。浮窗和 OBS 叠加层会一起变。"
+      >
+        <Select
+          label="风格"
+          value={config.theme?.style === 'm2' ? 'm2' : 'm3'}
+          onChange={(v) => patch({ theme: { style: v } })}
+          options={[
+            { value: 'm3', label: 'Material 3 · 大圆角、分层表面' },
+            { value: 'm2', label: 'Material 2 · 方角、重阴影' },
+          ]}
+        />
+        <div className="divider" />
+        <div className="row__hint">
+          {config.theme?.style === 'm2'
+            ? '当前：Material 2 —— 圆角收成 4px，卡片靠阴影分层，按钮是方角实心块。'
+            : '当前：Material 3 —— 圆角分档、表面按色调分层，强调色用容器染色表达。'}
+        </div>
+      </Card>
+
       <Card title="深浅色">
         <Row label="深色模式">
           <Switch value={mode === 'dark'} onChange={(v) => patch({ theme: { mode: v ? 'dark' : 'light' } })} />

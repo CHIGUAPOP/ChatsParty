@@ -136,6 +136,7 @@ const api = {
     exportLog: () => ipcRenderer.invoke('app:exportLog'),
     diagnostics: () => ipcRenderer.invoke('app:diagnostics'),
     info: () => ipcRenderer.invoke('app:info'),
+    updateCheck: (opts) => ipcRenderer.invoke('app:updateCheck', opts),
     openExternal: (url) => ipcRenderer.invoke('app:openExternal', url),
   },
 }

@@ -69,7 +69,7 @@
         gap: calc(10 * var(--cp-u));
         max-width: calc(460 * var(--cp-u));
         padding: calc(10 * var(--cp-u)) calc(14 * var(--cp-u));
-        border-radius: calc(14 * var(--cp-u));
+        border-radius: calc(14 * var(--cp-u) * var(--cp-r, 1));
         background: rgba(18, 18, 22, 0.62);
         backdrop-filter: blur(calc(6 * var(--cp-u)));
         -webkit-backdrop-filter: blur(calc(6 * var(--cp-u)));
@@ -151,7 +151,7 @@
       .cp-medal {
         font-size: calc(11 * var(--cp-fs));
         padding: calc(1 * var(--cp-u)) calc(6 * var(--cp-u));
-        border-radius: calc(6 * var(--cp-u));
+        border-radius: calc(6 * var(--cp-u) * var(--cp-r, 1));
         background: rgba(255, 255, 255, 0.14);
         color: #fff;
       }
@@ -159,7 +159,7 @@
       .cp-price {
         font-size: calc(11 * var(--cp-fs));
         padding: calc(1 * var(--cp-u)) calc(6 * var(--cp-u));
-        border-radius: calc(6 * var(--cp-u));
+        border-radius: calc(6 * var(--cp-u) * var(--cp-r, 1));
         background: rgba(255, 255, 255, 0.2);
         color: #fff;
       }
@@ -254,7 +254,7 @@
         top: calc(10 * var(--cp-u));
         z-index: 99;
         padding: calc(5 * var(--cp-u)) calc(10 * var(--cp-u));
-        border-radius: calc(999 * var(--cp-u));
+        border-radius: calc(999 * var(--cp-u) * var(--cp-r, 1));
         font-family: var(--cp-font);
         font-size: calc(13 * var(--cp-fs));
         color: #f4f2f6;
@@ -412,7 +412,7 @@
       .cp-mcard,
       .cp-mqueue {
         padding: calc(10 * var(--cp-u)) calc(14 * var(--cp-u));
-        border-radius: calc(14 * var(--cp-u));
+        border-radius: calc(14 * var(--cp-u) * var(--cp-r, 1));
         background: rgba(18, 18, 22, 0.62);
         backdrop-filter: blur(calc(6 * var(--cp-u)));
         -webkit-backdrop-filter: blur(calc(6 * var(--cp-u)));
@@ -440,7 +440,7 @@
         aspect-ratio: 16 / 9;
         flex: 0 0 auto;
         overflow: hidden;
-        border-radius: calc(10 * var(--cp-u));
+        border-radius: calc(10 * var(--cp-u) * var(--cp-r, 1));
         background: #000;
       }
 
@@ -468,7 +468,7 @@
         width: calc(48 * var(--cp-u));
         height: calc(48 * var(--cp-u));
         flex: 0 0 calc(48 * var(--cp-u));
-        border-radius: calc(10 * var(--cp-u));
+        border-radius: calc(10 * var(--cp-u) * var(--cp-r, 1));
         overflow: hidden;
         background: rgba(255, 255, 255, 0.12);
         display: grid;
@@ -681,7 +681,7 @@
 
       .cp-pick__card {
         padding: calc(10 * var(--cp-u)) calc(14 * var(--cp-u)) calc(12 * var(--cp-u));
-        border-radius: calc(14 * var(--cp-u));
+        border-radius: calc(14 * var(--cp-u) * var(--cp-r, 1));
         background: rgba(18, 18, 22, 0.62);
         backdrop-filter: blur(calc(6 * var(--cp-u)));
         -webkit-backdrop-filter: blur(calc(6 * var(--cp-u)));
@@ -717,7 +717,7 @@
         align-items: baseline;
         gap: calc(8 * var(--cp-u));
         padding: calc(3 * var(--cp-u)) calc(6 * var(--cp-u));
-        border-radius: calc(8 * var(--cp-u));
+        border-radius: calc(8 * var(--cp-u) * var(--cp-r, 1));
         font-size: calc(13 * var(--cp-fs));
         line-height: 1.45;
         min-width: 0;
@@ -750,7 +750,7 @@
       .cp-pick__tag {
         flex: 0 0 auto;
         padding: calc(1 * var(--cp-u)) calc(6 * var(--cp-u));
-        border-radius: calc(999 * var(--cp-u));
+        border-radius: calc(999 * var(--cp-u) * var(--cp-r, 1));
         font-size: calc(10 * var(--cp-fs));
         background: rgba(255, 255, 255, 0.14);
       }
@@ -802,7 +802,7 @@
       .cp-pick__bar {
         margin-top: calc(8 * var(--cp-u));
         height: calc(2 * var(--cp-u));
-        border-radius: calc(999 * var(--cp-u));
+        border-radius: calc(999 * var(--cp-u) * var(--cp-r, 1));
         background: rgba(255, 255, 255, 0.14);
         overflow: hidden;
       }
@@ -861,7 +861,7 @@
 
       .cp-viewers__card {
         padding: calc(10 * var(--cp-u)) calc(14 * var(--cp-u));
-        border-radius: calc(14 * var(--cp-u));
+        border-radius: calc(14 * var(--cp-u) * var(--cp-r, 1));
         background: rgba(18, 18, 22, 0.62);
         backdrop-filter: blur(calc(6 * var(--cp-u)));
         color: #f4f2f6;
@@ -927,7 +927,7 @@
       .cp-vrow__guard {
         flex: 0 0 auto;
         padding: 0 calc(5 * var(--cp-u));
-        border-radius: calc(4 * var(--cp-u));
+        border-radius: calc(4 * var(--cp-u) * var(--cp-r, 1));
         font-size: calc(11 * var(--cp-fs));
         background: var(--cp-accent);
         color: #1b1b1f;
@@ -1003,7 +1003,7 @@
         left: calc(24 * var(--cp-u));
         bottom: calc(24 * var(--cp-u));
         padding: calc(6 * var(--cp-u)) calc(12 * var(--cp-u));
-        border-radius: calc(999 * var(--cp-u));
+        border-radius: calc(999 * var(--cp-u) * var(--cp-r, 1));
         font-size: calc(13 * var(--cp-fs));
         font-family: var(--cp-font);
         background: rgba(18, 18, 22, 0.78);
@@ -1251,6 +1251,11 @@
         const root = document.documentElement
         root.style.setProperty('--cp-accent', cfg.accent)
         root.style.setProperty('--cp-font', cfg.fontFamily)
+        // 界面风格跟着主窗口走：M2 把圆角整体压到 0.32 倍（14u→4.5u、10u→3.2u），
+        // 而 999u 那种胶囊/圆形乘完仍然是圆的，不会被压成方块
+        const style = cfg.themeStyle === 'm2' ? 'm2' : 'm3'
+        root.style.setProperty('--cp-r', style === 'm2' ? '0.32' : '1')
+        app.setAttribute('data-style', style)
         // 界面整体缩放与字号缩放：前者乘所有尺寸，后者只再乘一次字号
         const ui = ratio(cfg.scale)
         uiScale = ui

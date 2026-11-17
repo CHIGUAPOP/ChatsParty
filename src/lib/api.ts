@@ -107,7 +107,14 @@ export interface AppConfig {
       holdSec?: number
     }
   }
-  theme: { seed: string; mode: 'light' | 'dark'; contrast: number; motion?: 'standard' | 'expressive' }
+  theme: {
+    seed: string
+    mode: 'light' | 'dark'
+    contrast: number
+    motion?: 'standard' | 'expressive'
+    /** 界面风格：m3（默认）/ m2。浮窗、叠加层都跟着走 */
+    style?: 'm3' | 'm2'
+  }
   overlay: {
     enabled: boolean
     userStopped?: boolean
@@ -261,7 +268,15 @@ export interface AppConfig {
   }
   window: { width: number; height: number }
   /** 关掉主界面时缩到系统托盘，后台继续收弹幕；真退出走托盘图标的右键菜单 */
-  general?: { closeToTray?: boolean }
+  general?: {
+    closeToTray?: boolean
+    /** 新手引导看过了没有。只有明确 false 才弹 —— 老配置里没这个键 = 不打扰 */
+    onboardingSeen?: boolean
+    /** 启动时查一次 GitHub Release */
+    autoCheckUpdate?: boolean
+    /** 点了「这个版本先不提醒」记住的版本号 */
+    skipUpdateVersion?: string
+  }
 }
 
 export interface MusicSong {
@@ -708,6 +723,8 @@ interface Bridge {
     exportLog: () => Promise<{ ok: boolean; path?: string }>
     diagnostics: () => Promise<Diagnostics>
     info: () => Promise<AppInfo>
+    /** reason='auto' 时主进程会跳过开发模式与已检查过的情形，永远不会打扰用户 */
+    updateCheck: (opts?: { reason?: 'auto' | 'manual' }) => Promise<UpdateCheckResult>
     openExternal: (url: string) => Promise<{ ok: boolean; message?: string }>
   }
   launchpad: {
@@ -795,6 +812,29 @@ export interface AppInfo {
   chrome: string
   node: string
   platform: string
+  /** false = 从源码跑的（未打包）。这种情况下不会自动检查更新 */
+  packaged?: boolean
+}
+
+/**
+ * 检查更新的结果。
+ * ok=false 时 reason 说明为什么没查成（连不上 / 限流 / 开发模式跳过），
+ * 只有手动点的时候才值得把这些告诉用户，自动检查一律静默。
+ */
+export interface UpdateCheckResult {
+  ok: boolean
+  current: string
+  latest?: string
+  hasUpdate?: boolean
+  /** 下载页：优先 Release 里挂的 exe，退回到 Release 页面 */
+  url?: string
+  /** Release 正文摘出来的开头 */
+  notes?: string
+  publishedAt?: string
+  /** 跳过自动检查时给的原因：dev / already / off */
+  skipped?: boolean
+  reason?: string
+  message?: string
 }
 
 /** TTS 合成缓存的统计与当前策略 */

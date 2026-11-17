@@ -34,6 +34,7 @@ const { Logger } = require('./log.cjs')
 const { OverlayServer, OVERLAY_PANELS } = require('./overlay.cjs')
 const { FloatWindows, FLOAT_PANELS } = require('./float.cjs')
 const { ConfigStore, DEFAULTS: STORE_DEFAULTS } = require('./store.cjs')
+const { checkLatest } = require('./update.cjs')
 const pkg = require('../package.json')
 
 // CP_PROD=1 可以在未打包时直接加载构建产物，方便验证生产路径
@@ -2779,6 +2780,13 @@ async function runSpeech(item) {
 
 /* ------------------------------- IPC ------------------------------- */
 
+/**
+ * 自动检查更新在每个进程里只跑一次。
+ * 窗口重载（开发时 F5）不该再撞一次 GitHub —— 未认证只有 60 次/小时的额度，
+ * 而且「只在打开的时候检查一次」本来就是这个意思。
+ */
+let autoUpdateChecked = false
+
 function registerIpc() {
   ipcMain.handle('config:get', () => store.get())
   // 表情图册：界面启动时先要一份（可能弹幕比图册先到），之后靠 emoticons:changed 更新
@@ -2793,8 +2801,22 @@ function registerIpc() {
       log?.info('[config] 密钥已清洗', secretNotes.join('；'))
       send('config:notice', { messages: secretNotes })
     }
-    // 叠加层设置改了要立刻推给已连接的 OBS 页面
-    if (patch && patch.overlay && overlay) overlay.broadcast('config', next.overlay)
+    // 叠加层设置改了要立刻推给已连接的 OBS 页面。
+    // 主题风格也算 —— 主窗口切到 M2 之后，OBS 里不能还挂着 M3 的圆角。
+    if (patch && (patch.overlay || patch.theme) && overlay) {
+      overlay.broadcast('config', { ...next.overlay, themeStyle: next.theme?.style === 'm2' ? 'm2' : 'm3' })
+    }
+    /**
+     * 外观类改动要回灌给所有窗口。
+     *
+     * 发起 patch 的那个窗口靠返回值自己更新了，但**别的窗口不会** —— 浮窗是独立
+     * 渲染进程，主窗口换主题色/切 M2/改关窗行为时它那边完全不知道，得等下次重开
+     * 才读到新值。这里补一发广播。
+     *
+     * 只广播这几类：文本输入框有自己的本地草稿（useDraftInput），
+     * 每敲一个字都回灌会让光标乱跳。
+     */
+    if (patch && (patch.theme || patch.overlay || patch.general)) send('config:changed', next)
     // 浮窗的开关 / 旋钮改了要当场落到窗口上（开着就是「拖滑块马上看得见」）
     if (patch && patch.float) {
       ensureFloats().syncAll()
@@ -3602,6 +3624,8 @@ function registerIpc() {
     chrome: process.versions.chrome || '',
     node: process.versions.node || '',
     platform: `${process.platform}-${process.arch}`,
+    /** 打包版还是从源码跑的。关于页据此说明「为什么没自动检查更新」 */
+    packaged: app.isPackaged,
   }))
 
   /**
@@ -3609,6 +3633,36 @@ function registerIpc() {
    * 渲染层不能直接开窗口，所以这里做一道协议白名单：只放行 http(s)，
    * 挡掉 file:// / 自定义协议，避免被喂一个本地路径或协议处理器链接。
    */
+  /**
+   * 检查更新。只在启动时自动查一次（渲染层配置就绪后调一次，reason='auto'），
+   * 关于页的手动按钮走 reason='manual'。
+   *
+   * 两个刻意的限制：
+   *   1. 版本号读 package.json，不用 app.getVersion() —— 未打包时后者是 Electron
+   *      自己的版本（33.4.11），拿它去比会永远认为「线上是新的」（见上面 app:info 的注释）。
+   *   2. 未打包（从源码跑）不自动查。开发时 package.json 的版本通常低于线上最新
+   *      Release，每次启动都弹「有新版本」纯属噪音；手动点还是照查。
+   */
+  ipcMain.handle('app:updateCheck', async (_e, payload) => {
+    const auto = payload?.reason === 'auto'
+    if (auto) {
+      if (autoUpdateChecked) return { ok: false, skipped: true, reason: 'already', current: pkg.version }
+      autoUpdateChecked = true
+      if (!app.isPackaged) return { ok: false, skipped: true, reason: 'dev', current: pkg.version }
+      if (store.get().general?.autoCheckUpdate === false) {
+        return { ok: false, skipped: true, reason: 'off', current: pkg.version }
+      }
+    }
+    const r = await checkLatest({ current: pkg.version })
+    if (!r.ok) {
+      // 连不上就放弃：不重试、不弹窗。只在日志里留一行，方便排查是不是网络问题
+      log?.info('[update] 检查更新没成', r.reason, r.message || '')
+    } else if (r.hasUpdate) {
+      log?.info('[update] 发现新版本', r.latest, '当前', r.current)
+    }
+    return r
+  })
+
   ipcMain.handle('app:openExternal', async (_e, url) => {
     let u
     try {
@@ -3695,7 +3749,11 @@ function sendOverlayStatus(error) {
 async function ensureOverlay(port) {
   if (!overlay) {
     overlay = new OverlayServer(port)
-    overlay.configProvider = () => store.get().overlay
+    overlay.configProvider = () => {
+      const c = store.get()
+      // 叠加层也得跟着界面风格走：主窗口切成 M2，OBS 里还是 M3 就太割裂了
+      return { ...c.overlay, themeStyle: c.theme?.style === 'm2' ? 'm2' : 'm3' }
+    }
     overlay.faceProvider = () => (faces ? [...faces.cache].map(([src, data]) => ({ src, data })) : [])
     overlay.musicProvider = () => musicSnapshot()
     // 叠加层 <video> 播视频走本服务的流代理（CDN 防盗链），这里供真地址。
